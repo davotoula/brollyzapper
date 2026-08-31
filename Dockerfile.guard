@@ -30,3 +30,10 @@ FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987
 COPY --from=build /out/brollyguard /brollyguard
 USER nonroot:nonroot
 ENTRYPOINT ["/brollyguard"]
+
+# GHCR reads this at push time and connects the package to the named repository
+# — the package page's banner, its listing under the repo, and future permission
+# inheritance all follow it. Without it the connection is whatever was set last
+# by hand, which after the 2026-08-31 rename pointed at the private dev repo.
+LABEL org.opencontainers.image.source="https://github.com/davotoula/brollyzapper"
+LABEL org.opencontainers.image.licenses="MIT"
