@@ -1,0 +1,17 @@
+version: v2
+managed:
+  enabled: true
+  override:
+    # The generated stubs are ours, in our module — not github.com/lightningnetwork/lnd.
+    # The prefix ends in /lnrpc because the buf module is rooted at proto/lnrpc
+    # (see buf.yaml): lightning.proto sits at that root and keeps package lnrpc,
+    # and routerrpc/router.proto lands beside it as package routerrpc.
+    - file_option: go_package_prefix
+      value: github.com/davotoula/brollyzapper/internal/lnd/lnrpc
+plugins:
+  - local: protoc-gen-go
+    out: internal/lnd/lnrpc
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: internal/lnd/lnrpc
+    opt: paths=source_relative

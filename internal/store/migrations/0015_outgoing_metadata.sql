@@ -1,0 +1,51 @@
+-- `doy.2`, reshaped by `y09` and by the client-side review that followed it: an
+-- outgoing payment can carry the NWC-06 metadata the CLIENT sent with it, and
+-- the invoice's own commitment to check that metadata against.
+--
+-- A NIP-57 invoice commits to a description_hash over the LNURL metadata and
+-- carries no plaintext memo, so there is nothing in the bolt11 to lift and every
+-- zap the operator sends is an unlabelled debit — in their own history and in
+-- their paired wallet's. The payee's identity exists only in the kind 9734 event
+-- the client signed and then discarded. NWC-06 is how it reaches us.
+--
+-- WHY THE WHOLE METADATA OBJECT AND NOT JUST ITS `nostr` MEMBER. The first shape
+-- stored the event alone, which is lossy: NWC-06's object also carries
+-- `recipient_data.identifier` — the payee's lightning address — and `comment`,
+-- and Amethyst's own row renderer uses the address as its fallback name when a
+-- kind 0 profile has not resolved. Keeping only `nostr` handed every row back
+-- nameless. Storing the object as sent makes the round trip lossless, and it
+-- means one column holds one thing: what the client said about this payment.
+--
+-- WHY NOT `zap_request`, WHICH IS RIGHT THERE. Reusing it needs no migration and
+-- would work through `zapMetadata` and `fitHistory` unchanged. It would also
+-- print "receipt abandoned" on every zap the operator sent, on their own history
+-- page: `Txn.IsZap` is DERIVED as `zap_request != ''` (invoices.go), and the
+-- admin page's receipt switch (api/pages_wallet.go) falls through to
+-- ReceiptAbandoned for a row that is IsZap with no receipt id and nothing
+-- pending. That branch's own comment calls it "the case that reads as theft".
+--
+-- Narrowing IsZap to `kind = 'invoice_in' AND zap_request != ''` fixes those two
+-- call sites and was rejected: the trap is a CLASS, not a call site. IsZap is
+-- derived rather than selected precisely so nothing can disagree about it, and
+-- changing what the column MEANS hands the ambiguity to every consumer that does
+-- not exist yet.
+--
+-- AND THE TWO ARE NOT THE SAME FACT. `zap_request` is documented as raw JSON
+-- exactly as received BY THIS NODE and verified by it. This is a paired client's
+-- assertion about a payment we made on its say-so — bound, since `y09`, but
+-- bound only in its `nostr` member. Two columns make a consumer name which one
+-- it wants.
+--
+-- out_description_hash IS THE INVOICE'S COMMITMENT, and it is stored rather than
+-- recomputed for one reason: a hash we derive from the blob we are handing over
+-- proves nothing, because it agrees with that blob by construction. This one came
+-- off the paid invoice, so a client can hash our `metadata.nostr`, compare, and
+-- check our attribution instead of trusting it — which matters because the same
+-- history is served to every pairing.
+--
+-- ADD COLUMN, no rebuild: `txns` is referenced by `balance_entries` and
+-- rebuilding it is what BrollyZap-dsi cost. NULL rather than NOT NULL DEFAULT ''
+-- so that "no client sent one" and "a client sent an empty one" stay distinct in
+-- the table, exactly as `zap_request` has it; the projection COALESCEs.
+ALTER TABLE txns ADD COLUMN out_metadata TEXT;
+ALTER TABLE txns ADD COLUMN out_description_hash TEXT;

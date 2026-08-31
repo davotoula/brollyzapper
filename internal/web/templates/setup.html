@@ -1,0 +1,28 @@
+<h1>Setup</h1>
+
+{{if not .Setup.GeneratedPassword.IsZero}}
+<section class="explain">
+  <h2>Your admin password</h2>
+  <p>
+    BrollyZapper generated a password for you because none was supplied. <strong>It is
+    shown here once.</strong> Save it now — it is not written to the logs.
+  </p>
+  <p class="password">{{.Setup.GeneratedPassword.Reveal}}</p>
+</section>
+{{end}}
+
+{{if .Setup.PasswordManaged}}
+<p>The admin password is managed by Umbrel. Change it in the Umbrel dashboard, not here.</p>
+{{end}}
+
+<h2>Lightning address</h2>
+{{if .Setup.AddressConfigured}}
+<p>Your lightning address is <strong>{{.Setup.LightningAddress}}</strong>.</p>
+{{else}}
+<p>
+  <strong>Lightning address not configured.</strong> A public domain is optional —
+  BrollyZapper runs without one, and Nostr Wallet Connect works with no public endpoint at
+  all. Add a domain under <a href="/settings">Settings</a> when you want to receive zaps to
+  a lightning address.
+</p>
+{{end}}

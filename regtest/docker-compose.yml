@@ -1,0 +1,303 @@
+# The off-Umbrel deployment, exercised (spec §19).
+#
+# Every BrollyZapper setting below is the generic one the app has always taken:
+# LND_ADDRESS, LND_CERT_FILE, LND_ADMIN_MACAROON, CREDENTIALS_DIR, DATA_DIR,
+# SERVER_IP, NETWORK_CIDR, TRUSTED_PROXIES, LISTEN_ADDR, ADMIN_PASSWORD,
+# SESSION_SECRET, LOG_LEVEL. No APP_, no UMBREL_, no ${APP_LIGHTNING_NODE_DATA_DIR}.
+# lint_test.go asserts that mechanically, because a promise a test does not hold
+# is a sentence in a spec.
+
+name: brollyregtest
+
+# To run the working tree instead of the pinned releases:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# See docker-compose.build.yml for why that is sometimes necessary.
+
+x-lnd-common: &lnd-common
+  image: lightninglabs/lnd:v0.21.1-beta@sha256:4af8f9bbf98c8b86b0e54b065d6ea45d1387256a43fa9270c11ef849511abae0
+  # v0.21.1-beta is the version the reference Umbrel box runs. Matching it is
+  # the point: d46.22 and d24.7 answer questions about the box, and a different
+  # LND would make the answers not transfer.
+  depends_on:
+    bitcoind:
+      condition: service_healthy
+  restart: on-failure
+
+services:
+  bitcoind:
+    image: lightninglabs/bitcoin-core:27@sha256:b75ff3529bd411252463c7be2e0964ad736568d175cfe784fa8a0a4556524ad2
+    command:
+      - bitcoind
+      - -regtest
+      - -server
+      - -txindex
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -rpcuser=regtest
+      - -rpcpassword=regtest
+      - -zmqpubrawblock=tcp://0.0.0.0:28332
+      - -zmqpubrawtx=tcp://0.0.0.0:28333
+      - -fallbackfee=0.0002
+      - -deprecatedrpc=create_bdb
+    volumes:
+      - ./data/bitcoind:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=regtest", "-rpcpassword=regtest", "getblockchaininfo"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+    networks: [brolly]
+
+  # The node BrollyZapper is attached to — the one that receives.
+  lnd:
+    <<: *lnd-common
+    container_name: brollyregtest-lnd
+    command:
+      - lnd
+      - --noseedbackup                 # regtest: wallet is created AND unlocked on
+                                       # first start, which is what writes admin.macaroon
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=regtest
+      - --bitcoind.rpcpass=regtest
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --rpclisten=0.0.0.0:10009
+      - --listen=0.0.0.0:9735
+      - --tlsextradomain=lnd           # the guard dials lnd:10009; without this the
+                                       # cert has no such SAN and TLS fails in a way
+                                       # that reads exactly like a macaroon problem
+      - --rpcmiddleware.enable         # P4 (tna.1): the guard registers as an RPC
+                                       # middleware, and the spend macaroon carries
+                                       # `lnd-custom brollyguard`. LND defaults this
+                                       # to FALSE, and with it off it rejects that
+                                       # macaroon outright — so without this line
+                                       # spend.sh's positive control fails and the
+                                       # whole spend suite proves nothing. Umbrel
+                                       # sets it unconditionally in its own
+                                       # defaultConfig.js (§14), which is why the
+                                       # deployed app needs no operator action; this
+                                       # is regtest catching up with the box.
+                                       # NOT --rpcmiddleware.addmandatory: that
+                                       # blocks ALL RPC when the middleware is
+                                       # absent, which §14 forbids by name.
+      - --accept-keysend
+      - --protocol.wumbo-channels
+    volumes:
+      - ./data/lnd:/root/.lnd
+    healthcheck:
+      # getinfo succeeds only once the wallet is unlocked, which is also when
+      # admin.macaroon exists. That is the condition the guard actually needs.
+      test: ["CMD", "lncli", "--network=regtest", "getinfo"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+    networks: [brolly]
+
+  # The payer (criterion 3). A second node with a channel to `lnd`, so it holds
+  # the outbound liquidity needed to pay an invoice `lnd` issues.
+  lnd-payer:
+    <<: *lnd-common
+    container_name: brollyregtest-lnd-payer
+    command:
+      - lnd
+      - --noseedbackup
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind:18443
+      - --bitcoind.rpcuser=regtest
+      - --bitcoind.rpcpass=regtest
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --rpclisten=0.0.0.0:10009
+      - --listen=0.0.0.0:9735
+      - --tlsextradomain=lnd-payer
+      - --accept-keysend
+      - --protocol.wumbo-channels
+    volumes:
+      - ./data/lnd-payer:/root/.lnd
+    healthcheck:
+      test: ["CMD", "lncli", "--network=regtest", "getinfo"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+    networks: [brolly]
+
+  relay:
+    image: dockurr/strfry:1.1.2@sha256:e81d238db13507f6ef24c49d47cd0b0ea58ff207961f10581fa2a7c901054df4
+    # strfry, not nostr-rs-relay: the latter publishes amd64 only, and this stack
+    # has to run natively on an arm64 Mac.
+    #
+    # Pinned by digest like everything else here. `:latest` bought nothing and
+    # cost reproducibility: it moved from 1.1.0 to 1.1.1 on 21 Jul 2026 with no
+    # commit in this repo to point at.
+    volumes:
+      - ./strfry.conf:/etc/strfry.conf:ro
+      # The LMDB is a NAMED VOLUME, not a host bind, and this is load-bearing on
+      # macOS (BrollyZap-qnz). Same family as the credentials volume below.
+      #
+      # strfry's writer commits into LMDB and its reqMonitor threads read new
+      # events back through a long-lived mmap. Across a macOS bind mount
+      # (virtiofs) that mapping never observes the write: the relay accepts the
+      # REQ, answers EOSE, accepts the EVENT with OK true, stores it, and returns
+      # it to a FRESH query — while pushing NOTHING to the subscription that is
+      # already open. Every visible signal says healthy. nwc.sh died 20s into
+      # section 1 on a get_balance the app was never handed.
+      #
+      # Measured across six filter shapes and three strfry versions: 1.1.0, 1.1.1
+      # and 1.1.2 all deliver on a named volume and all fail on a bind mount, with
+      # NIP-42 auth on or off. The relay's own version is irrelevant — the storage
+      # is the whole variable.
+      #
+      # Nothing needs this DB on the host; `docker compose down -v` still clears
+      # it. regtest/stack_lint_test.go fails if it goes back to a bind mount.
+      - relay-db:/app/strfry-db
+    ports:
+      - "${RELAY_PORT:-7777}:7777"
+    networks: [brolly]
+
+  # A relay the operator has NOT configured, reachable under a DOTTED name.
+  #
+  # It exists for o34.7 criterion 9, which asserts that a publish to a
+  # sender-named relay closes its socket again (Wave 12's eviction). With only
+  # `relay` in the stack that criterion cannot fail: a zap request may not name
+  # a single-label host — internal/lnurl's isLocalHost refuses every compose
+  # service name — so no transient connection is ever opened and the count
+  # trivially stays at the configured set's size.
+  #
+  # The alias is dotted because that is the ONE shape the filter lets through:
+  # hostnames are deliberately not resolved on the callback path (a stranger
+  # must not choose what this node looks up), so a dotted name is treated as
+  # public and dialled, while the 10.30.0.0/16 literal behind it would be
+  # refused as private. Docker's embedded DNS resolves the alias inside the
+  # network, so the app really does open, use and close a socket to it.
+  relay2:
+    image: dockurr/strfry:1.1.2@sha256:e81d238db13507f6ef24c49d47cd0b0ea58ff207961f10581fa2a7c901054df4
+    volumes:
+      - ./strfry.conf:/etc/strfry.conf:ro
+      # A named volume for the same reason as `relay` above — see there.
+      - relay2-db:/app/strfry-db
+    ports:
+      - "${RELAY2_PORT:-7778}:7777"
+    networks:
+      brolly:
+        aliases: [relay2.zap.test]
+
+  # Mines, funds both wallets, opens the channel, and does not exit until the
+  # guard's two credential files actually exist. Criterion 1's "no manual steps"
+  # is this service.
+  init:
+    image: lightninglabs/lnd:v0.21.1-beta@sha256:4af8f9bbf98c8b86b0e54b065d6ea45d1387256a43fa9270c11ef849511abae0
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+      lnd:
+        condition: service_healthy
+      lnd-payer:
+        condition: service_healthy
+    volumes:
+      - ./data/lnd:/root/.lnd
+      - ./data/lnd-payer:/payer/.lnd
+      - ./scripts/init.sh:/init.sh:ro
+    environment:
+      CHANNEL_SAT: "${CHANNEL_SAT:-5000000}"
+      PUSH_SAT: "${PUSH_SAT:-0}"
+    entrypoint: ["/bin/sh", "/init.sh"]
+    restart: "no"
+    networks: [brolly]
+
+  # The credential broker. The ONLY container that sees admin.macaroon.
+  guard:
+    image: ghcr.io/davotoula/brollyzapper-guard:0.1.10@sha256:693480dcf3d7e3e65b148608c2e3394bfb36d06af56fa63135656db56aadda8b
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    user: "${UID_GID:-0:0}"
+    volumes:
+      - guard-data:/guard
+      # A NAMED VOLUME, not a host bind. The guard chmods its unix socket, and
+      # chmod on a socket inside a macOS bind mount (virtiofs) fails with
+      # EINVAL — the guard then crash-loops on "securing /credentials/guard.sock".
+      # On Umbrel the host is Linux and a bind mount is fine; the named volume
+      # is that same ext4 behaviour on a Mac. Measured, not guessed.
+      - credentials:/credentials
+      # Two individual FILES, never the directory (spec §6, §20). They exist by
+      # now because `init` completed, and init refuses to exit until they do —
+      # a missing bind-mount source makes Docker create a DIRECTORY at the path
+      # and the container dies at exit 127 (measured on the box, d46.12).
+      - ./data/lnd/tls.cert:/lnd/tls.cert:ro
+      - ./data/lnd/data/chain/bitcoin/regtest/admin.macaroon:/lnd/admin.macaroon:ro
+    environment:
+      LND_ADDRESS: lnd:10009
+      LND_CERT_FILE: /lnd/tls.cert
+      LND_ADMIN_MACAROON: /lnd/admin.macaroon
+      DATA_DIR: /guard
+      CREDENTIALS_DIR: /credentials
+      SERVER_IP: 10.30.0.20
+      NETWORK_CIDR: 10.30.0.0/16
+      GUARD_MAX_SPEND_MSAT: "100000000"
+      GUARD_MAX_PAYMENT_MSAT: "25000000"
+      # tna.4's operator factor, which defaults to FALSE and must be supplied
+      # here because this stack's whole job is to exercise sending: spend.sh
+      # asks the guard to bake a spend macaroon at step 2, and without this the
+      # guard refuses — correctly — and the suite dies before its first
+      # assertion. Measured on 2026-08-26: Wave 30 shipped the gate without
+      # this line and the spend suite had not been run since.
+      GUARD_ALLOW_SENDING: "true"
+      LOG_LEVEL: INFO
+    restart: on-failure
+    stop_grace_period: 30s
+    networks: [brolly]
+
+  brollyzapper:
+    image: ghcr.io/davotoula/brollyzapper:0.1.10@sha256:edf63a455e11ddd16a4f8aa364eb5c76d5525291947d7acd08afa0a8de2472e9
+    depends_on:
+      guard:
+        condition: service_started
+    user: "${UID_GID:-0:0}"
+    volumes:
+      - server-data:/data
+      - credentials:/credentials:ro
+    environment:
+      LND_ADDRESS: lnd:10009
+      CREDENTIALS_DIR: /credentials
+      GUARD_SOCKET: /credentials/guard.sock
+      DATA_DIR: /data
+      LISTEN_ADDR: 0.0.0.0:8080
+      TRUSTED_PROXIES: 10.30.0.0/16
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-regtest-admin}"
+      SESSION_SECRET: "${SESSION_SECRET:-regtest-session-secret-not-for-real-use}"
+      LOG_LEVEL: INFO
+    ports:
+      # Published on the SAME port it listens on, deliberately. The lightning
+      # address is http://localhost:8080, which then resolves to this app both
+      # from the host (smoke.sh) and from inside the container (the self-probe).
+      # Map it to a different host port and the self-probe can no longer reach
+      # the address it is checking.
+      - "${APP_PORT:-8080}:8080"
+    networks:
+      brolly:
+        # Must equal the guard's SERVER_IP: the receive macaroon carries
+        # `ipaddr <SERVER_IP>` and LND checks the address it observes (0vk.12).
+        ipv4_address: 10.30.0.20
+    restart: on-failure
+    stop_grace_period: 1m
+
+volumes:
+  credentials:
+  guard-data:
+  server-data:
+  # Both relays' LMDBs. Named rather than bound for the reason spelled out at the
+  # `relay` service: a bind-mounted LMDB on macOS silently stops delivering live
+  # events (BrollyZap-qnz).
+  relay-db:
+  relay2-db:
+
+networks:
+  brolly:
+    ipam:
+      config:
+        - subnet: 10.30.0.0/16

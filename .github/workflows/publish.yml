@@ -1,0 +1,134 @@
+# Builds and publishes the two images to GHCR. Manually dispatched, not
+# tag-triggered, because of an ordering constraint that cannot be automated
+# away:
+#
+#   push images  ->  learn the index digests  ->  pin them in docker-compose.yml
+#                                                        |
+#                                           commit  ->  tag  ->  release gate checks
+#
+# umbrel/brollyzapper/docker-compose.yml pins image@sha256:<digest>, and the
+# digest does not exist until after the push. So a tag-triggered publish would
+# be tagging a commit whose compose file cannot yet reference what that tag just
+# built. Pinning stays a deliberate human commit; ci.yml's release gate is what
+# catches you if you forget.
+#
+# On the "no secrets" rule in ci.yml: GITHUB_TOKEN is not a stored secret. It is
+# minted per job by Actions, scoped by the `permissions:` block below, and
+# expires when the job ends. Nothing is kept in repository settings, so this
+# still survives the repo being deleted and recreated. A PAT here WOULD break
+# that rule, and would also be unnecessary.
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, without a leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  publish:
+    name: publish ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    # The dispatcher's input crosses into the shell HERE and nowhere else.
+    #
+    # Actions substitutes ${{ ... }} textually before the shell parses the line,
+    # so a version written straight into a `run:` block is code, not data — and
+    # it was written into the step whose job was to validate it, which therefore
+    # validated a string the shell had already run (review L12). An env var is
+    # passed to the process rather than pasted into its source, so $VERSION
+    # below is inert whatever it contains. internal/arch enforces this.
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `make release` refuses to run without an explicit VERSION for the same
+      # reason: .dockerignore excludes .git, so an unstamped image cannot say
+      # what it was built from, and an image that cannot say that should not
+      # ship.
+      - name: the version is a real version
+        run: |
+          v="$VERSION"
+          case "$v" in
+            dev|latest|"") echo "refusing to publish '$v'"; exit 1 ;;
+          esac
+          if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "'$v' is not semver (expected 1.2.3 or 1.2.3-rc1, no leading v)"; exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Assert BEFORE pushing, not after. A post-push check means a bad image
+      # was briefly public and pullable by digest even once the tag moves.
+      #
+      # Each platform is built with --load so the assertions can actually run
+      # it: --load cannot take a manifest list without the containerd image
+      # store, which the runner does not have. The multi-arch push below reuses
+      # these layers from cache.
+      - name: build each platform and assert it
+        run: |
+          for arch in amd64 arm64; do
+            for img in server guard; do
+              docker buildx build --platform linux/$arch --load \
+                --build-arg VERSION="$VERSION" \
+                -f Dockerfile.$img -t assert-$img:$arch .
+            done
+            docker run --rm --platform linux/$arch assert-server:$arch --version
+            docker run --rm --platform linux/$arch assert-guard:$arch --version
+            # d46.1 acceptance 6, in its corrected entrypoint-overriding form.
+            for img in server guard; do
+              for shell in /bin/sh /bin/bash /bin/busybox; do
+                if docker run --rm --platform linux/$arch --entrypoint $shell assert-$img:$arch -c 'echo reached'; then
+                  echo "FAIL: $shell ran inside $img/$arch"; exit 1
+                fi
+              done
+            done
+            echo "linux/$arch: binaries run, no shell in either image"
+          done
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: push both images, multi-arch
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 --push \
+            --build-arg VERSION="$VERSION" -f Dockerfile.server \
+            -t "$REGISTRY/brollyzapper:$VERSION" .
+          docker buildx build --platform linux/amd64,linux/arm64 --push \
+            --build-arg VERSION="$VERSION" -f Dockerfile.guard \
+            -t "$REGISTRY/brollyzapper-guard:$VERSION" .
+
+      # The digests go to the job summary rather than only the log, because the
+      # next step is a human copying them into the compose file.
+      - name: report the index digests to pin
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          server=$(docker buildx imagetools inspect "$REGISTRY/brollyzapper:$VERSION" --format '{{.Manifest.Digest}}')
+          guard=$(docker buildx imagetools inspect "$REGISTRY/brollyzapper-guard:$VERSION" --format '{{.Manifest.Digest}}')
+          {
+            echo "## Pin these in \`umbrel/brollyzapper/docker-compose.yml\`"
+            echo
+            echo '```yaml'
+            echo "    image: $REGISTRY/brollyzapper-guard:$VERSION@$guard"
+            echo "    image: $REGISTRY/brollyzapper:$VERSION@$server"
+            echo '```'
+            echo
+            echo "Then commit, and tag \`v$VERSION\` — the release gate in \`ci.yml\` fails if the placeholders are still there."
+            echo
+            echo "> First publish only: GHCR defaults new packages to **private**, and the box pulls anonymously."
+            echo "> Make both packages public at https://github.com/$OWNER?tab=packages or the install fails with \`denied\`."
+          } >> "$GITHUB_STEP_SUMMARY"

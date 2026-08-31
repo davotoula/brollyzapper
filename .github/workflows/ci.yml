@@ -1,0 +1,191 @@
+# The only gate before MVP. A green run here must mean exactly what a green
+# local run means, so this file mirrors the Makefile's `check` plus `cross`,
+# and adds the image build the Makefile cannot assert without a daemon.
+#
+# Everything CI needs lives in this file. Nothing depends on repository
+# settings, environments, rulesets or branch protection configured through the
+# GitHub UI: the repo is expected to be deleted and recreated for a clean MVP
+# push, and none of that survives a recreate — its absence afterwards would be
+# silent.
+#
+# No secrets. The workflow needs none, and one appearing here would be a design
+# change rather than a CI detail.
+#
+# Gaps between this and the local gate: none. `make check` is build + vet +
+# test, and `cross`, the gofmt exclusion, `go mod tidy -diff` and govulncheck
+# are reproduced below verbatim. If a check is ever added locally and not here,
+# name it in this comment — a CI that is quietly weaker than the local gate is
+# worse than one that is obviously so.
+#
+# Every action is pinned to a commit SHA with the version in a trailing comment,
+# and the Dockerfiles pin their base images by digest. internal/arch asserts
+# both; the reasoning is there (review L12).
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Tracks go.mod rather than pinning a second copy of the version.
+          go-version-file: go.mod
+          cache: true
+
+      # Same exclusion as the local gate: internal/lnd/lnrpc is generated from
+      # the vendored protos and is not ours to format.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l . | grep -v '^internal/lnd/lnrpc/' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      # go.mod and go.sum must state exactly what is imported — a dependency that
+      # arrives unrecorded is a dependency nobody reviewed. Added with P2's first
+      # external module (go-nostr).
+      - name: go mod tidy -diff
+        run: go mod tidy -diff
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # internal/arch runs here with everything else, and that is the point: it
+      # is the sole mechanical enforcement of spec §3, §5, §12 and §16, so a CI
+      # that skipped it would enforce nothing. With no other gate before MVP it
+      # is the only thing between a layer leak and main.
+      - name: test
+        run: go test ./...
+
+      # -race has earned its place: it has caught a shutdown race and a test
+      # that passed only by luck, both in code whose own tests were green.
+      - name: test -race
+        run: go test -race ./...
+
+      # The working tree holds private material beside the public code — specs,
+      # the issue tracker, session notes — kept out by .gitignore. An ignore
+      # rule is a default; this is the guarantee. It inspects what git tracks,
+      # so it catches a `git add -f` and a renamed directory alike.
+      - name: nothing private is tracked
+        run: make public-scan
+
+      # Both target platforms, cgo-free, which is what gcr.io/distroless/static
+      # requires.
+      - name: cross-compile
+        run: make cross
+
+      # The base images are pinned by digest, so an upstream Go patch no longer
+      # arrives on its own — govulncheck is what tells us one is needed. It
+      # reports only vulnerabilities in code paths this module actually reaches,
+      # so a finding here is a finding about us (review L12).
+      #
+      # Through the Makefile rather than inline, so the pinned version lives in
+      # exactly one place. @latest anywhere would make the gate's verdict a
+      # function of the day it ran.
+      - name: govulncheck
+        run: make vuln
+
+      # The corpus, re-exercised on every push. Through the Makefile so the
+      # duration lives in exactly one place — a -fuzztime restated here would
+      # drift from the local gate, which is the failure mode CLAUDE.md calls
+      # "a CI quietly weaker than the local gate".
+      - name: fuzz
+        run: make fuzz
+
+  images:
+    name: image (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # arm64 runs under emulation on an amd64 runner. Building each platform
+      # singly rather than as one multi-arch index is deliberate: --load cannot
+      # take a manifest list without the containerd image store, and the
+      # runtime assertions below need a local image to run.
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: build both images
+        run: |
+          for img in server guard; do
+            docker buildx build --platform linux/${{ matrix.arch }} --load \
+              --build-arg VERSION=ci-${GITHUB_SHA::12} \
+              -f Dockerfile.$img -t brollyzapper-$img:ci .
+          done
+
+      - name: the binaries run
+        run: |
+          docker run --rm brollyzapper-server:ci --version
+          docker run --rm brollyzapper-guard:ci --version
+
+      # d46.1 acceptance 6, in its CORRECTED form.
+      #
+      # NOT `docker run <img> /bin/sh`. That form is inverted, not merely weak:
+      # Go's flag package treats /bin/sh as a positional argument and ignores
+      # it, so the exit code reports on the container's configuration rather
+      # than on the presence of a shell. CI is the configured case, which is
+      # precisely where the inverted form fails on a correct image.
+      - name: no shell in the final layer
+        run: |
+          for img in server guard; do
+            for shell in /bin/sh /bin/bash /bin/busybox; do
+              if docker run --rm --entrypoint $shell brollyzapper-$img:ci -c 'echo reached'; then
+                echo "FAIL: $shell ran inside brollyzapper-$img"; exit 1
+              fi
+            done
+          done
+          echo "no shell in either image"
+
+  release-gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Nothing else stops a tagged build shipping the Umbrel package with its
+      # deliberately-invalid placeholder digests still in place. An image that
+      # cannot be pulled is a package that cannot install.
+      #
+      # THE MESSAGE NAMES publish.yml, NOT `make release`. The
+      # Makefile target publishes from a developer machine, and the Release
+      # release procedure opens with "publish from CI, never a
+      # laptop" — the per-job token is scoped and expires, no credential touches a
+      # developer machine, and the images that ship are built by the runner that
+      # gated them. This gate fires on a TAG build, at the end of the sequence,
+      # when whoever is releasing is least inclined to go and read the docs: it is
+      # the only instruction they get, so it must not be the forbidden one.
+      - name: the compose file pins real digests
+        run: |
+          if grep -q 'sha256:0\{64\}' umbrel/brollyzapper/docker-compose.yml; then
+            echo "umbrel/brollyzapper/docker-compose.yml still pins placeholder digests."
+            echo
+            echo "Publish from CI, never a laptop. Then pin what the registry actually has:"
+            echo "  1. gh workflow run publish.yml -f version=<version>"
+            echo "  2. docker buildx imagetools inspect ghcr.io/<owner>/brollyzapper:<version> \\"
+            echo "       --format '{{.Manifest.Digest}}'   (and the same for -guard)"
+            echo "  3. pin both digests in umbrel/brollyzapper/docker-compose.yml, commit, re-tag."
+            echo
+            echo "Full procedure: the Release section of the project notes."
+            exit 1
+          fi
+          echo "compose digests look real"

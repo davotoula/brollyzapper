@@ -1,0 +1,54 @@
+<h1>Security</h1>
+{{if .Security.GuardRejections}}
+<p class="error">
+  The guard has refused {{.Security.GuardRejections}} operation(s) in the last
+  {{.Security.RejectionWindowHours}} hours. A burst of guard rejections means either a bug in
+  the wallet ceiling or a compromise in progress. Every one of them is in the trail below.
+</p>
+{{end}}
+{{if .Security.SpendLimitMsat}}
+<p class="hint">
+  The guard will not let this app spend more than
+  <strong>{{sats .Security.SpendLimitMsat}} sats</strong> in any
+  {{.Security.SpendWindowHours}} hours. {{sats .Security.SpendUsedMsat}} sats of that window is
+  spoken for. This is a measurement, not a check: there is no level at which it becomes unsafe,
+  and the app cannot raise it.
+</p>
+{{end}}
+<h2>Checks</h2>
+<table>
+  <thead><tr><th></th><th>Check</th><th>Blocks</th><th>What it is for</th></tr></thead>
+  <tbody>
+  {{range .Security.Checks}}
+    <tr>
+      <td>{{if .OK}}pass{{else}}FAIL{{end}}</td>
+      <td>{{.Title}}{{if .Detail}}<br><small>{{.Detail}}</small>{{end}}</td>
+      <td>{{if .OK}}—{{else}}{{if .Blocks}}{{.Blocks}}{{else}}nothing{{end}}{{end}}</td>
+      <td><small>{{.Threat}}</small></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4">No checks were run.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+
+<h2>What this page cannot tell you</h2>
+<p>
+  A checklist of green ticks that bounds nothing is worse than no checklist, because it
+  manufactures confidence. These are the limits of the checks above:
+</p>
+<ul>
+{{range .Security.BlindSpots}}<li>{{.}}</li>{{end}}
+</ul>
+
+<h2>Security events</h2>
+<table>
+  <thead><tr><th>When</th><th>Event</th><th>Severity</th><th>Remote</th><th>Detail</th></tr></thead>
+  <tbody>
+  {{range .Security.Events}}
+    <tr><td>{{.When}}</td><td>{{.Event}}</td><td>{{.Severity}}</td><td>{{.Remote}}</td><td>{{.Detail}}</td></tr>
+  {{else}}
+    <tr><td colspan="5">No security events recorded yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>

@@ -1,0 +1,32 @@
+# BrollyZapper guard: the credential broker (spec §3, §6).
+#
+# Deliberately separate from Dockerfile.server: this is the only image that ever
+# gets admin.macaroon mounted into it, and it has no network listener of any
+# kind. Keeping the two files separate is what makes the compose lint in d46.11
+# possible.
+# Base images are pinned by digest, not by tag: a tag is a mutable pointer, and
+# these two are the compiler and the runtime rootfs. Refresh deliberately with
+#   docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'
+# and say in the commit message what moved (review L12).
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS build
+# The pinned digest above is the compiler, and this is what makes that true.
+# With GOTOOLCHAIN unset (default "auto") a go.mod toolchain line NEWER than the
+# image would be silently downloaded mid-build: the build would succeed, the
+# digest pin would quietly stop determining the compiler, and nothing would say
+# so. "local" turns that into a loud build failure naming the toolchain.
+ENV GOTOOLCHAIN=local
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/brollyguard ./cmd/brollyguard
+
+FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7
+COPY --from=build /out/brollyguard /brollyguard
+USER nonroot:nonroot
+ENTRYPOINT ["/brollyguard"]

@@ -1,0 +1,21 @@
+# Local-build override. The canonical stack pins published images by digest so
+# it is reproducible; this file swaps in a build of the working tree, which is
+# what the implementer needs and what proves anything newer than the last
+# release.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# Concretely: zap receipts landed in Wave 11, AFTER the 0.1.4 images were
+# published, so criterion 6's receipt assertion cannot pass against the pinned
+# images at all. It passes against a build of main.
+services:
+  guard:
+    build:
+      context: ..
+      dockerfile: Dockerfile.guard
+    image: brollyzapper-guard:local
+  brollyzapper:
+    build:
+      context: ..
+      dockerfile: Dockerfile.server
+    image: brollyzapper:local

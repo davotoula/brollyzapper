@@ -1,0 +1,174 @@
+<h1>Sending</h1>
+
+{{if .Sending.Enabled}}
+  <p><strong>Sending is on.</strong>
+  {{if not .Sending.GuardReachable}}
+    The guard is not answering, so this page cannot tell you the state of the spend macaroon.
+    It has not been changed.
+  {{else if .Sending.Ready}}
+    A spend macaroon is in place{{if not .Sending.Expiry.IsZero}} and expires
+    {{when .Sending.Expiry}}{{end}}.
+  {{else}}
+    No spend macaroon is in place, so payments are being refused. Turn sending off and on
+    again to bake a fresh one.
+  {{end}}
+  </p>
+{{else}}
+  <p><strong>Sending is off.</strong> This install is receive-only: it can be paid, and it
+  cannot pay.</p>
+{{end}}
+
+{{if and .Sending.GuardReachable (not .Sending.AllowedByDeployment)}}
+  <div class="error">
+    <p><strong>This deployment does not permit sending.</strong> The part of this app that holds
+    your node's admin credential will not mint a spending macaroon at all, whatever this page
+    asks it for. That is deliberate: it is the one thing an attacker who took over the rest of
+    the app cannot talk it into.</p>
+    <p>Nothing on this page will change that, and nothing in this app can. It is set by whoever
+    deployed the app — <code>GUARD_ALLOW_SENDING</code> in the guard's own environment — and
+    only they can lift it.</p>
+    {{if .Sending.Ready}}
+      <p>A spending macaroon minted earlier is <strong>still live</strong>: it keeps working
+      until it expires{{if not .Sending.Expiry.IsZero}} on {{when .Sending.Expiry}}{{end}}.
+      Use <em>Revoke now</em> below to end it immediately.</p>
+    {{end}}
+  </div>
+{{end}}
+
+{{if .Sending.SpendLimitMsat}}
+  <p class="hint">This app cannot make your node send more than
+  <strong>{{sats .Sending.SpendLimitMsat}} sats</strong> in any {{.Sending.SpendWindowHours}}
+  hours, whatever it asks for. {{sats .Sending.SpendUsedMsat}} sats of that is spoken for right
+  now. Your node asks the guard before every payment this app makes, and the guard holds the
+  limit where this part of the app cannot write it — so nothing that took this app over could
+  raise it without you. It does not limit your node itself, or any other app on it.</p>
+{{end}}
+
+{{if .Sending.Blocked}}
+  <div class="error">
+    <p><strong>Payments are being refused right now</strong>, whatever the setting says:</p>
+    <ul>
+      {{range .Sending.Blocked}}<li><strong>{{.Title}}</strong>{{if .Detail}} — {{.Detail}}{{end}}</li>{{end}}
+    </ul>
+  </div>
+{{end}}
+
+<h2>{{if .Sending.Enabled}}What this granted{{else}}What enabling this means{{end}}</h2>
+<p>{{.Sending.ResidualRisk}}</p>
+
+{{if .Sending.Enabled}}
+  <form method="post" action="/sending/disable">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <button type="submit">Revoke now — turn sending off</button>
+    <p class="hint">
+      Your node stops honouring the macaroon immediately. Turning it off takes one click and no
+      confirmation code; turning it back on needs one again.
+      {{if .Sending.PayingConnections}}
+        {{.Sending.PayingConnections}} connection{{if ne .Sending.PayingConnections 1}}s{{end}}
+        can currently pay; {{if eq .Sending.PayingConnections 1}}it keeps its pairing{{else}}they keep their pairings{{end}}
+        and will be refused until you turn sending back on.
+      {{end}}
+    </p>
+  </form>
+{{else if not .Sending.GuardReachable}}
+  <p class="hint">The guard is not answering, so sending cannot be enabled right now.
+  Nothing has been changed.</p>
+{{else if .Sending.AllowedByDeployment}}
+  {{if and .Sending.Authorisation.Pending (eq .Sending.Authorisation.Control "sending")}}
+    {{template "authorisation" .}}
+  {{else if .Sending.Permitted}}
+    <form method="post" action="/sending/enable">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit">Enable sending</button>
+      <p class="hint">You have already confirmed this once and no spend macaroon is in place, so
+      this bakes a fresh one. No confirmation code is needed.</p>
+    </form>
+  {{else}}
+    <form method="post" action="/sending/enable">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit">Enable sending</button>
+      <p class="hint">Turning sending on has one extra step: the guard writes a confirmation
+      code into a file only you can read, and you type it back in here. That is what stops
+      anything that took over this part of the app from turning sending on by itself.</p>
+    </form>
+  {{end}}
+{{end}}
+
+<h2>Spending limits</h2>
+{{if not .Sending.GuardReachable}}
+  <p class="hint">The guard is not answering, so its limits cannot be read or changed right
+  now.</p>
+{{else}}
+  <p class="hint">These are the guard's own limits, and they are the ones your node enforces.
+  <strong>Lowering either takes one click.</strong> Raising one needs the same confirmation code
+  as turning sending on — a limit this part of the app could raise on its own would not be a
+  limit.</p>
+  <form method="post" action="/sending/caps">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="control" value="spend_cap">
+    <label>Most this app may spend in 24 hours
+      <input type="number" name="sats" min="0" step="1" value="{{satsPlain .Sending.SpendCapMsat}}"> sats
+    </label>
+    <button type="submit">Set the 24-hour limit</button>
+  </form>
+  <form method="post" action="/sending/caps">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="control" value="payment_cap">
+    <label>Most this app may spend in one payment
+      <input type="number" name="sats" min="0" step="1" value="{{satsPlain .Sending.PaymentCapMsat}}"> sats
+    </label>
+    <button type="submit">Set the per-payment limit</button>
+  </form>
+  <p class="hint">A limit of 0 refuses every payment. The per-payment limit cannot be above the
+  24-hour one, because it could never be reached.</p>
+  {{if and .Sending.Authorisation.Pending (ne .Sending.Authorisation.Control "sending")}}
+    {{template "authorisation" .}}
+  {{end}}
+{{end}}
+
+{{define "authorisation"}}
+  <div class="notice">
+    <h2>Confirm this in a file only you can read</h2>
+    <p>The guard has written a file with a code in it. <strong>Open it, read what it says the
+    app is asking for, and type the code below.</strong></p>
+    {{if .Sending.Authorisation.Location}}
+      <p>You will find it at <strong>{{.Sending.Authorisation.Location}}</strong>.</p>
+    {{end}}
+    {{if .Sending.Authorisation.Change}}
+      <p class="hint">The file should say the app is asking to:
+      <em>{{.Sending.Authorisation.Change}}</em> — if it says anything else, do not type the
+      code, and tell someone. The file is written by the part of this app that holds your node's
+      admin credential, and this page cannot change a word of it.</p>
+    {{end}}
+    {{if not .Sending.Authorisation.ExpiresAt.IsZero}}
+      <p class="hint">The code stops working {{when .Sending.Authorisation.ExpiresAt}}
+      {{- if gt .Sending.Authorisation.MinutesLeftAtRender 0}} — about
+      {{- " "}}{{.Sending.Authorisation.MinutesLeftAtRender}} minute
+      {{- if ne .Sending.Authorisation.MinutesLeftAtRender 1}}s{{end}} from when this page
+      loaded{{end}}. Asking again gives you a new one.</p>
+    {{end}}
+    {{if eq .Sending.Authorisation.Control "sending"}}
+      <form method="post" action="/sending/enable">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label>Code from the file
+          <input type="text" name="code" autocomplete="off" spellcheck="false" required>
+        </label>
+        <button type="submit">Confirm and enable sending</button>
+      </form>
+      <form method="post" action="/sending/enable">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit">Write me a new code</button>
+      </form>
+    {{else}}
+      <form method="post" action="/sending/caps">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="control" value="{{.Sending.Authorisation.Control}}">
+        <input type="hidden" name="sats" value="{{satsPlain .Sending.Authorisation.Msat}}">
+        <label>Code from the file
+          <input type="text" name="code" autocomplete="off" spellcheck="false" required>
+        </label>
+        <button type="submit">Confirm and raise the limit</button>
+      </form>
+    {{end}}
+  </div>
+{{end}}

@@ -1,0 +1,19 @@
+<h1>Node</h1>
+<dl>
+  <dt>Connection</dt><dd>{{.Node.State}}</dd>
+  <dt>LND reachable from the guard</dt><dd>{{if .Node.LNDReachable}}yes{{else}}no{{end}}</dd>
+  <dt>Receive macaroon</dt>
+  <dd>
+    {{if .Node.ReceiveMacaroonPresent}}
+      present{{if not .Node.ReceiveExpiry.IsZero}}, expires
+      {{.Node.ReceiveExpiry.UTC.Format "2006-01-02 15:04 UTC"}}{{end}}
+    {{else}}not baked yet{{end}}
+  </dd>
+  <dt>Spend macaroon</dt>
+  <dd>{{if .Node.SpendMacaroonPresent}}present{{else}}absent — sending is off{{end}}</dd>
+</dl>
+{{if .Node.GuardError}}<p class="error">Guard: {{.Node.GuardError}}</p>{{end}}
+<form method="post" action="/node/relink">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <button type="submit">Re-link to the node</button>
+</form>

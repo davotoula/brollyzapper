@@ -1,0 +1,36 @@
+-- d24.21, ruling B: a connection remembers what it was last refused, and when.
+--
+-- The operator's question is "my zap did not work, why", and until now nothing
+-- durable could answer it for the one refusal they could act on. d24.14's
+-- ruling 3 deliberately keeps limit refusals OUT of the audit trail — an honest
+-- client meeting its own budget is routine, and auditing it would drown the
+-- capability-boundary refusals the trail exists for. That ruling stands. What it
+-- assumed, and d24.22 measured false, is that the CLIENT tells the user:
+-- Amethyst renders RESTRICTED and swallows QUOTA_EXCEEDED, so the operator is
+-- the only possible explainer and their only record was one INFO line in a
+-- rotating log.
+--
+-- So the record goes on the connection, beside the standing budget state the
+-- Connections page already shows, and not into §12's trail.
+--
+-- LAST rather than a history: this is state, not a log. A per-connection ring of
+-- refusals would be a second audit trail with none of the first one's bounds —
+-- and the question it answers ("what stopped this app just now") only ever needs
+-- the most recent one. If a history is ever wanted, the trail is the place that
+-- already knows how to bound one.
+--
+-- NOT NULL DEFAULT '' on the code and NULL on the timestamp, so "never refused"
+-- is distinguishable from "refused at the epoch". Existing rows inherit exactly
+-- that: no refusal has ever been recorded, so there is none to invent.
+-- THE MESSAGE AS WELL AS THE CODE, and the code alone was a real defect caught
+-- in review. RESTRICTED has six emission sites and only ONE of them is about
+-- this pairing's permissions; the other five are the node's state — sending
+-- turned off, no spend credential, spending held, a Tier-2 check failing. A page
+-- rendering one sentence per code told an operator whose sending was simply off
+-- that their app "asked to do something this pairing is not allowed to do",
+-- sending them to permission checkboxes that were already correct. The service
+-- had already composed the accurate sentence and sent it to the client; this
+-- column is what stops it being thrown away.
+ALTER TABLE nwc_connections ADD COLUMN last_refusal_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE nwc_connections ADD COLUMN last_refusal_message TEXT NOT NULL DEFAULT '';
+ALTER TABLE nwc_connections ADD COLUMN last_refusal_at INTEGER;

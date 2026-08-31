@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} — BrollyZapper</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <!-- The favicon itself, not a second drawing of it: one file, so the header
+       and the browser tab cannot drift apart. alt is empty because the wordmark
+       is the next thing in the DOM and a screen reader should not say the name
+       twice. -->
+  <img src="/static/favicon.svg" width="26" height="26" alt="">
+  <div class="brand">
+    <strong>BrollyZapper</strong>
+    <span class="version">{{.Version}}</span>
+  </div>
+  <nav>
+    <a href="/"{{if eq .Page "wallet"}} class="here"{{end}}>Wallet</a>
+    <a href="/sending"{{if eq .Page "sending"}} class="here"{{end}}>Sending</a>
+    <a href="/connections"{{if eq .Page "connections"}} class="here"{{end}}>Connections</a>
+    <a href="/node"{{if eq .Page "node"}} class="here"{{end}}>Node</a>
+    <a href="/security"{{if eq .Page "security"}} class="here"{{end}}>Security</a>
+    <a href="/settings"{{if eq .Page "settings"}} class="here"{{end}}>Settings</a>
+  </nav>
+</header>
+<main>
+{{if .Degraded}}
+<section class="degraded">
+  <h2>Not fully set up yet</h2>
+  <p>BrollyZapper is running, and these are the pieces that are missing:</p>
+  <ul>{{range .Degraded}}<li>{{.}}</li>{{end}}</ul>
+</section>
+{{end}}
+{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+{{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+{{.Content}}
+</main>
+</body>
+</html>

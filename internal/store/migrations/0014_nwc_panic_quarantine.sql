@@ -1,0 +1,34 @@
+-- `xmc` Fix C: a pairing whose requests keep crashing the handler is PAUSED by
+-- the app, and the pause outlives the process.
+--
+-- WHY THE APP GETS TO DO THIS AT ALL. The 2026-08-26 outage was one authorized
+-- client retrying a request that segfaulted the server, fifteen times in seven
+-- minutes. Fix A closed that specific crash and Fix B stops any panic taking the
+-- process with it — but recover alone converts a crash loop into a panic loop:
+-- same client, same request, same failure, for ever. The app survives and the
+-- operator has a pairing that does nothing but generate incidents. Something has
+-- to stop asking.
+--
+-- PAUSED, NOT REVOKED, and the columns are separate for that reason. `revoked`
+-- means "the operator ended this" and RevokeNWCConnection is their kill switch;
+-- overloading it would make the app's own defensive act indistinguishable from
+-- theirs, and would destroy a pairing that a fixed client should simply resume
+-- using. The client here was buggy, not hostile.
+--
+-- PERSISTENT, because a per-process counter is a limit that forgets: every
+-- restart would re-arm the client for another N panics, and during the incident
+-- the process restarted fifteen times. `t0b` settled that shape — a cap that
+-- forgets is not a cap.
+--
+-- panic_count is CUMULATIVE SINCE THE LAST RESUME rather than consecutive. A
+-- consecutive counter would have to be cleared on every successful request,
+-- which is a database write per request to record a thing that is almost always
+-- zero. Resume clears it, which is the moment the operator asserts the client is
+-- fixed. The trade is written down beside MaxPanicsPerConnection.
+--
+-- NULL paused_at with a NOT NULL DEFAULT '' reason, following 0011: "never
+-- paused" stays distinguishable from "paused at the epoch", and existing rows
+-- inherit exactly that.
+ALTER TABLE nwc_connections ADD COLUMN panic_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nwc_connections ADD COLUMN paused_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE nwc_connections ADD COLUMN paused_at INTEGER;

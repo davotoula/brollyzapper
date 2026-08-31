@@ -1,0 +1,17 @@
+version: v2
+modules:
+    # The module root is proto/lnrpc, not proto/, because that is what the
+    # vendored protos import each other by: routerrpc/router.proto says
+    # `import "lightning.proto"`, which resolves only if lightning.proto sits at
+    # the module root. Rooting here means the vendored files stay byte-identical
+    # to upstream's — see proto/lnrpc/README.md, which promises exactly that.
+  - path: proto/lnrpc
+lint:
+  use:
+    - STANDARD
+  # The vendored LND protos are upstream's, not ours; we do not lint them.
+  ignore:
+    - proto/lnrpc
+breaking:
+  use:
+    - FILE

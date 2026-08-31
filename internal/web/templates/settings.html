@@ -1,0 +1,101 @@
+<h1>Settings</h1>
+<form method="post" action="/settings">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>Public domain (optional)
+    <input type="text" name="domain" value="{{.Settings.Domain}}" placeholder="zap.example.com">
+    {{if .Settings.AdvertisedOrigin}}<small>Wallets are handed
+      <code>{{.Settings.AdvertisedOrigin}}</code>. Paste the scheme to change it.</small>{{end}}</label>
+  <label>Address name
+    <input type="text" name="address_name" value="{{.Settings.AddressName}}" placeholder="bob"></label>
+  <label>Trusted proxies (CIDR list) — which upstreams may be believed when they report a
+    visitor's address. Empty trusts nothing, which is right unless something sits in front of
+    this app. Name the range the proxy connects FROM, as narrowly as you can.
+    <input type="text" name="trusted_proxies" value="{{.Settings.TrustedProxies}}"></label>
+  <label>Relays, one per line — receipts publish here as well as to the relays each zap
+    request names
+    <textarea name="default_relays" rows="4">{{.Settings.Relays}}</textarea></label>
+  <label>Public rate limit, requests per minute — the ceiling on total anonymous
+    traffic to your lightning address. It governs the public callback only; the
+    admin sign-in limit is fixed and not adjustable here.
+    <input type="number" name="public_rate_limit_per_min" value="{{.Settings.PublicRateLimitPerMinute}}" min="1"></label>
+  <label>Public rate limit, requests per hour
+    <input type="number" name="public_rate_limit_per_hour" value="{{.Settings.PublicRateLimitPerHour}}" min="1"></label>
+  <label>Fee reserve, ppm — held back from each payment to cover routing. The larger of this
+    and the floor below applies. Too low and payments fail to route; too high and each one
+    reserves more of your ceiling than it needs. Default 10000 (1%).
+    <input type="number" name="max_fee_ppm" value="{{.Settings.MaxFeePPM}}" min="0"></label>
+  <label>Fee reserve floor, msat — default 10000 (10 sats)
+    <input type="number" name="max_fee_floor_msat" value="{{.Settings.MaxFeeFloorMsat}}" min="0"></label>
+  <label>Log level
+    <select name="log_level">
+      {{$current := .Settings.LogLevel}}
+      {{range $level := list "debug" "info" "warn" "error"}}
+      <option value="{{$level}}" {{if eq $level $current}}selected{{end}}>{{$level}}</option>
+      {{end}}
+    </select></label>
+  <label class="check"><input type="checkbox" name="credit_received" {{if .Settings.CreditReceived}}checked{{end}}>
+    Incoming payments raise the spending ceiling — on by default: the wallet you zap out of is
+    the wallet zaps land in. Turn it off and the ceiling only moves when you move it, so
+    received sats never become spendable by this app. Either way the guard's own caps still
+    bound what can be spent, and nothing here can raise those.</label>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Lightning address reachability</h2>
+{{if .Settings.Domain}}
+<p>
+  {{if .Settings.ProbeOK}}Reachable as of {{.Settings.ProbeAt}}.
+  {{else}}<strong>Not reachable.</strong> {{.Settings.ProbeReason}}{{end}}
+</p>
+<form method="post" action="/settings/probe">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <button type="submit">Check now</button>
+</form>
+{{else}}
+<p>No domain configured, so there is nothing to check.</p>
+{{end}}
+
+<h2>Nostr identity</h2>
+<p>
+  <strong>This is the app's own key, not yours.</strong> BrollyZapper made it on first run and
+  you do not normally touch it. It signs every zap receipt and is announced as
+  <code>nostrPubkey</code> in the lightning address response, so senders' clients use it to
+  recognise receipts as coming from this address. You are identified as the recipient by the
+  zap request itself, which is a different thing.
+</p>
+<p>
+  The field below is for <strong>continuity</strong>: restoring a backup that lost the database,
+  moving to a new box, or rebuilding an install whose address is already published. Import the
+  key that install used and receipts you have already published stay verifiable. Replacing it
+  with anything else means those receipts stay signed by the old key.
+</p>
+<p class="hint">
+  <strong>Do not paste your personal nostr key.</strong> It would put a key that can post, DM
+  and delete as you inside the part of this app that faces the network, and it would gain you
+  nothing — a receipt-signing key is worth nothing to an attacker, and a zap receipt does not
+  claim to be from you personally.
+</p>
+{{if .Settings.NostrPubkey}}
+<p>Current public key: <code>{{.Settings.NostrPubkey}}</code></p>
+{{else}}
+<p>No identity yet.</p>
+{{end}}
+<form method="post" action="/settings/nostr">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label><span>Restore a previous BrollyZapper key (<code>nsec1…</code> or 64 hex
+    characters)</span>
+    <input type="password" name="nostr_key" autocomplete="off"></label>
+  <button type="submit">Replace identity</button>
+</form>
+
+<h2>Admin password</h2>
+{{if .Settings.PasswordChangeable}}
+<form method="post" action="/settings/password">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>Current <input type="password" name="current" required></label>
+  <label>New <input type="password" name="new" required minlength="12"></label>
+  <button type="submit">Change password</button>
+</form>
+{{else}}
+<p>The admin password is managed by Umbrel and cannot be changed here.</p>
+{{end}}

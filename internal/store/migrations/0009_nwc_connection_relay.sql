@@ -1,0 +1,22 @@
+-- d24.3 found this: nwc_connections has no relay column, and §8 needs one.
+--
+-- The pairing URI §8 specifies is
+--
+--   nostr+walletconnect://<service_pubkey>?relay=<relay_url>&secret=<client_privkey>&lud16=...
+--
+-- so the relay is chosen PER CONNECTION — the wallet app's, not the operator's
+-- default_relays — and the service has to subscribe there to hear that
+-- connection's requests at all. Migration 0001 wrote the rest of the table in
+-- P1 from §4's listing, which omitted it; nothing used the table until now, so
+-- nothing noticed.
+--
+-- Reported rather than done quietly: the wave's brief says a wrong column is a
+-- finding, and a missing one is the same shape. §4's schema listing is amended
+-- in the same commit, because a listing that disagrees with the schema is what
+-- produced this.
+--
+-- NOT NULL DEFAULT '': there are no rows anywhere — no build has ever created a
+-- connection — so the default is a formality that keeps the column honest rather
+-- than a value anyone inherits. A connection without a relay cannot be served,
+-- and the service says so rather than guessing at default_relays.
+ALTER TABLE nwc_connections ADD COLUMN relay TEXT NOT NULL DEFAULT '';

@@ -1,0 +1,157 @@
+/* The palette is Amethyst-derived: this app exists to talk to nostr clients and
+   the one it is tested against looks like this, so recognition is carried by
+   colour. Every value is read from Amethyst's ui/theme/Color.kt
+   and Theme.kt, with one deliberate exception — caution's light value. Amethyst's
+   own is built for a tinted container and measures 2.60:1 on our near-white
+   ground, a WCAG AA failure; ours keeps the hue and passes at 4.89:1. The value
+   it must not be changed back to, and both measurements, are recorded in
+   the admin-UI palette design notes (private) — not here,
+   because a hex outside these blocks is exactly what the stylesheet's own test
+   forbids. Every colour in this file is a token, so a theme is one block and not a
+   search, and no token is defined only in one theme. */
+:root {
+  color-scheme: light dark;
+  --gap: 1rem;
+  --ground:    #FDFDFD;
+  --text:      #1C1C1C;
+  --muted:     #484848;
+  --raised:    #F7F7F7;
+  --sunken:    #FAFAFA;
+  --hairline:  #DEDEDE;
+  --primary:   #6200EE;
+  --secondary: #03DAC5;
+  --amount:    #B66605;
+  --good:      #2E7D32;
+  --caution:   #8A6C00;
+  --danger:    #C62828;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground:    #000000;
+    --text:      #E6E6E6;
+    --muted:     #CACACA;
+    --raised:    #1A1A1A;
+    --sunken:    #1E1E1E;
+    --hairline:  #383838;
+    --primary:   #BB86FC;
+    --secondary: #03DAC5;
+    --amount:    #F7931A;
+    --good:      #80CBC4;
+    --caution:   #E1C419;
+    --danger:    #EF9A9A;
+  }
+}
+body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background: var(--ground); color: var(--text); }
+header { display: flex; gap: var(--gap); align-items: baseline; padding: var(--gap); border-bottom: 1px solid var(--hairline); }
+/* The nav links are muted so that .here can be the one that is not. Left at the
+   browser default, a link and the current-page marker are both a saturated
+   purple-blue — measured as the same colour to anyone not comparing them side
+   by side, which is a current-page marker that marks nothing. */
+nav a { margin-right: var(--gap); color: var(--muted); }
+/* The mark, centred rather than baseline-aligned: header aligns on baselines,
+   and an image has none, so a browser would sit it on the text baseline and
+   push the whole row down by its height. Selected by element, not by class —
+   it is the only image the chrome has. */
+header > img { align-self: center; border-radius: 5px; }
+/* The wordmark and the running build, stacked. A column inside a baseline flex
+   row still aligns on the wordmark's baseline, so the nav does not move. */
+.brand { display: flex; flex-direction: column; }
+/* Muted and small: the version answers "which build is this?" when asked and
+   is otherwise not competing with the nav. */
+.version { color: var(--muted); font-size: .75rem; }
+main { padding: var(--gap); max-width: 52rem; }
+form { display: grid; gap: .5rem; margin-bottom: var(--gap); max-width: 30rem; }
+label { display: grid; gap: .25rem; }
+
+.explain { border-left: 4px solid var(--hairline); padding-left: var(--gap); }
+.error { font-weight: bold; }
+.flash { font-style: italic; }
+.password { font-family: ui-monospace, monospace; font-size: 1.25rem; }
+.balance { font-size: 1.25rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(--hairline); }
+
+/* d24.5's two pages. Written because the classes the templates use had none:
+   the QR fell to the 300x150 replaced-element default and the pairing URI, a
+   150-character unbroken string, scrolled the page sideways on a phone. */
+/* Small muted text is ONE treatment, so it is one rule: a hint, the "showing 6
+   of 214" line, and a relay entry are different things that read the same way,
+   and four copies of the pair is four places to forget. */
+.hint, .consequence, .more, .relays li { color: var(--muted); font-size: .9rem; }
+.consequence { display: block; }
+/* The permission rows opt OUT of the grid `label` above: a checkbox on its own
+   row, its label on the next and its consequence on a third is three full-width
+   bands per permission, and there are six of them. */
+/* A checkbox belongs BESIDE its words, not stacked above them: the `label` rule
+   above is for a caption over a field, and applied to a checkbox it orphans the
+   box on its own row — which reads as decoration rather than a control once the
+   label runs past one line.
+   ONE rule for both, because it is one layout. They are named separately
+   because they are not the same thing: .permission is a pairing grant on the
+   Connections page, .check is any settings checkbox whose label explains a
+   consequence. */
+.check,
+.permission { display: grid; grid-template-columns: auto 1fr; gap: .25rem .5rem; align-items: baseline; }
+.permission .consequence { grid-column: 2; }
+.connection { border-top: 1px solid var(--hairline); padding-top: var(--gap); margin-top: var(--gap); }
+.connection.revoked { opacity: .55; }
+/* Anywhere, including mid-token: a pairing URI has no spaces to break at. */
+.pairing { display: block; overflow-wrap: anywhere; word-break: break-all; font-size: .85rem; }
+/* Big enough for a phone camera, and capped so it does not fill a laptop. */
+.qr { display: block; width: 100%; max-width: 16rem; height: auto; margin: var(--gap) 0; }
+
+/* d24.17's edit form, collapsed by default.
+   A <details> rather than a second page: the operator is looking at the
+   connection they want to change, and a limit change should not cost a
+   navigation. Collapsed because the common case is reading the list, and a
+   permissions fieldset expanded on every row would bury it. */
+.connection details.edit { margin: 1rem 0; }
+.connection details.edit > summary {
+  cursor: pointer;
+  padding: 0.4rem 0;
+  font-weight: 600;
+}
+.connection details.edit[open] > summary { margin-bottom: 0.5rem; }
+.connection details.edit fieldset { margin: 0.75rem 0; }
+
+/* The semantic ladder (see the admin-UI palette design notes (private)).
+   One meaning per colour, applied identically on every page. */
+.degraded { background: var(--raised); border-left: 4px solid var(--caution); padding: var(--gap); }
+/* display: block, because overflow does not apply to a table box and the rule
+   without it computes to `visible` and does nothing. Measured on a 390px
+   viewport with a 120-character unbreakable comment: without this the PAGE
+   scrolls sideways to 1266px, which is Wave 26's finding again; with it the
+   table scrolls and the page does not. Phone LAYOUT is 0vk.17's other thread —
+   this is the rule the plan already asked for, in the form that applies. */
+.txns { display: block; overflow-x: auto; }
+.amount { color: var(--amount); font-variant-numeric: tabular-nums; font-weight: 600; }
+/* A qualifier on the amount, not its peer. */
+.fee { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+/* Different people talking: the sender's words, and the operator's reason. */
+.comment { font-style: normal; }
+.note { color: var(--muted); font-style: italic; }
+/* The payee of an outgoing zap, which is a shortened npub and therefore a
+   string of characters a person compares rather than reads. Monospace so the
+   comparison is possible, muted because the amount is the row's subject. */
+.payee { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* wallet.html renders .state only when the state is not "settled", so it always
+   qualifies an exception — but "exception" is two different things. open and
+   pending are an invoice waiting, which is the system working and needs no
+   attention; expired and failed are the rung below. The spec's ladder gives
+   those different colours and so does this. */
+.state { font-size: .9rem; }
+.state-waiting { color: var(--muted); }
+.state-bad { color: var(--danger); }
+.receipt { font-size: .85rem; }
+.receipt-published { color: var(--good); }
+.receipt-pending { color: var(--muted); }
+.receipt-abandoned { color: var(--danger); }
+.refusal { color: var(--danger); }
+.session { font-weight: 500; }
+/* One relay or three has been load-bearing since d24.18: it must read at a glance. */
+.relays { margin: .25rem 0; padding-left: 1.1rem; }
+
+/* Purple is the app's own chrome — brand and current location — and never a
+   state. If it also meant "on", the most important binary in the app would be
+   competing with decoration. */
+.here { color: var(--primary); font-weight: 600; }

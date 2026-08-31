@@ -1,0 +1,51 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads/**/*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# JetBrains IDEs (Android Studio, GoLand) — per-developer workspace state.
+# Ignored rather than shared: .idea carries local paths, device caches and
+# inspection profiles that differ per machine and per install.
+.idea/
+*.iml
+
+# Built binaries. `make cross` writes to /dev/null so it leaves nothing, but a
+# plain `go build ./cmd/...` in the repo root drops these — one was committed
+# by accident once.
+/brollyzapper
+/brollyguard
+
+# macOS directory metadata.
+.DS_Store
+
+# The font assets/build_icons.py fetches to cut the BZ letterforms. Pinned by
+# URL and sha256 in that script, so it is reproducible rather than vendored —
+# 112KB of someone else's font that is needed only when the mark changes.
+/assets/*.ttf
+# Private to this working tree: the design specs, briefs and field reports, the
+# issue tracker, coding-agent instructions and session scratch. The code is
+# public; the process around it is not. scripts/public-scan.sh refuses a commit
+# that carries any of it, so this list is the default and that script is the
+# guarantee.
+/docs/
+/.beads/
+/.claude/
+/CLAUDE.md
+
+# regtest builds its own tools into a work directory (nwc.sh); a built binary
+# next to the source is a stray, and a tracked one carries its build machine.
+/regtest/tools/nwctool/nwctool
+/regtest/tools/*/*
+!/regtest/tools/*/*.go
+!/regtest/tools/*/go.mod
+!/regtest/tools/*/go.sum
+!/regtest/tools/*/Dockerfile
+
+# Credentials a contributor is told to create (regtest/README.md); never tracked.
+.env
+*.env
+
+# The private half of public-scan: specific patterns that must not be published.
+/scripts/public-scan.local

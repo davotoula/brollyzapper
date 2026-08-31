@@ -1,0 +1,204 @@
+<h1>Connections</h1>
+<p>A connection is one wallet app paired to this node over Nostr Wallet Connect. Each gets
+its own keys, so apps cannot be linked to each other by anyone watching the relay.</p>
+
+{{if not .Connections.SendingEnabled}}
+  <p class="hint">Sending is off, so a connection granted <strong>Pay invoices</strong> will
+  be refused until you turn it on. Everything else works.</p>
+{{end}}
+
+{{range .Connections.Connections}}
+  <section class="connection{{if .Revoked}} revoked{{end}}">
+    <h2>{{.Name}}{{if .Revoked}} — revoked{{else if .Paused}} — paused{{end}}</h2>
+    {{if .Revoked}}
+      <p class="hint">This pairing no longer works. It is kept here so the record of it
+      stays honest; nothing can use it.</p>
+    {{else if .Paused}}
+      <div class="degraded">
+        <p><strong>Paused by BrollyZapper{{if not .PausedAt.IsZero}} on {{when .PausedAt}}{{end}}.</strong>
+        {{.PausedReason}}</p>
+        <p class="hint">You did not do this — the app did, to keep one wallet app from taking
+        the whole thing down. Nothing was deleted and you do not need to pair the app again:
+        re-enabling starts serving this pairing exactly as before.</p>
+        <form method="post" action="/connections/resume">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit">Re-enable this connection</button>
+        </form>
+      </div>
+    {{end}}
+    <dl>
+      <dt>Relays</dt>
+      <dd>
+        {{range $i, $relay := .Relays}}{{if $i}}, {{end}}{{$relay}}{{end}}
+        {{if not .Relays}}
+          <span class="hint">None — this pairing names no relay at all and cannot be used.
+          Delete it and pair the app again.</span>
+        {{else if eq (len .Relays) 1}}
+          <span class="hint">One relay, so this pairing is unreachable whenever that relay
+          is. A pairing can name up to three — but both ends have to hold the list, so
+          giving this one more means pairing the app again. Some wallet apps use only the
+          first relay in the code they scanned, and for those the extras change nothing.</span>
+        {{else}}
+          <span class="hint">The wallet app was paired with all of these, and this pairing
+          keeps working while any one of them does. An app that reads only the first relay
+          from the code it scanned uses {{index .Relays 0}} and nothing else.</span>
+        {{end}}
+      </dd>
+      {{if and (not .Revoked) (not .Paused)}}
+        <dt>Relay session</dt>
+        <dd class="session">
+          {{if not .Health.Known}}
+            not known yet — this app has not tried to reach its relays since it started
+          {{else if .Health.Unusable}}
+            <strong>Not working</strong> — this pairing cannot be used at all since
+            {{when .Health.Since}}. Nothing here will fix itself: delete it and
+            pair this app again.
+          {{else if .Health.Working}}
+            <strong>Working</strong>
+            <ul class="relays">
+              {{range .Health.Relays}}
+                <li>{{.Relay}} —
+                  {{if eq .State "serving"}}connected since {{when .Since}}{{if .Reconnects}},
+                    after {{.Reconnects}} reconnects — a relay that keeps dropping the
+                    connection makes zaps fail while still looking fine here{{end}}
+                  {{else}}refusing since {{when .Since}}{{if .FailedDials}} ({{.FailedDials}} attempts){{end}},
+                    and it will start working on its own when the relay does{{end}}
+                </li>
+              {{end}}
+            </ul>
+          {{else}}
+            <strong>Not working</strong> — none of this pairing's relays is reachable.
+            Requests from this app are reaching nobody, and it will start working on its own
+            when a relay does.
+            <ul class="relays">
+              {{range .Health.Relays}}
+                <li>{{.Relay}} — refusing since {{when .Since}}{{if .FailedDials}} ({{.FailedDials}} attempts){{end}}</li>
+              {{end}}
+            </ul>
+          {{end}}
+        </dd>
+      {{end}}
+      <dt>Can pay</dt>
+      <dd>
+        {{if .CanPay}}
+          yes —
+          {{if .Unlimited}}no budget set, so bounded only by your spending ceiling{{else}}
+            up to {{sats .BudgetMsat}} sats per day, {{sats .SpentMsat}} used{{end}}
+          {{if .MaxPaymentMsat}}, at most {{sats .MaxPaymentMsat}} sats per payment{{end}}
+        {{else}}no{{end}}
+      </dd>
+      {{if .LastRefusal}}
+        <dt>Last refused</dt>
+        <dd class="refusal">{{when .LastRefusalAt}} — {{.LastRefusal}}.
+        <span class="hint">The wallet app may not have shown this to whoever was using it.</span></dd>
+      {{end}}
+      <dt>Created</dt><dd>{{when .CreatedAt}}</dd>
+      <dt>Last used</dt>
+      <dd>{{if .LastUsedAt.IsZero}}never{{else}}{{when .LastUsedAt}}{{end}}</dd>
+    </dl>
+
+    {{if not .Revoked}}
+      {{if .ShowPairing}}
+        <h3>Pair this app</h3>
+        <p>Scan this with the wallet app, or paste the text below.</p>
+        {{.Pairing.QR}}
+        <p><code class="pairing">{{.Pairing.URI}}</code></p>
+        <p class="hint">This contains the key that lets that app use this connection. Anyone
+        who has it can do whatever this connection is allowed to do.</p>
+      {{else}}
+        <p><a href="/connections?show={{.ID}}">Show the pairing code</a></p>
+      {{end}}
+
+      <details class="edit">
+        <summary>Change what this app may do</summary>
+        <p class="hint">The app stays paired. Nothing here needs setting up again, and a
+        tighter limit applies to the very next payment.</p>
+        <form method="post" action="/connections/update">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <fieldset>
+            <legend>What this app may do</legend>
+            {{range .Groups}}
+              <label class="permission">
+                <input type="checkbox" name="group_{{.Group}}" {{if .Default}}checked{{end}}>
+                <strong>{{.Label}}</strong>
+                <span class="consequence">{{.Consequence}}</span>
+              </label>
+            {{end}}
+          </fieldset>
+          <fieldset>
+            <legend>Spending limits</legend>
+            <label>Budget, sats per day
+              <input type="number" name="budget_sats" min="1"
+                     value="{{if .BudgetSats}}{{.BudgetSats}}{{end}}"></label>
+            <label>Most this app may pay at once, sats
+              <input type="number" name="max_payment_sats" min="1"
+                     value="{{if .MaxPaymentSats}}{{.MaxPaymentSats}}{{end}}"></label>
+            <label class="permission">
+              <input type="checkbox" name="unlimited" {{if .Unlimited}}checked{{end}}>
+              <strong>No limits</strong>
+              <span class="consequence">Ticking this ignores both boxes above: the app may
+              spend up to your whole allocated balance, in one payment if it chooses.</span>
+            </label>
+            <p class="hint">What this app has already spent this period stays spent — a
+            lower budget changes what happens next, not what happened.</p>
+          </fieldset>
+          <button type="submit">Save these limits</button>
+        </form>
+      </details>
+
+      <form method="post" action="/connections/revoke">
+        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit">Revoke this connection</button>
+      </form>
+    {{end}}
+  </section>
+{{else}}
+  <p>No connections yet.</p>
+{{end}}
+
+<h2>Add a connection</h2>
+<form method="post" action="/connections/create">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>Name <input type="text" name="name" required placeholder="Amethyst on my phone"></label>
+  <label>Relays, one per line — the wallet app is paired with all of them and keeps
+    working while any one is up
+    <textarea name="relays" rows="3" required
+              placeholder="wss://relay.example">{{.Connections.RelayPrefill}}</textarea>
+  </label>
+  <p class="hint">Up to three. <strong>The first one matters most:</strong> some wallet
+  apps use only the first relay in the pairing code and ignore the rest, so put the one
+  you trust most at the top. The app must be able to reach whichever you choose, and
+  changing this list later means pairing the app again.</p>
+
+  <fieldset>
+    <legend>What this app may do</legend>
+    {{range .Connections.Groups}}
+      <label class="permission">
+        <input type="checkbox" name="group_{{.Group}}" {{if .Default}}checked{{end}}>
+        <strong>{{.Label}}</strong>
+        <span class="consequence">{{.Consequence}}</span>
+      </label>
+    {{end}}
+  </fieldset>
+
+  <fieldset>
+    <legend>Spending limits</legend>
+    <p class="hint">These apply only if you granted <strong>Pay invoices</strong>.</p>
+    <label>Budget, sats per day
+      <input type="number" name="budget_sats" min="1" value="{{.Connections.DefaultBudgetSats}}"></label>
+    <label>Most this app may pay at once, sats
+      <input type="number" name="max_payment_sats" min="1" value="{{.Connections.DefaultMaxPaymentSats}}"></label>
+    <label class="permission">
+      <input type="checkbox" name="unlimited">
+      <strong>No limits</strong>
+      <span class="consequence">Ticking this ignores both boxes above: the app may spend up
+      to your whole allocated balance, in one payment if it chooses. Only tick it if you
+      would trust it with all of that.</span>
+    </label>
+  </fieldset>
+
+  <button type="submit">Create connection</button>
+</form>

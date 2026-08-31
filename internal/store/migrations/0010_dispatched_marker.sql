@@ -1,0 +1,37 @@
+-- t4t: own the fact instead of inferring it.
+--
+-- The resolver's not-found arm reverses a reservation, and it is the ONE arm
+-- allowed to reverse (§6). Its reason was an inference: "the node has no record
+-- of this payment, so it was never dispatched." That holds only while LND's
+-- payment record is guaranteed to survive, and on the platform this ships to it
+-- is not — Umbrel is a deliberately shared node, another app can run
+-- deletepayments, and a restore from an older backup has the same effect. In any
+-- of those, a payment that DID settle reports NotFound and its reservation is
+-- reversed: the double-spend §6 exists to prevent, reached through the one door
+-- left open.
+--
+-- So the app records the fact itself. dispatched_at is written IMMEDIATELY
+-- BEFORE SendPaymentV2, and the order is the whole design: a marker written
+-- after the send has a window in which the process dies with the payment made
+-- and no record of making it, which is exactly the state this column exists to
+-- rule out. Written first, its ABSENCE is the safe direction — we can only fail
+-- to have written it for a payment we had not yet handed over.
+--
+-- The arm then splits:
+--
+--   not-found AND dispatched_at IS NULL -> reverse. Provably safe: the node
+--     never saw it because we never sent it.
+--   not-found AND dispatched_at SET     -> leave pending, ERROR, and let an
+--     operator look. The fate is genuinely unknown, which is the case §6 says
+--     must not be resolved by guessing.
+--
+-- NULLABLE, with no default and no backfill. Rows written by an earlier build
+-- have no marker and cannot be given one honestly — nothing knows now whether
+-- they were dispatched. They therefore fall into the first arm and are reversed
+-- as before, which is the pre-existing behaviour rather than a new risk: this
+-- migration cannot make the old inference worse, only stop making it for rows
+-- written from here on.
+--
+-- No index. The column is read one row at a time, by a resolver already holding
+-- that row, and the pending set is single digits by construction (§6).
+ALTER TABLE txns ADD COLUMN dispatched_at INTEGER;

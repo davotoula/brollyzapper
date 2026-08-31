@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BrollyZapper — Settings Manual</title>
+<!-- Hand-maintained beside OPERATING.md, which is the reference this page is a
+     rendering of. If the two disagree, OPERATING.md is right and this page has
+     rotted: fix it here. -->
+<style>
+  :root {
+    --bg: #ffffff; --ink: #1c1b22; --muted: #5c5966; --hairline: #e4e2ea;
+    --brand: #6d28d9; --accent: #8b5cf6; --card: #f7f6fa; --warn-bg: #fdf6e3;
+    --warn-rail: #b58900; --code-bg: #efedf5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17161c; --ink: #e8e6ee; --muted: #a09caa; --hairline: #2c2a33;
+      --brand: #a78bfa; --accent: #8b5cf6; --card: #1f1e26; --warn-bg: #24211a;
+      --warn-rail: #d4a017; --code-bg: #26242e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  header.page { border-bottom: 1px solid var(--hairline); padding-bottom: 1rem; margin-bottom: 1.5rem; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h1 .bz { color: var(--brand); }
+  .sub { color: var(--muted); margin: 0; }
+  h2 { font-size: 1.15rem; margin: 2.2rem 0 .3rem; color: var(--brand); }
+  .lede { color: var(--muted); margin: 0 0 .8rem; font-size: .95rem; }
+  details {
+    border: 1px solid var(--hairline); border-radius: 8px;
+    margin: .5rem 0; background: var(--card); overflow: hidden;
+  }
+  details[open] { border-color: var(--accent); }
+  summary {
+    cursor: pointer; padding: .65rem .9rem; font-weight: 600;
+    list-style: none; display: flex; gap: .6rem; align-items: baseline;
+  }
+  summary::before { content: "▸"; color: var(--accent); transition: transform .15s; }
+  details[open] summary::before { transform: rotate(90deg); }
+  summary .what { font-weight: 400; color: var(--muted); font-size: .88rem; }
+  .body { padding: 0 .95rem .85rem; border-top: 1px solid var(--hairline); }
+  .body p { margin: .7rem 0; }
+  dt { font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-top: .8rem; }
+  dd { margin: .15rem 0 0; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; font-size: .88em; }
+  .warn { background: var(--warn-bg); border-left: 3px solid var(--warn-rail); padding: .55rem .8rem; border-radius: 0 6px 6px 0; margin: .7rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: .7rem 0; font-size: .92rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  th { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  .scroll { overflow-x: auto; }
+  a { color: var(--brand); }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--hairline); color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+<header class="page">
+  <h1><span class="bz">Brolly</span>Zapper — the settings, and what each one is for</h1>
+  <p class="sub">Every control an operator can reach, one collapsible section each.
+  <a href="OPERATING.md">OPERATING.md</a> is the full reference — backups, credential
+  rotation, running outside Umbrel; this page is the settings part of it, in a form you can
+  keep open in a tab.</p>
+</header>
+
+<h2>The Settings page</h2>
+<p class="lede">Stored in the database. Everything here takes effect within about two
+seconds — no restart, no reconnect.</p>
+
+<details>
+  <summary>Public domain <span class="what">— where your lightning address lives</span></summary>
+  <div class="body">
+    <p>The host your lightning address lives on, entered bare: <code>zap.example.com</code>.
+    A pasted <code>https://</code> is stripped and the scheme remembered beside it, so the
+    page shows which one wallets will be handed. Changing the host on its own returns to
+    <code>https</code>.</p>
+    <dl>
+      <dt>Default</dt><dd>Empty. Nostr Wallet Connect works without a domain; a lightning
+      address does not.</dd>
+      <dt>If you get it wrong</dt><dd>The app advertises a callback nobody can reach — or
+      worse, one that reaches a <em>different</em> LNURL server that resolves and responds.
+      The Security page's reachability check exists for exactly that: it fetches your own
+      address over the public internet and verifies the response carries this instance's own
+      nostr pubkey and a per-boot header only it emits. A domain pointing somewhere else
+      fails it. Fix that before anything else.</dd>
+    </dl>
+  </div>
+</details>
+
+<details>
+  <summary>Address name <span class="what">— the part before the @</span></summary>
+  <div class="body">
+    <p><code>test</code> gives <code>test@zap.example.com</code>.</p>
+    <dl>
+      <dt>Default</dt><dd>Empty.</dd>
+      <dt>If you get it wrong</dt><dd>Requests for the old name return a plain 404 with no
+      hint that another name exists — deliberate, so a stranger cannot enumerate what you
+      host.</dd>
+    </dl>
+  </div>
+</details>
+
+<details>
+  <summary>Trusted proxies <span class="what">— who may claim a client's real IP</span></summary>
+  <div class="body">
+    <p>A CIDR list of upstream addresses that may be believed when they claim a client's
+    real IP. Empty trusts nothing, which is the safe default: without it, every request
+    behind a proxy arrives as the proxy's own address.</p>
+    <dl>
+      <dt>Default</dt><dd>Empty. The deployment's <code>TRUSTED_PROXIES</code> variable is
+      used when this is unset — <strong>the setting wins when you set one</strong>.</dd>
+      <dt>If you get it wrong</dt><dd>Too trusting — a range you do not control — and anyone
+      reaching the app through it can claim any client IP, which makes the per-sender rate
+      limits meaningless. Too strict and every anonymous request shares one bucket, so one
+      busy zapper exhausts the limit for everyone. On Umbrel the package handles this; off
+      Umbrel, see OPERATING.md §Running outside Umbrel.</dd>
+    </dl>
+  </div>
+</details>
+
+<details>
+  <summary>Relays <span class="what">— where zap receipts are published</span></summary>
+  <div class="body">
+    <p>One per line. Empty means the built-in default set. Receipts also go to whatever
+    relays each zap request names, so this is an <em>addition</em> to those, not a
+    replacement.</p>
+    <dl>
+      <dt>Default</dt><dd>Empty — the built-in set.</dd>
+      <dt>If you get it wrong</dt><dd>Unreachable or private-address relays mean receipts
+      reach fewer places than you think. The relays a zap request names are filtered too:
+      private addresses, non-websocket schemes, duplicates and anything past the cap are
+      dropped. Turn the log level to <code>debug</code> and the parse logs what it dropped
+      and why.</dd>
+    </dl>
+  </div>
+</details>
+
+<details>
+  <summary>Public rate limit <span class="what">— per minute and per hour</span></summary>
+  <div class="body">
+    <p>The ceiling on <strong>total anonymous traffic</strong> to the public callback. It
+    governs the public routes only.</p>
+    <dl>
+      <dt>Defaults</dt><dd>60 a minute, 600 an hour. This is a backstop on the whole box,
+      not a per-sender limit — that one is separate, fixed at 10/min and 100/hour per
+      verified sender, and deliberately not adjustable.</dd>
+      <dt>If you get it wrong</dt><dd>Too low and legitimate zaps bounce during a burst; too
+      high and you widen what a stranger can make your node do. It does <em>not</em> affect
+      the admin login limit — a constant 30 a minute, deliberately not a setting: an
+      operator has no legitimate reason to raise their own brute-force ceiling.</dd>
+    </dl>
+    <div class="warn">Publishing through Cloudflare? This is the <strong>inner</strong> of
+    three layers. The edge rate-limit rule is required, not optional — README §Rate limiting
+    at the edge.</div>
+  </div>
+</details>
+
+<details>
+  <summary>Fee reserve <span class="what">— ppm and floor</span></summary>
+  <div class="body">
+    <p>How much of a payment's value is held back to cover routing fees, as
+    parts-per-million with a floor in msat. The larger of the two applies.</p>
+    <dl>
+      <dt>Defaults</dt><dd>10,000 ppm (1%) and 10,000 msat (10 sat).</dd>
+      <dt>If you get it wrong</dt><dd>Too low and payments fail to route, or the reserve
+      does not cover the actual fee. Too high and each payment reserves more of the ceiling
+      than it needs, so fewer payments fit in the window.</dd>
+    </dl>
+  </div>
+</details>
+
+<details>
+  <summary>Log level <span class="what">— debug, info, warn, error</span></summary>
+  <div class="body">
+    <p>Applied without a restart.</p>
+    <dl>
+      <dt>Default</dt><dd><code>info</code>.</dd>
+      <dt>Precedence</dt><dd><strong>This setting overrides the <code>LOG_LEVEL</code>
+      environment variable</strong> — the stored value is applied after the environment on
+      boot, so when the two disagree, this one wins. Editing the compose file while a
+      setting is present changes nothing.</dd>
+      <dt>When to use debug</dt><dd>Diagnosing delivery: the relay filter and the
+      double-encoding rescue both log there. Safe to leave on briefly, noisy to leave on
+      forever; nothing secret is logged at any level.</dd>
+    </dl>
+  </div>
+</details>
+
+<details>
+  <summary>Incoming payments raise the spending ceiling <span class="what">— a checkbox with money behind it</span></summary>
+  <div class="body">
+    <p>When on, sats you receive increase the amount the app may spend.</p>
+    <dl>
+      <dt>Default</dt><dd>On — the wallet you zap out of is the wallet zaps land in.</dd>
+      <dt>If you turn it off</dt><dd>The ceiling only moves when you move it, so received
+      zaps accumulate without becoming spendable by the app.</dd>
+    </dl>
+    <div class="warn">This has a real financial consequence in both directions. The
+    conservative reading: "on" means money arriving quietly raises what a compromised app
+    could spend — still bounded by the guard's own caps, which this cannot touch.</div>
+  </div>
+</details>
+
+<details>
+  <summary>Nostr identity <span class="what">— the app's key, not yours</span></summary>
+  <div class="body">
+    <p><strong>This is the app's own key.</strong> It is minted on first run and you do not
+    normally touch it. It signs zap receipts and is announced as <code>nostrPubkey</code> in
+    the lightning address response, so senders' clients recognise receipts as genuinely from
+    this address. You are identified as the <em>recipient</em> by the zap request's
+    <code>p</code> tag — a different thing entirely.</p>
+    <p>The import field exists for <strong>continuity</strong>: restoring a backup that lost
+    the database, moving to a new box, or rebuilding an install whose address is already
+    published. Import the key that install used, and previously published receipts stay
+    verifiable. Replacing the key means receipts already published stay signed by the old
+    one.</p>
+    <div class="warn"><strong>Do not paste a personal nostr identity key here.</strong> It
+    would put a key that can post, DM and delete as you into the part of the app that faces
+    the network — and gain you nothing, because a receipt-signing key is worthless to an
+    attacker and being "you" is not what a zap receipt claims.</div>
+  </div>
+</details>
+
+<details>
+  <summary>Admin password <span class="what">— when the deployment does not manage it</span></summary>
+  <div class="body">
+    <p>Changeable in the app only when the deployment has not set one. On Umbrel the
+    password is derived per-install and managed by umbrelOS, so the field is absent; off
+    Umbrel, set <code>ADMIN_PASSWORD</code> (minimum 8 characters) or change it here.</p>
+    <p>Changing it bumps a session counter that is part of every cookie's signature, so
+    <strong>every existing session is invalidated</strong> — including a copy taken from a
+    browser no longer under your control. That is the point: restarting the app alone would
+    not do it.</p>
+  </div>
+</details>
+
+<h2>The Sending page</h2>
+<p class="lede">Sending is off on a fresh install, and turning it on is deliberately not one
+click.</p>
+
+<details>
+  <summary>The latch <span class="what">— your gate on sending, behind a code</span></summary>
+  <div class="body">
+    <p>Turning sending on asks the guard for an authorisation: the guard writes a
+    single-use code into a file only you can read, states in its own words what is being
+    authorised, and you type the code back. The app that asked cannot read that file — which
+    is what makes the confirmation mean something: the part of the app facing the network
+    cannot forge it.</p>
+    <p>The page tells you where the file is and how long the code has left. Codes are
+    single-use and expire; asking again gives you a new one. Turning sending
+    <em>off</em> takes one click and no code.</p>
+  </div>
+</details>
+
+<details>
+  <summary>The two caps <span class="what">— enforced by your node, not by the app</span></summary>
+  <div class="body">
+    <p>The guard's limits, enforced inside your node's request path rather than in the
+    app:</p>
+    <div class="scroll"><table>
+      <tr><th>Cap</th><th>Default</th><th>What it bounds</th></tr>
+      <tr><td>24-hour limit</td><td>100,000 sats</td><td>Everything spent in any rolling 24 hours</td></tr>
+      <tr><td>Per-payment limit</td><td>25,000 sats</td><td>One payment</td></tr>
+    </table></div>
+    <p><strong>Lowering either takes one click. Raising one needs a confirmation code.</strong>
+    That asymmetry is the whole design: a compromised app can only ever tighten its own
+    limits.</p>
+    <div class="warn"><strong>A cap of zero refuses every payment.</strong> It does not mean
+    "no cap". And the per-payment limit must stay at or below the 24-hour one, or the guard
+    refuses the change — a per-payment limit above the window could never be reached.</div>
+  </div>
+</details>
+
+<h2>Deployment settings — no page shows these</h2>
+<p class="lede">Environment variables, fixed when the container is created. Nothing in the
+app can change them, and changing one needs a restart that <em>recreates</em> the
+container.</p>
+
+<details>
+  <summary>The variables <span class="what">— and what going wrong looks like</span></summary>
+  <div class="body">
+    <div class="scroll"><table>
+      <tr><th>Variable</th><th>Default</th><th>What it does</th></tr>
+      <tr><td><code>GUARD_ALLOW_SENDING</code></td><td><code>true</code></td>
+        <td>The deployment's ceiling on sending. <code>false</code> is a hard never that
+        nothing inside the app can lift — the Sending page will say so rather than offer a
+        control that cannot work. Not the same as the latch: both must be on.</td></tr>
+      <tr><td><code>GUARD_MAX_SPEND_MSAT</code></td><td><code>100000000</code></td>
+        <td>The 24-hour cap's <em>starting</em> value. Zero refuses everything.</td></tr>
+      <tr><td><code>GUARD_MAX_PAYMENT_MSAT</code></td><td><code>25000000</code></td>
+        <td>The per-payment cap's starting value. Must be at or below the 24-hour cap.</td></tr>
+      <tr><td><code>GUARD_AUTHORISATION_LOCATION</code></td><td>empty</td>
+        <td>A sentence telling your operator where to find the authorisation file, shown on
+        the Sending page. Free text, deliberately unvalidated. Empty means the page simply
+        says less.</td></tr>
+      <tr><td><code>LND_ADDRESS</code></td><td>—</td><td>Your node's gRPC address.</td></tr>
+      <tr><td><code>LND_CERT_FILE</code>, <code>LND_ADMIN_MACAROON</code></td><td>—</td>
+        <td>Paths to the two files mounted from the node — individual files, never the
+        directory (OPERATING.md §The single-file mount hazard).</td></tr>
+      <tr><td><code>CREDENTIALS_DIR</code>, <code>DATA_DIR</code></td><td>—</td>
+        <td>The credential volume and the app's own data.</td></tr>
+      <tr><td><code>GUARD_SOCKET</code></td><td>inside <code>CREDENTIALS_DIR</code></td>
+        <td>Where the guard listens.</td></tr>
+      <tr><td><code>LISTEN_ADDR</code></td><td><code>0.0.0.0:8080</code></td>
+        <td>The admin and public HTTP listener.</td></tr>
+      <tr><td><code>TRUSTED_PROXIES</code></td><td>empty</td>
+        <td>Fallback for the setting of the same name. The stored setting wins when set.</td></tr>
+      <tr><td><code>LOG_LEVEL</code></td><td><code>info</code></td>
+        <td>Fallback for the stored log level, which wins when set.</td></tr>
+      <tr><td><code>ADMIN_PASSWORD</code></td><td>empty</td>
+        <td>Minimum 8 characters. Set means the deployment manages it and the in-app change
+        form disappears.</td></tr>
+      <tr><td><code>SESSION_SECRET</code></td><td>empty</td>
+        <td>Minimum 16 characters. Empty means one is generated and persisted, which is what
+        an off-Umbrel deployment wants.</td></tr>
+    </table></div>
+  </div>
+</details>
+
+<h2>When a change takes effect</h2>
+<details open>
+  <summary>Three categories <span class="what">— the third one surprises people</span></summary>
+  <div class="body">
+    <p><strong>1. Settings in the app: within about two seconds.</strong> Database rows read
+    through a short-lived cache. No restart, no reconnect.</p>
+    <p><strong>2. The sending latch and the caps: immediately</strong>, on the next payment
+    the guard sees.</p>
+    <p><strong>3. Environment variables: only when the container is RECREATED.</strong> A
+    container's environment is fixed at creation. On umbrelOS that means restarting the app
+    from the dashboard (which recreates); <code>docker restart</code> does <em>not</em>, and
+    will leave you editing a compose file wondering why nothing changed.</p>
+    <div class="warn">The precedence trap, stated twice on purpose: for
+    <code>LOG_LEVEL</code> and <code>TRUSTED_PROXIES</code>, the <strong>stored setting wins
+    over the environment variable</strong>. Changing the compose file while a setting is
+    present changes nothing.</div>
+  </div>
+</details>
+
+<footer>
+  <p>Backups, credential rotation, uninstalling, running outside Umbrel and storage are in
+  <a href="OPERATING.md">OPERATING.md</a> — this page covers the settings; that one covers
+  operating.</p>
+</footer>
+</main>
+</body>
+</html>

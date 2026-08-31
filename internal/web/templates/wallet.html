@@ -1,0 +1,116 @@
+<h1>Wallet</h1>
+
+<section class="explain">
+  <h2>Allocation moves no sats</h2>
+  <p>
+    The wallet balance is a <strong>spending authorisation, not a pot of segregated
+    sats</strong>. Allocating 100,000 sats moves nothing on Lightning: no invoice is paid,
+    no channel changes, and the sats stay exactly where they were. What changes is that
+    BrollyZapper will now authorise up to 100,000 sats of outbound payments and refuse the
+    next one. Deallocating is the same in reverse.
+  </p>
+</section>
+
+<p class="balance">Balance: <strong>{{sats .Wallet.BalanceMsat}}</strong> sats</p>
+
+<form method="post" action="/wallet/allocate">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>Allocate (sats) <input type="number" name="sats" min="1" required></label>
+  <label>Note <input type="text" name="note" maxlength="200"></label>
+  <button type="submit">Raise the ceiling</button>
+</form>
+
+<form method="post" action="/wallet/deallocate">
+  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+  <label>Deallocate (sats) <input type="number" name="sats" min="1" required></label>
+  <label>Note <input type="text" name="note" maxlength="200"></label>
+  <button type="submit">Lower the ceiling</button>
+</form>
+
+<p>
+  Incoming payments {{if .Wallet.CreditReceived}}raise{{else}}do not raise{{end}} the
+  ceiling. Change that under <a href="/settings">Settings</a>.
+</p>
+
+{{if .Wallet.UnresolvableError}}
+  <p class="error">{{.Wallet.UnresolvableError}}</p>
+{{end}}
+{{if .Wallet.Unresolvable}}
+<h2>Payments only you can settle</h2>
+<div class="error">
+  <p>This app asked your node about these payments and could not find out what happened to
+  them. Each one is still holding part of your spending ceiling, and it will keep holding it
+  until you say what became of it.</p>
+  <p><strong>Check at your node first.</strong> Look up the payment hash in your node's own
+  records — <code>lncli listpayments</code>, or your node's interface — and see whether it
+  settled. This app is asking you to state a fact it could not establish, and what you say
+  here becomes the ledger.</p>
+</div>
+<table>
+  <thead><tr><th>When</th><th>Amount</th><th>Payment hash</th><th>Why</th><th></th></tr></thead>
+  <tbody>
+  {{range .Wallet.Unresolvable}}
+    <tr>
+      <td>{{.When}}{{if .DispatchedAt}}<br><span class="hint">sent to your node
+        {{.DispatchedAt}}</span>{{end}}</td>
+      <td>{{sats .AmountMsat}} sats</td>
+      <td><code>{{.PaymentHash}}</code></td>
+      <td>{{.Reason}}</td>
+      <td>
+        <form method="post" action="/wallet/assert">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit" name="outcome" value="settled">It settled</button>
+          <button type="submit" name="outcome" value="failed">It failed</button>
+        </form>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+<h2>Transactions</h2>
+{{if .Wallet.HistoryError}}
+<p class="error">{{.Wallet.HistoryError}}</p>
+{{else if .Wallet.Txns}}
+<table class="txns">
+  <thead>
+    <tr><th>When</th><th>What</th><th>Sats</th><th>Details</th></tr>
+  </thead>
+  <tbody>
+    {{range .Wallet.Txns}}
+    <tr>
+      <td>{{when .When}}</td>
+      <td>{{.Kind}}{{if ne .State "settled"}} <span class="state state-{{.StateClass}}">({{.State}})</span>{{end}}</td>
+      <td class="amount">{{sats .AmountMsat}}{{if .FeeMsat}} <span class="fee">+{{sats .FeeMsat}} fee</span>{{end}}</td>
+      <td>
+        {{if .Payee}}<span class="payee">to {{.Payee}}</span>{{end}}
+        {{if .Comment}}<span class="comment">&ldquo;{{.Comment}}&rdquo;</span>{{end}}
+        {{if .Note}}<span class="note">{{.Note}}</span>{{end}}
+        {{if .Receipt}}
+          <span class="receipt receipt-{{.Receipt}}">receipt {{.Receipt}}{{if .ReceiptID}} {{.ReceiptID}}{{end}}</span>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{if gt .Wallet.Total (len .Wallet.Txns)}}
+<p class="more">Showing {{len .Wallet.Txns}} of {{.Wallet.Total}}.</p>
+{{end}}
+{{else}}
+<p>No transactions yet.</p>
+{{end}}
+
+{{/*
+  No paging. §9 lists a transaction history and does not say how it is paged, so
+  choosing a scheme here would be inventing a §9 decision rather than
+  implementing one. The most recent rows and an honest count of how many exist
+  is what that leaves; the "showing N of M" line is what stops the list reading
+  as though it were everything.
+
+  Amounts are rendered by `sats`, which prints msat precision rather than
+  rounding — §4: never floats for money, and never a display that quietly loses
+  the last three digits either.
+*/}}
