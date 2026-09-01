@@ -27,12 +27,20 @@ description: >-
   A public domain is optional. Nostr Wallet Connect works without one; a
   lightning address needs one, and BrollyZapper checks the domain actually
   reaches this instance rather than assuming DNS is enough.
-releaseNotes: >-
-  BrollyZapper has an icon: an upturned umbrella catching zaps. You will see it
-  in your browser tab and beside the name on every page.
+# EMPTY AT SUBMISSION, and this is a rule rather than an oversight.
+# umbrel-package-app: "Use releaseNotes: '' for new packages." Verified against
+# the Opengist submission (getumbrel/umbrel-apps#5849, merged 24 Jul 2026), whose
+# diff shows releaseNotes: "" at version 1.14.0; the notes in the store today
+# arrived with later update PRs.
+#
+# It is the right shape as well as the required one: nobody installing this for
+# the first time has a previous version to be told what changed since.
+#
+# ON THE FIRST UPDATE PR, fill it in. There is deliberately no lint asserting
+# this stays empty — a lint that has to be deleted the week after it lands is
+# worse than the comment you are reading.
+releaseNotes: ""
 
-
-  Nothing about what the app does has changed, and upgrading needs no attention.
 developer: davotoula
 website: https://github.com/davotoula/brollyzapper
 dependencies:

@@ -352,6 +352,31 @@ func TestBackupIgnoreNamesOnlyTheCredentialVolume(t *testing.T) {
 	}
 }
 
+// icon: must NOT appear. umbrel-package-app is explicit — "Omit `icon` for
+// official App Store packages" — because Umbrel hosts the artwork in its own
+// assets repo, keyed by app id, and umbreld falls back to that URL whenever the
+// manifest has no icon (app-repository.ts:185).
+//
+// This lint exists because the pressure to add it is real and recurring. On the
+// dev store that fallback URL 404s (measured 2026-08-30: brollyzapper 404, the
+// bitcoin control 200), so the dashboard tile renders as a broken image and the
+// one-line "fix" is to set icon:. That fix is correct ONLY for a community app
+// store. In the submitted manifest it is a rule violation, and it is the kind
+// that survives review by looking helpful.
+//
+// BrollyZap-3bv carries the full finding and reaches the same conclusion. The
+// tile stops being broken when Umbrel adds the gallery assets before merge.
+func TestTheManifestDeclaresNoIcon(t *testing.T) {
+	m := loadManifest(t)
+	if m.Icon != "" {
+		t.Errorf("manifest sets icon: %q.\n"+
+			"Official App Store packages must omit it — Umbrel hosts the icon in its own\n"+
+			"assets repo and umbreld falls back to that URL when the field is absent.\n"+
+			"If you added this to fix the broken dashboard tile on a DEV store, that is a\n"+
+			"dev-store-only change (BrollyZap-3bv); it must not reach the submission.", m.Icon)
+	}
+}
+
 // The container name app_proxy points at is derived from the app id and the
 // service name. Get it wrong and the app opens on nothing.
 func TestTheProxyPointsAtTheServerServiceByItsInjectedName(t *testing.T) {
