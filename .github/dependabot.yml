@@ -8,9 +8,10 @@
 # proposer, and nothing more: a Dependabot PR is a suggestion that still has to
 # pass the same gate as any other change.
 #
-# Three ecosystems, and the two that are deliberately absent:
+# Four update entries across three ecosystems, and the one deliberately absent:
 #
-#   gomod           the module graph
+#   gomod           the app's module graph
+#   gomod           regtest/tools/{nwctool,zaptool}, which are separate modules
 #   github-actions  the SHA pins in .github/workflows/
 #   docker          the base-image digests in Dockerfile.server and .guard
 #
@@ -65,6 +66,36 @@ updates:
       go-minor-and-patch:
         applies-to: version-updates
         update-types: ["minor", "patch"]
+
+  # The regtest tools, which are their own modules and were the ONLY source of
+  # alerts when alerts were switched on: fifteen against
+  # regtest/tools/nwctool's transitive golang.org/x/crypto v0.36.0, seven of
+  # them critical, none of them in anything that ships. A first draft of this
+  # file declared `/` alone, so nothing would ever have proposed the fix — the
+  # alert would have sat in the Security tab, which is a tab an App Store
+  # reviewer opens.
+  #
+  # Everything in both tools grouped into one PR: they are host-built test
+  # tooling (`go build` from regtest/*.sh, never in an image, never on any
+  # surface the app exposes), so the review question is only "does regtest
+  # still run", and that is one question whether it is one bump or ten. Kept
+  # separate from the app's own entry above so that an app dependency and a
+  # test-tool dependency are never proposed in the same PR.
+  - package-ecosystem: gomod
+    directories:
+      - "/regtest/tools/nwctool"
+      - "/regtest/tools/zaptool"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "regtest"
+    groups:
+      regtest-tools:
+        patterns: ["*"]
 
   # The workflow SHA pins. Dependabot rewrites the SHA and keeps the trailing
   # `# vX.Y.Z` comment in step — which internal/arch requires, since its
