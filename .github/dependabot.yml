@@ -21,10 +21,10 @@
 #                   without that run replaces a tested stack with an untested
 #                   one. umbrel/brollyzapper/docker-compose.yml pins
 #                   ghcr.io/davotoula/* , which are OUR release artefacts: the
-#                   digests go in by hand, in the order the Release procedure
-#                   forces (docs/running-the-waves.md), and a bot has no idea
-#                   that ordering exists. If this ecosystem is ever added, it
-#                   must `ignore` ghcr.io/davotoula/* explicitly.
+#                   digests go in by hand, in the order the release procedure
+#                   forces, and a bot has no idea that ordering exists. If this
+#                   ecosystem is ever added, it must `ignore`
+#                   ghcr.io/davotoula/* explicitly.
 #
 # The two halves of a Go bump cannot be grouped, because grouping cannot span
 # ecosystems: go.mod's `toolchain` floor is gomod, and golang:1.26-alpine is
