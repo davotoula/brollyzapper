@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/netip"
@@ -400,6 +402,119 @@ func TestAnUnreadableAllowSendingIsRefusedRatherThanTakenAsFalse(t *testing.T) {
 		}
 		if cfg.AllowSending != want {
 			t.Errorf("GUARD_ALLOW_SENDING=%q gave %v, want %v", value, cfg.AllowSending, want)
+		}
+	}
+}
+
+// §12's startup summary, asserted at the seam that actually ships: a Server put
+// through a real slog.Handler, in the shape cmd/brollyzapper/main.go uses.
+//
+// WHY HERE AND NOT ONLY IN internal/logging. That package's
+// TestNoSecretBearingTypeEverReachesTheLog already renders config.Server and
+// checks the sentinel is absent, and it is the cross-cutting rule — every
+// secret-bearing type, every level. This is the per-type half, and it is the
+// convention the tree already follows for the same problem
+// (internal/store/txn_redaction_test.go, internal/lnd/preimage_test.go): the
+// test lives beside the LogValue it constrains, so the person editing the
+// method is the person who sees it fail.
+//
+// It asserts BOTH halves, which is the part that existed nowhere. Absence alone
+// is satisfied by `return slog.GroupValue()` — a summary that leaks nothing
+// because it says nothing — and that mutation passed the entire tree before
+// this test was written. §12 wants the settings struct logged AND redacted, so
+// both are checked: no secret bytes, and the facts an operator debugging a boot
+// problem needs still present, admin_password_set among them.
+func TestServerLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
+	t.Parallel()
+
+	// Distinctive, and deliberately not the shared fixture's values: a sentinel
+	// that appears nowhere else cannot be matched by accident, and cannot be
+	// weakened by an unrelated edit to validServerEnv. Plain ASCII, so JSON
+	// encoding is the identity function and "absent from the bytes" is the whole
+	// question rather than half of it.
+	const (
+		adminPassword = "admin-password-sentinel-0vk33"
+		sessionSecret = "session-secret-sentinel-0vk33"
+	)
+	env := validServerEnv()
+	env["ADMIN_PASSWORD"] = adminPassword
+	env["SESSION_SECRET"] = sessionSecret
+
+	cfg, err := config.LoadServer(lookup(env))
+	if err != nil {
+		t.Fatalf("LoadServer() error = %v", err)
+	}
+	// The fixture must actually carry both secrets. Without this, dropping one
+	// from the map above turns every assertion below into a test of a Server
+	// that had nothing to leak — which is precisely how the cross-cutting
+	// version of this test could be made vacuous.
+	if got := cfg.AdminPassword.Reveal(); got != adminPassword {
+		t.Fatalf("the fixture did not load ADMIN_PASSWORD; everything below would pass vacuously")
+	}
+	if got := cfg.SessionSecret.Reveal(); got != sessionSecret {
+		t.Fatalf("the fixture did not load SESSION_SECRET; everything below would pass vacuously")
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	log.Info("starting", "version", "test", "config", cfg) // cmd/brollyzapper/main.go's own call
+	record := buf.String()
+
+	for _, s := range []struct{ name, value string }{
+		{"ADMIN_PASSWORD", adminPassword},
+		{"SESSION_SECRET", sessionSecret},
+	} {
+		if !strings.Contains(record, s.value) {
+			continue
+		}
+		// The record is printed with the leaked value masked. A failure here is
+		// read in CI output, and a test that proves a secret escaped by printing
+		// it again has learned nothing from the bug it just found.
+		t.Errorf("the startup summary carries %s's value; §11 and §12 say it must not. "+
+			"Record, with the value masked:\n%s",
+			s.name, strings.ReplaceAll(record, s.value, "<"+s.name+">"))
+	}
+
+	// Pointers, so "the key is absent" and "the key is false" are different
+	// failures: the first means LogValue stopped reporting the fact, the second
+	// means it reported it wrongly, and they have different fixes.
+	var line struct {
+		Config struct {
+			LNDAddress       string `json:"lnd_address"`
+			ListenAddr       string `json:"listen_addr"`
+			DataDir          string `json:"data_dir"`
+			AdminPasswordSet *bool  `json:"admin_password_set"`
+			SessionSecretSet *bool  `json:"session_secret_set"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(record), &line); err != nil {
+		t.Fatalf("the startup summary is not one JSON object (%v): %s", err, record)
+	}
+	for _, f := range []struct {
+		key  string
+		got  *bool
+		when string
+	}{
+		{"admin_password_set", line.Config.AdminPasswordSet, "ADMIN_PASSWORD"},
+		{"session_secret_set", line.Config.SessionSecretSet, "SESSION_SECRET"},
+	} {
+		switch {
+		case f.got == nil:
+			t.Errorf("the startup summary has no %q; §12 wants whether a credential is SET "+
+				"reported, and it is the one fact about it that is safe to log", f.key)
+		case !*f.got:
+			t.Errorf("%q is false though %s was set; the summary is now actively misleading "+
+				"about a credential", f.key, f.when)
+		}
+	}
+	for _, f := range []struct{ key, got, want string }{
+		{"lnd_address", line.Config.LNDAddress, env["LND_ADDRESS"]},
+		{"listen_addr", line.Config.ListenAddr, env["LISTEN_ADDR"]},
+		{"data_dir", line.Config.DataDir, env["DATA_DIR"]},
+	} {
+		if f.got != f.want {
+			t.Errorf("the startup summary reports %s = %q, want %q; these are the parts an "+
+				"operator debugging a start-up problem actually reads", f.key, f.got, f.want)
 		}
 	}
 }
