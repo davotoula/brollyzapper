@@ -5,7 +5,7 @@
 Nostr zap receiving (NIP-57) and Nostr Wallet Connect (NIP-47) for an **existing**
 LND node, packaged as an Umbrel app. Safety over features.
 
-The architecture — the guard/server split and the rules it enforces — is described where it is enforced: `internal/arch` holds the structural rules as tests, and each package's doc comment says what it may and may not touch.
+The architecture — the guard/server split and the rules it enforces — is described where it is enforced: [`internal/arch/arch_test.go`](internal/arch/arch_test.go) holds the structural rules as tests, and each package's doc comment says what it may and may not touch. (Read the file rather than reaching for `go doc`: `internal/arch` is test-only, so it has no buildable package for `go doc` to open.)
 
 ## Layout
 

@@ -35,9 +35,12 @@ const (
 
 	// OpenInvoiceCap is the real resource bound: what a caller consumes by
 	// reaching the callback is a row in LND's invoice database, and this is
-	// what counts them. It self-clears — an unpaid invoice expires in 600
+	// what counts them. It self-clears — an unpaid LNURL invoice expires in 600
 	// seconds — so a flood costs the node ten minutes at the ceiling rather
-	// than anything permanent.
+	// than anything permanent. NWC-minted invoices share the cap and expire in
+	// an hour; with the pairing's own budget in front of them, they cannot
+	// flood it. (The same caveat is on store.CountOpenInvoices, which is what
+	// actually counts: the query has no source column, so BOTH kinds are in it.)
 	OpenInvoiceCap = 100
 
 	// The globalBackstop's defaults. This is the one layer the operator can

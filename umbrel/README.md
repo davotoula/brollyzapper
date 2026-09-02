@@ -93,6 +93,8 @@ violation:
    and architecture. Screenshots and a logo reference go in the body; Umbrel
    creates the final gallery assets before merge.
 
-   **`umbrel/PR-BODY.md` is the draft**, with the version-independent half already
-   written — the credential-posture note, and the comparison against the twenty
-   apps that mount `admin.macaroon` whole. Fill in the bracketed values.
+   **The draft body is kept outside the repository**, in the maintainer's local,
+   gitignored `docs/` folder as `PR-BODY-umbrel-store-submission.md`. The
+   version-independent half is already written there — the credential-posture
+   note, and the comparison against the twenty apps that mount `admin.macaroon`
+   whole. Fill in the bracketed values.
