@@ -8,7 +8,7 @@
 # these two are the compiler and the runtime rootfs. Refresh deliberately with
 #   docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'
 # and say in the commit message what moved (review L12).
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:26402d86be3d72e6a9410afa0108f03529f51f0c1b5eb7f503d0bc44cc7857ac AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
 # The pinned digest above is the compiler, and this is what makes that true.
 # With GOTOOLCHAIN unset (default "auto") a go.mod toolchain line NEWER than the
 # image would be silently downloaded mid-build: the build would succeed, the
