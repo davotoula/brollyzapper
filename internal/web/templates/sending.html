@@ -107,7 +107,7 @@
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     <input type="hidden" name="control" value="spend_cap">
     <label>Most this app may spend in 24 hours
-      <input type="number" name="sats" min="0" step="1" value="{{satsPlain .Sending.SpendCapMsat}}"> sats
+      <span class="unit"><input type="number" name="sats" min="0" step="1" value="{{satsPlain .Sending.SpendCapMsat}}"> sats</span>
     </label>
     <button type="submit">Set the 24-hour limit</button>
   </form>
@@ -115,7 +115,7 @@
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     <input type="hidden" name="control" value="payment_cap">
     <label>Most this app may spend in one payment
-      <input type="number" name="sats" min="0" step="1" value="{{satsPlain .Sending.PaymentCapMsat}}"> sats
+      <span class="unit"><input type="number" name="sats" min="0" step="1" value="{{satsPlain .Sending.PaymentCapMsat}}"> sats</span>
     </label>
     <button type="submit">Set the per-payment limit</button>
   </form>

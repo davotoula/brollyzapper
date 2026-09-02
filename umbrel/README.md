@@ -90,8 +90,23 @@ violation:
    replaced the freeform "App Submission: <name>" body that Opengist and every
    other app merged before ~Aug 2026 used. Title is `Add BrollyZapper`; the body
    is Type / App / Summary / Verification / Notes, with checkboxes for environment
-   and architecture. Screenshots and a logo reference go in the body; Umbrel
-   creates the final gallery assets before merge.
+   and architecture. Screenshots and a logo reference go in the body **as
+   attachments**; Umbrel creates the final gallery assets before merge, so
+   nothing artwork-shaped is committed to the package and `gallery: []` stays
+   empty. The logo reference is `assets/icon.svg`, rasterised to 256×256 for
+   the attachment because GitHub does not accept SVG uploads. The screenshots
+   come from the gallery fixture, not a real box — deterministic, re-generable
+   on every UI change, and none of the operator's own npubs or amounts in a
+   public listing:
+
+   ```sh
+   BROLLY_GALLERY_DIR=/tmp/gallery BROLLY_GALLERY_VERSION=<version> \
+     go test ./internal/web/ -run TestTheGalleryFixtureShowsAHealthyInstall
+   ```
+
+   That writes six standalone pages; screenshot them at 1440×900 (2× for a
+   sharp upload), which is what the gallery hosts today — an observation of the
+   current assets, not a stated requirement.
 
    **The draft body is kept outside the repository**, in the maintainer's local,
    gitignored `docs/` folder as `PR-BODY-umbrel-store-submission.md`. The

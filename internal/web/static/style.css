@@ -93,6 +93,11 @@ th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(-
 .check,
 .permission { display: grid; grid-template-columns: auto 1fr; gap: .25rem .5rem; align-items: baseline; }
 .permission .consequence { grid-column: 2; }
+/* A unit after a field ("[100000] sats") belongs beside it, and the grid
+   `label` above would otherwise give the bare word a row of its own (7g6). The
+   span exists only because CSS cannot select a text node; this rule is the fix. */
+.unit { display: flex; align-items: baseline; gap: .5rem; }
+.unit input { flex: 1; min-width: 0; }
 .connection { border-top: 1px solid var(--hairline); padding-top: var(--gap); margin-top: var(--gap); }
 .connection.revoked { opacity: .55; }
 /* Anywhere, including mid-token: a pairing URI has no spaces to break at. */
