@@ -90,6 +90,13 @@ require (
 // exit is the migration to fiatjaf.com/nostr, which re-evaluates the hook
 // against that library's dial API.
 //
+// Dependabot cannot maintain this line and is not expected to (0vk.25). A
+// replace target is outside the module graph it resolves, and this target is a
+// commit hash on a fork of an archive — there is no newer version to find. If a
+// gomod PR ever proposes a go-nostr bump, it is proposing the UPSTREAM version
+// that this directive then overrides: harmless, and not the upgrade it looks
+// like. Moving the fork is a manual pin change; leaving the fork is o34.18.
+//
 //	full reasoning: the design's §1, "go-nostr is now a
 //	                pinned fork, and upstream is gone"
 //	beads:          BrollyZap-bym, o34.19, vz1.4; o34.18 is the exit
