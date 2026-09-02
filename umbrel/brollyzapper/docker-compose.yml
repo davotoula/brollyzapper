@@ -24,7 +24,7 @@ services:
   # admin.macaroon, and it listens on nothing: its sole input is a unix socket
   # in the shared credential volume (spec §3, §6).
   guard:
-    image: ghcr.io/davotoula/brollyzapper-guard:0.1.16@sha256:dfe94ddbad056c1d6670b773a4537c5785c6f567545dd8e6abd2c8441e8d7ab2
+    image: ghcr.io/davotoula/brollyzapper-guard:0.1.17@sha256:0000000000000000000000000000000000000000000000000000000000000000
     user: "1000:1000"
     volumes:
       - ${APP_DATA_DIR}/data/guard:/guard
@@ -97,7 +97,7 @@ services:
   # admin.macaroon — adding that mount here would silently undo §3, §6 and half
   # of §11, which is what the lint exists to prevent.
   server:
-    image: ghcr.io/davotoula/brollyzapper:0.1.16@sha256:823a368c5c06d2954f2654b9d45a25873f7b461314c24a99ebeec471554f3461
+    image: ghcr.io/davotoula/brollyzapper:0.1.17@sha256:0000000000000000000000000000000000000000000000000000000000000000
     # The images run as uid 65532 (distroless/static:nonroot) by default, and
     # this line overrides that. umbrelOS creates ${APP_DATA_DIR} owned by
     # 1000:1000, so 1000 is the uid that can write the bind mounts — including

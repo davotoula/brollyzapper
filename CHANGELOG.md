@@ -2,6 +2,29 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.17 — 2026-09-02
+
+Two small things a reviewer would meet first, fixed before the App Store submission. Nothing
+about what the app does changed.
+
+### Fixed
+
+- **A plain payment no longer writes an ERROR line.** An ordinary LNURL payment — and a
+  Primal profile zap is one on the wire — settles like any other and owes no zap receipt.
+  The obligation to publish one is recorded before that is known, deliberately, and the
+  not-a-zap case was left for the retry loop, which reported it at ERROR about 45 seconds
+  after every such payment. It is now cleared the moment it is known, at DEBUG.
+- **The `sats` unit sits beside its input on the Sending page** instead of dropping onto a
+  line of its own under each spending limit.
+
+### Changed
+
+- The images carry an OCI source label pointing at this repository.
+
+### Upgrading
+
+**Nothing to do.** No migration, no setting changes.
+
 ## 0.1.16 — 2026-08-31
 
 The app has an icon. Nothing about what it does changed.
