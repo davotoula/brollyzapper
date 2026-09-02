@@ -65,8 +65,25 @@ cross:
 # The version is pinned here, once, and ci.yml runs this target rather than
 # repeating the command: a CI and a local gate that state the same version
 # separately are two statements of one fact, and they drift.
+#
+# GOTOOLCHAIN IS PINNED TO THIS MODULE'S OWN TOOLCHAIN FOR THE INSTALL, and that
+# is not decoration (0vk.35). `go install pkg@version` resolves its toolchain
+# from the TARGET module's requirements, not from ours: x/vuln asks for >= 1.25,
+# so on a machine whose PATH `go` is older than our floor the binary gets built
+# by whatever satisfies x/vuln, which can be OLDER than the toolchain that built
+# the code it is about to parse. govulncheck then fails to load the packages —
+# "file requires newer Go version go1.27 (application built with go1.26)" — and
+# the gate cannot run at all. It went unnoticed until the 1.27 bump only because
+# the two versions happened to line up.
+#
+# Derived, never restated: `go env GOVERSION` is the toolchain go.mod selected,
+# so this cannot drift from the floor the way a second literal would. CI is
+# unaffected either way — setup-go reads go.mod's `toolchain` line and puts that
+# exact Go on PATH — which is the point: the local gate now means what CI means
+# on a machine with any `go` at all.
 vuln:
-	go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	GOTOOLCHAIN="$$(go env GOVERSION)" \
+		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	$(GOBIN)/govulncheck ./...
 
 proto-tools:
