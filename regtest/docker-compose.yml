@@ -211,7 +211,7 @@ services:
 
   # The credential broker. The ONLY container that sees admin.macaroon.
   guard:
-    image: ghcr.io/davotoula/brollyzapper-guard:0.1.10@sha256:693480dcf3d7e3e65b148608c2e3394bfb36d06af56fa63135656db56aadda8b
+    image: ghcr.io/davotoula/brollyzapper-guard:0.1.16@sha256:dfe94ddbad056c1d6670b773a4537c5785c6f567545dd8e6abd2c8441e8d7ab2
     depends_on:
       init:
         condition: service_completed_successfully
@@ -253,7 +253,7 @@ services:
     networks: [brolly]
 
   brollyzapper:
-    image: ghcr.io/davotoula/brollyzapper:0.1.10@sha256:edf63a455e11ddd16a4f8aa364eb5c76d5525291947d7acd08afa0a8de2472e9
+    image: ghcr.io/davotoula/brollyzapper:0.1.16@sha256:823a368c5c06d2954f2654b9d45a25873f7b461314c24a99ebeec471554f3461
     depends_on:
       guard:
         condition: service_started

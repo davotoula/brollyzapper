@@ -104,9 +104,12 @@ stack is reproducible. To run what is currently checked out:
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The canonical file now pins the **0.1.10** images by digest (it read 0.1.5 when that was the
-first release publishing zap receipts, and `smoke.sh` passed against it as-is — verified by the
-PM on 2026-08-22: clean chain, mint, pay, credit once, receipt read back). The build override
+The canonical file now pins the **0.1.16** images by digest, and `smoke.sh` passes against them
+as-is — verified 2026-08-31 on a stack brought up from empty volumes: both containers reporting
+`version 0.1.16`, clean chain, mint, pay, credit once, receipt read back off the relay. It read
+0.1.5 when that was the first release publishing zap receipts, then 0.1.10 (verified by the PM on
+2026-08-22 the same way). **Every bump is re-proved by that run rather than assumed** — a pin
+nobody has exercised is a pin that documents a version instead of testing one. The build override
 exists to run the *working tree* instead, for changes that have not been released yet.
 
 Everything else is pinned by digest too — LND, bitcoind and both relays — and

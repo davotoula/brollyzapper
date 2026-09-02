@@ -5,9 +5,16 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
-# Concretely: zap receipts landed in Wave 11, AFTER the 0.1.4 images were
-# published, so criterion 6's receipt assertion cannot pass against the pinned
-# images at all. It passes against a build of main.
+# The rule is the release boundary, not any particular criterion: the pinned
+# stack can only ever prove what was true at the last release, so anything added
+# since is untestable there and MUST be run through this override.
+#
+# The canonical example was zap receipts, which landed in Wave 11 after the 0.1.4
+# images were published — criterion 6's receipt assertion could not pass against
+# the pins at all until the bump that included it. It passes against the pins now
+# (they are 0.1.16, and `smoke.sh` reads a kind 9735 back), which is exactly why
+# the example is history and the rule above is not: every bump retires one set of
+# "needs the override" cases and the next unreleased change creates another.
 services:
   guard:
     build:
