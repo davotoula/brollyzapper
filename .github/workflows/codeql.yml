@@ -1,0 +1,169 @@
+# A second static opinion beside govulncheck, on a repo that brokers node
+# credentials. govulncheck answers "does a dependency have a known CVE we can
+# reach"; CodeQL answers "does the code we wrote have a taint path", and the
+# two miss different things.
+#
+# NOT PART OF THE GATE. ci.yml is the gate and mirrors the local gate exactly
+# (CLAUDE.md); this file is a scanner whose alerts are triaged, like Dependabot
+# alerts. A red run here does not mean a branch is unmergeable — it means
+# somebody reads the alert and either fixes it or dismisses it with a written
+# reason. Adding a check here without adding it to the local gate is only
+# acceptable BECAUSE this is not the gate; do not move a check into this file.
+#
+# ADVANCED SETUP, not the repo's default setup, for three reasons that outlive
+# the one that motivated it: the actions are SHA-pinned like every other action
+# here and Dependabot bumps them, the Go toolchain is taken from go.mod rather
+# than from whatever the runner ships, and the build CodeQL analyses is the
+# same `go build ./...` the gate runs. Default setup gives none of those.
+#
+# THE PROTOS ARE NOT EXCLUDED BY A CONFIG FILE, AND CANNOT BE — AND MEASUREMENT
+# SAYS THEY DO NOT NEED TO BE.
+# internal/lnd/lnrpc is generated from vendored protos and is 29k of the repo's
+# 100k Go lines, so it was expected to dominate the alert list. The obvious fix
+# — a codeql-config.yml with `paths-ignore` — DOES NOT WORK FOR GO: `paths` and
+# `paths-ignore` apply to interpreted languages and to compiled languages
+# analysed with `build-mode: none`, and Go supports neither. Writing one anyway
+# would be a filter that silently filters nothing.
+#
+# So the four generated files ARE analysed, and a local run of this exact
+# configuration (CodeQL 2.26.4, default suite, 2 Sep 2026) returned FIVE
+# results, none of them in lnrpc. The exclusion the bead was written around is
+# not needed at the alert counts we actually have. BrollyZap-0vk.30 holds the
+# exits — SARIF filtering before upload, or a written dismissal — for the day
+# that stops being true.
+#
+# What the build below DOES exclude is regtest/tools/nwctool and
+# regtest/tools/zaptool: they are separate Go modules, `go build ./...` in the
+# root module does not descend into them, and the same local run confirmed it
+# (112 files extracted under this build, 114 under autobuild, the two extra
+# being exactly those tools' main.go). guardctl and mactool beside them have no
+# go.mod of their own, are part of the root module, and are scanned.
+#
+# EXPECT "112 of 252 Go files scanned" IN THE RUN LOG, and do not read it as a
+# broken setup. 138 of this tree's 252 .go files are _test.go, `go build`
+# does not compile test files, and what is not compiled is not extracted.
+# Test code going unscanned is the normal shape of Go code scanning.
+#
+# No secrets. Like ci.yml, this workflow needs none; one appearing here would
+# be a design change rather than a CI detail.
+#
+# Every action is pinned to a commit SHA with the version in a trailing
+# comment; internal/arch asserts it for every workflow in this directory, and
+# Dependabot's github-actions entry proposes the bumps.
+name: CodeQL
+
+on:
+  # Only main, not every branch: a push analysis is the analysis OF RECORD for
+  # the ref it runs on, and the Security tab's tool status reads the default
+  # branch. Feature branches are covered by the pull_request trigger below,
+  # which is where the result is actually read.
+  push:
+    branches: [main]
+
+  # PRs as well as pushes. On a public repo Actions minutes are free, so this
+  # costs no money; it costs ~2-4 minutes of wall clock on every PR and one
+  # more line in the checks list. Bought with that: the alert lands on the diff
+  # that introduced it, while somebody is looking at it, instead of on main
+  # after the merge. Dependabot's PRs get it too, which is the case where "the
+  # dependency moved and a taint path opened" is most likely and least
+  # obvious.
+  pull_request:
+    branches: [main]
+
+  # Same code, newer queries. CodeQL's query packs and engine improve between
+  # runs, so a weekly re-scan of unchanged code is not a no-op — it is most of
+  # what default setup's schedule buys, and the reason to keep it.
+  #
+  # Wednesday, deliberately not Monday: Dependabot opens its four PRs on Monday
+  # 07:00 Europe/London and each of those triggers this workflow anyway.
+  # Off-the-hour because GitHub's scheduler is congested on the hour and drops
+  # or delays runs there.
+  schedule:
+    - cron: "17 3 * * 3"
+
+  # A scheduled workflow on a public repo is disabled automatically after 60
+  # days without repository activity, and GitHub emails the owner when it does.
+  # If the schedule stops firing during a quiet stretch, that is why, and the
+  # re-enable is a button in the Actions tab.
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (go)
+    runs-on: ubuntu-latest
+    permissions:
+      # Exactly the two the upload needs. `actions: read` appears in GitHub's
+      # starter workflow and is required only for private repositories; this
+      # one is public, so it is left out rather than carried as cargo.
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Before init, so the extractor's build uses the toolchain go.mod names
+      # rather than whatever Go the runner image happens to ship. The gate does
+      # the same, for the same reason: the toolchain floor in go.mod exists
+      # because a stale local Go once made the gate test binaries that carried
+      # 32 vulnerabilities the shipped ones did not.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # `cache: true` caches GOCACHE as well as the module cache, and the
+          # obvious worry is that a warm build cache makes `go build ./...`
+          # compile nothing, so the extractor sees nothing and the run goes
+          # green having analysed less. Measured, not assumed: building twice
+          # against the same GOCACHE and creating a database each time gave
+          # byte-identical file lists (112 both times, 2 Sep 2026). The
+          # extractor does not depend on the compiler actually re-running.
+          cache: true
+
+      - name: init
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: go
+          # NO `queries:` INPUT, AND THAT IS HOW THE DEFAULT SUITE IS SELECTED.
+          # The input means "ADDITIONAL queries to run" (init/action.yml), not
+          # "which suite" — the built-in names it forwards to the CLI are
+          # security-extended and security-and-quality, and `queries: default`
+          # would be resolved as a query path and fail — `codeql resolve
+          # queries default` says "Query pack default cannot be found", which
+          # is what this comment is worth checking against. Absent input = the
+          # default code-scanning suite, which is what we want first:
+          # security-extended adds lower-severity and lower-precision queries,
+          # and turning those on before the default suite is clean produces a
+          # page nobody triages, the exact failure this bead was written to
+          # avoid. BrollyZap-0vk.31 holds the switch and what gates it.
+          #
+          # Leaving it absent has a second effect worth not undoing by
+          # accident. Where the action's overlay analysis (its incremental
+          # database cache) is enabled for Go via the code-scanning-only
+          # feature flag rather than the general one, it turns itself back OFF
+          # unless the config uses the default queries alone — no packs, no
+          # queries, no query-filters (config-utils.ts, usesDefaultQueriesOnly,
+          # read at v4.37.9). So one added query can cost the whole
+          # optimisation. Add one deliberately or not at all.
+
+          # `build-mode` explicit rather than defaulted. `manual` is what makes
+          # the build below the thing CodeQL analyses; autobuild picks its own,
+          # and measurably DOES take in the two regtest tool modules — which
+          # are host-built test tooling that never reaches an image or any
+          # surface the app exposes, so their alerts would be triage nobody
+          # owes anyone.
+          build-mode: manual
+
+      # The gate's own build command, verbatim. Two properties follow from
+      # that and neither is incidental: CodeQL analyses exactly the packages
+      # that ship, and a build failure here means the same thing a build
+      # failure in ci.yml means rather than something about CodeQL.
+      #
+      # `go build ./...` in the root module does not descend into
+      # regtest/tools/*, which are separate modules — see the header.
+      - name: build
+        run: go build ./...
+
+      - name: analyze
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:go"
