@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,61 +31,164 @@ import (
 // test and §16 asks for it first.
 const sentinel = "s3ntinel-must-never-be-logged-9f3a1c"
 
+// subject is one type under the rule, and how to read its secrets back OUT of
+// the value being tested.
+//
+// THE READ-BACK IS THE POINT, and it is a `func() string` rather than a string
+// for a reason measured on 2026-09-02 (0vk.33). The check is
+// `strings.Contains(record, secret)`, so an entry whose value does not actually
+// hold the secret passes however broken its LogValue is — and three of the
+// eight entries here were in that state or one edit from it:
+//
+//   - config.Guard held no secret.String at all, so no sentinel could be in it
+//     and Contains had nothing to match. It has moved to its own assertion.
+//   - nostr.Identity was built from gonostr.GeneratePrivateKey() while the test
+//     looked for the sentinel: the one entry guarding §12's headline secret
+//     could not fail.
+//   - config.Server was live, but deleting the two env lines that set its
+//     secrets was measured to make its entry pass WITH a leak planted in
+//     LogValue.
+//
+// Declaring the secret as a constant beside the value does not fix this — that
+// is a second statement, and it can be wrong in the same way twice, which is
+// the failure this file already documents for the audit vocabulary further
+// down. Reading it back through secret.String.Reveal means an entry that has
+// stopped carrying its secret returns "" and says so.
+type subject struct {
+	value   any
+	secrets map[string]func() string // field name -> reads that secret out of value
+}
+
 func TestNoSecretBearingTypeEverReachesTheLog(t *testing.T) {
+	// Distinct per field, so a failure names WHICH secret escaped rather than
+	// only which type.
+	const (
+		adminPassword = sentinel + "-admin-password"
+		sessionSecret = sentinel + "-session-secret"
+	)
 	serverCfg, err := config.LoadServer(fixedEnv(map[string]string{
 		"LND_ADDRESS":     "10.21.21.9:10009",
 		"CREDENTIALS_DIR": "/credentials",
 		"DATA_DIR":        "/data",
-		"ADMIN_PASSWORD":  sentinel,
-		"SESSION_SECRET":  sentinel,
+		"ADMIN_PASSWORD":  adminPassword,
+		"SESSION_SECRET":  sessionSecret,
 	}))
 	if err != nil {
 		t.Fatalf("LoadServer: %v", err)
 	}
-	guardCfg, err := config.LoadGuard(fixedEnv(map[string]string{
-		"LND_ADDRESS":        "10.21.21.9:10009",
-		"LND_CERT_FILE":      "/lnd/tls.cert",
-		"LND_ADMIN_MACAROON": "/lnd/admin.macaroon",
-		"DATA_DIR":           "/guard",
-		"CREDENTIALS_DIR":    "/credentials",
-		"SERVER_IP":          "10.21.0.17",
-	}))
+
+	// nostr.Identity is the one subject whose secret cannot be read back: there
+	// is no accessor for the private half, deliberately (identity.go:38). So the
+	// key is generated here and kept — and tied to the value under test by its
+	// public half, which is derived from the same key and IS exported. Without
+	// that, this entry is a constant sitting next to an unrelated identity,
+	// which is what it was.
+	privateKey := gonostr.GeneratePrivateKey()
+	identity, err := nostr.Parse(secret.New(privateKey))
 	if err != nil {
-		t.Fatalf("LoadGuard: %v", err)
+		t.Fatalf("nostr.Parse: %v", err)
 	}
+	wantPublic, err := gonostr.GetPublicKey(privateKey)
+	if err != nil {
+		t.Fatalf("gonostr.GetPublicKey: %v", err)
+	}
+	if identity.PublicKey() != wantPublic {
+		t.Fatalf("the identity under test was not built from the key this test looks for; "+
+			"its entry below would prove nothing (public %q, want %q)",
+			identity.PublicKey(), wantPublic)
+	}
+
+	plain := secret.New(sentinel)
+	conn := store.NWCConnection{Name: "app", ServicePrivkey: secret.New(sentinel + "-privkey"), ClientSecret: secret.New(sentinel + "-client"), ServicePubkey: strings.Repeat("a", 64), Relays: []string{"wss://relay.example"}}
+	zap := store.SettledZap{PaymentHash: strings.Repeat("b", 64), Preimage: secret.New(sentinel + "-preimage")}
+	setup := web.SetupView{GeneratedPassword: secret.New(sentinel + "-generated")}
+	auth := api.AuthOptions{AppPassword: secret.New(sentinel + "-app"), SessionSecret: secret.New(sentinel + "-session")}
 
 	// Hand-kept, and it is the arch rule TestEverySecretBearingStructRedactsItself
 	// that stops it narrowing silently: that rule fails when a struct gains a
 	// secret.String without a LogValue, which is the moment an entry is missing
 	// here. Both exist because they catch different halves — the rule proves the
 	// method is DECLARED, this proves what it declares does not leak.
-	identity, err := nostr.Parse(secret.New(gonostr.GeneratePrivateKey()))
-	if err != nil {
-		t.Fatalf("nostr.Parse: %v", err)
-	}
-
-	subjects := map[string]any{
-		"secret.String":       secret.New(sentinel),
-		"config.Server":       serverCfg,
-		"config.Guard":        guardCfg,
-		"store.NWCConnection": store.NWCConnection{Name: "app", ServicePrivkey: secret.New(sentinel), ClientSecret: secret.New(sentinel), ServicePubkey: strings.Repeat("a", 64), Relays: []string{"wss://relay.example"}},
-		"store.SettledZap":    store.SettledZap{PaymentHash: strings.Repeat("b", 64), Preimage: secret.New(sentinel)},
-		"nostr.Identity":      identity,
-		"web.SetupView":       web.SetupView{GeneratedPassword: secret.New(sentinel)},
-		"api.AuthOptions":     api.AuthOptions{AppPassword: secret.New(sentinel), SessionSecret: secret.New(sentinel)},
+	//
+	// "Stops it narrowing" is weaker than it reads, and BrollyZap-0vk.36 is the
+	// exit: the arch rule fires on a type with NO LogValue, never on a type
+	// absent from this map, so a secret-bearing type that does declare one can
+	// go missing here and nothing says so. nwc.PayResult and api.Auth are
+	// missing today.
+	subjects := map[string]subject{
+		"secret.String": {plain, map[string]func() string{"value": plain.Reveal}},
+		"config.Server": {serverCfg, map[string]func() string{
+			"AdminPassword": serverCfg.AdminPassword.Reveal,
+			"SessionSecret": serverCfg.SessionSecret.Reveal,
+		}},
+		"store.NWCConnection": {conn, map[string]func() string{
+			"ServicePrivkey": conn.ServicePrivkey.Reveal,
+			"ClientSecret":   conn.ClientSecret.Reveal,
+		}},
+		"store.SettledZap": {zap, map[string]func() string{"Preimage": zap.Preimage.Reveal}},
+		"nostr.Identity":   {identity, map[string]func() string{"private": func() string { return privateKey }}},
+		"web.SetupView": {setup, map[string]func() string{
+			"GeneratedPassword": setup.GeneratedPassword.Reveal,
+		}},
+		"api.AuthOptions": {auth, map[string]func() string{
+			"AppPassword":   auth.AppPassword.Reveal,
+			"SessionSecret": auth.SessionSecret.Reveal,
+		}},
 	}
 	levels := []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError}
 
-	for name, subject := range subjects {
+	for name, s := range subjects {
+		if len(s.secrets) == 0 {
+			t.Errorf("%s declares no secret to look for, so its entry cannot fail", name)
+			continue
+		}
+		leaking := map[string]string{}
+		for field, reveal := range s.secrets {
+			value := reveal()
+			if value == "" {
+				t.Errorf("%s.%s is empty, so this entry would pass against a value that had "+
+					"nothing to leak; give the fixture a secret or remove the entry", name, field)
+				continue
+			}
+			leaking[field] = value
+		}
 		for _, level := range levels {
 			var buf bytes.Buffer
 			lv := logging.NewLevelVar(slog.LevelDebug)
 			log := logging.New(&buf, lv)
-			log.Log(t.Context(), level, "subject", "value", subject)
-			log.Log(t.Context(), level, "subject", slog.Any("value", subject))
-			if got := buf.String(); strings.Contains(got, sentinel) {
-				t.Errorf("%s leaked at %v: %s", name, level, got)
+			log.Log(t.Context(), level, "subject", "value", s.value)
+			log.Log(t.Context(), level, "subject", slog.Any("value", s.value))
+			got := buf.String()
+			for field, value := range leaking {
+				if strings.Contains(got, value) {
+					// Masked: a test that proves a secret escaped by printing it
+					// again into CI output has not finished the job.
+					t.Errorf("%s leaked %s at %v: %s", name, field, level,
+						strings.ReplaceAll(got, value, "<"+field+">"))
+				}
 			}
+		}
+	}
+}
+
+// config.Guard was one of the subjects above and could never have failed there:
+// it holds no secret.String, so nothing could be planted in it and Contains had
+// nothing to match. That is not a reason to stop caring — the guard's whole
+// config IS logged, at cmd/brollyguard/main.go:60, by the process that holds
+// admin.macaroon — so the fact the old entry silently relied on is asserted
+// here instead.
+//
+// The day Guard gains a secret this fails and says what to do: the arch rule
+// will already be demanding a LogValue, and this demands the table entry that
+// proves the LogValue works.
+func TestGuardConfigHoldsNoSecretAndSoNeedsNoRedactionEntry(t *testing.T) {
+	guard := reflect.TypeOf(config.Guard{})
+	secretString := reflect.TypeOf(secret.String{})
+	for i := range guard.NumField() {
+		if f := guard.Field(i); f.Type == secretString {
+			t.Errorf("config.Guard.%s is a secret.String; Guard is now a secret-bearing type "+
+				"and needs an entry in TestNoSecretBearingTypeEverReachesTheLog, which is "+
+				"what proves its LogValue actually redacts", f.Name)
 		}
 	}
 }
