@@ -41,7 +41,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 			values.get(SettingDomainInsecure) == "true"),
 		AddressName:              values.get(SettingAddressName),
 		TrustedProxies:           values.get(SettingTrustedProxies),
-		LogLevel:                 values.get(SettingLogLevel),
+		LogLevel:                 s.logLevelChoice(values.get(SettingLogLevel)),
 		PublicRateLimitPerMinute: values.int(SettingPublicRateLimitMinute, DefaultGlobalBackstopPerMinute),
 		PublicRateLimitPerHour:   values.int(SettingPublicRateLimitHour, DefaultGlobalBackstopPerHour),
 		MaxFeePPM:                values.int(SettingMaxFeePPM, wallet.DefaultMaxFeePPM),
@@ -56,6 +56,71 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Flash = flashFrom(r)
 	s.render(w, "settings", data)
+}
+
+// logLevelChoice is the option the Settings page shows as selected, and it is
+// ALWAYS one of the four settings.html offers. That guarantee is the fix, not a
+// nicety (BrollyZap-497).
+//
+// settings.html marks an option selected only when it equals this value, so any
+// value outside that list selects nothing — and a select with nothing selected
+// is not neutral: the browser submits its FIRST option, which is "debug".
+// Observed on the box during the 0.1.17 fresh-install trip, where the row was
+// simply absent: setting the domain and the address name requires saving that
+// form, so a first-time operator wrote log_level=debug without touching the
+// control, on paths that are publicly reachable and at the level OPERATING.md
+// tells them to turn back off.
+//
+// THE FALLBACK IS THE LEVEL IN FORCE, NOT A CONSTANT. "info" hardcoded would
+// fix the fresh install and break its mirror image: a deployment running with
+// LOG_LEVEL=debug set deliberately would render "info" and have its first Save
+// turn its own logging down, silently, which is the same bug pointing the other
+// way. Precedence is untouched — a stored setting still overrides the
+// environment — only the starting point for an ABSENT setting moved.
+//
+// IT PARSES RATHER THAN COMPARES for the same reason. saveSettings stores what
+// was posted, trimmed and otherwise unvalidated, so "INFO", " warn " and
+// "info+2" are all reachable rows that match no option and land on debug
+// exactly as the empty row did. Fixing only the empty case would leave 497
+// one input away.
+func (s *Server) logLevelChoice(stored string) string {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(strings.TrimSpace(stored))); err != nil {
+		// Includes the empty row, which is what a fresh install has.
+		level = s.levelInForce()
+	}
+	return levelOption(level)
+}
+
+// levelInForce is the running level. Nil is not a production shape — the
+// binaries always wire the LevelVar — but a settings page that panicked on it
+// would turn a wiring mistake into a dead admin surface, and slog's own zero
+// LevelVar is INFO, so that is the honest answer rather than an invented one.
+func (s *Server) levelInForce() slog.Level {
+	if s.Level == nil {
+		return slog.LevelInfo
+	}
+	return s.Level.Level()
+}
+
+// levelOption maps any level onto the nearest option settings.html offers.
+//
+// By threshold rather than by name: slog renders an offset level as "INFO+2",
+// which lowercases to a string no option matches, and matching nothing is the
+// defect this whole function exists to remove. Rounding down to the enclosing
+// named level can lower an offset level by a step on the next Save; landing on
+// debug would raise it, which is the direction that matters.
+func levelOption(level slog.Level) string {
+	switch {
+	case level < slog.LevelInfo:
+		return "debug"
+	case level < slog.LevelWarn:
+		return "info"
+	case level < slog.LevelError:
+		return "warn"
+	default:
+		return "error"
+	}
 }
 
 // saveDomain normalises what the operator pasted and returns the bare
