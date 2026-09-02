@@ -2,6 +2,36 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.18 — 2026-09-02
+
+Cut before the App Store submission, on the first fresh-install trip's findings and the first
+Dependabot round. Nothing about what the app does changed.
+
+### Fixed
+
+- **A fresh install no longer lands on debug logging.** With no stored log level, the Settings
+  page selected nothing, and a browser submits the first option of a select with nothing
+  selected — `debug`. Saving the form to set the domain and address name wrote it without the
+  operator touching the control. The page now shows the level actually in force, and a stored
+  value that matches no option is parsed rather than mistaken for nothing.
+
+### Changed
+
+- **Built with Go 1.27.1.** Both images move to `golang:1.27-alpine`, pinned by digest, and the
+  toolchain floor moves with them in the same change — so the gate tests the Go that ships
+  rather than one either side of it.
+- Dependency bumps proposed by Dependabot and gated before merge: `coder/websocket` 1.8.15,
+  `golang.org/x/mod` 0.40.0, `google.golang.org/grpc` 1.83.2, `golang.org/x/net` 0.58.0; the
+  base image refreshed to the current `1.27-alpine` build.
+- The startup summary's redaction is now asserted on the rendered log record, both secrets,
+  and the redaction table can no longer pass an entry whose value held no secret to leak.
+
+### Upgrading
+
+**Nothing to do.** No migration, no setting changes. If a fresh install of 0.1.17 left
+`log_level` at `debug`, set it back to `info` on the Settings page once; the fix stops it
+happening again but does not rewrite a stored choice.
+
 ## 0.1.17 — 2026-09-02
 
 Two small things a reviewer would meet first, fixed before the App Store submission. Nothing

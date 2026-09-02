@@ -2,7 +2,7 @@ manifestVersion: 1
 id: brollyzapper
 category: bitcoin
 name: BrollyZapper
-version: "0.1.17"
+version: "0.1.18"
 tagline: Receive Nostr zaps and connect wallets to your own Lightning node
 description: >-
   BrollyZapper adds Nostr zap receiving (NIP-57) and Nostr Wallet Connect
