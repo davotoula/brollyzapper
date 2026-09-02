@@ -158,7 +158,13 @@ func (p *Publisher) PublishNow(ctx context.Context, paymentHash string) {
 	zap, err := p.store.SettledZapFor(ctx, paymentHash)
 	if errors.Is(err, store.ErrNotFound) {
 		// An ordinary LNURL payment, or a settlement for something this node
-		// did not mint. Neither has a receipt.
+		// did not mint. Neither has a receipt — but OnSettled queued one
+		// before it could know that, so the obligation is cleared here, the
+		// first place the answer is known. Left in place, the row reaches the
+		// retry loop, which reads the same not-found and used to report it at
+		// ERROR: one line per plain payment, and a Primal profile zap is a
+		// plain payment on the wire (0vk.16).
+		p.notAZap(ctx, paymentHash)
 		return
 	}
 	if err != nil {
@@ -305,6 +311,16 @@ func (p *Publisher) abandon(ctx context.Context, pending store.PendingReceipt, w
 	p.drop(ctx, pending)
 }
 
+// notAZap clears the receipt obligation for a settlement that turned out not
+// to be a zap. DEBUG, not ERROR: it is the ordinary outcome for an ordinary
+// payment, and it is said at all only so that "cleared as not a zap" and
+// "nothing happened" can be told apart by someone reading at that level.
+func (p *Publisher) notAZap(ctx context.Context, paymentHash string) {
+	p.log.Debug("a settled payment is not a zap; no receipt is owed",
+		logging.PaymentHash(paymentHash))
+	p.drop(ctx, store.PendingReceipt{PaymentHash: paymentHash})
+}
+
 func (p *Publisher) drop(ctx context.Context, pending store.PendingReceipt) {
 	if err := p.store.DropZapReceipt(ctx, pending.PaymentHash); err != nil {
 		p.log.Error("could not clear a queued zap receipt",
@@ -374,6 +390,13 @@ func (p *Publisher) RetryDue(ctx context.Context) {
 	}
 	for _, pending := range due {
 		zap, err := p.store.SettledZapFor(ctx, pending.PaymentHash)
+		if errors.Is(err, store.ErrNotFound) {
+			// A plain payment whose first attempt never ran — a restart in
+			// the window between OnSettled and PublishNow leaves exactly
+			// this. Nothing is wrong; see PublishNow.
+			p.notAZap(ctx, pending.PaymentHash)
+			continue
+		}
 		if err != nil {
 			p.log.Error("a queued zap receipt has no settled zap behind it; dropping",
 				logging.PaymentHash(pending.PaymentHash), "error", err.Error())
