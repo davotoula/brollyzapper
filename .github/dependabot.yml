@@ -1,0 +1,107 @@
+# What proposes an upgrade, in a repo that pins everything.
+#
+# Every action here is pinned to a 40-char SHA and both Dockerfiles pin their
+# base images by digest, which is deliberate (ci.yml's header, review L12) and
+# has a cost: a pin does not move when upstream patches. `make vuln` in the
+# gate is what says a move is NEEDED — it is the reason the Go toolchain floor
+# exists in go.mod — but nothing in the tree PROPOSES one. This file is that
+# proposer, and nothing more: a Dependabot PR is a suggestion that still has to
+# pass the same gate as any other change.
+#
+# Three ecosystems, and the two that are deliberately absent:
+#
+#   gomod           the module graph
+#   github-actions  the SHA pins in .github/workflows/
+#   docker          the base-image digests in Dockerfile.server and .guard
+#
+#   docker-compose  ABSENT, on purpose, twice over. regtest/docker-compose.yml
+#                   pins LND, bitcoind and strfry, and those pins are re-proved
+#                   by a smoke.sh run (regtest/README.md) — a bot moving them
+#                   without that run replaces a tested stack with an untested
+#                   one. umbrel/brollyzapper/docker-compose.yml pins
+#                   ghcr.io/davotoula/* , which are OUR release artefacts: the
+#                   digests go in by hand, in the order the Release procedure
+#                   forces (docs/running-the-waves.md), and a bot has no idea
+#                   that ordering exists. If this ecosystem is ever added, it
+#                   must `ignore` ghcr.io/davotoula/* explicitly.
+#
+# The two halves of a Go bump cannot be grouped, because grouping cannot span
+# ecosystems: go.mod's `toolchain` floor is gomod, and golang:1.26-alpine is
+# docker. They are one change in two PRs. Both schedules are therefore the same
+# day, so the pair arrives together and can be merged together — otherwise the
+# gate tests a different Go than the image ships, which is exactly the failure
+# the toolchain floor was added to end.
+#
+# This file is the reproducible half. Dependabot ALERTS and SECURITY UPDATES
+# are repository settings, not files, and so — like everything in Settings —
+# they do not survive a delete-and-recreate of the repo. They are recorded in
+# BrollyZap-0vk.25 with the API calls that set them, so their absence after a
+# recreate is recoverable rather than silent.
+
+version: 2
+
+updates:
+  # The module graph. Minor and patch arrive as one PR because reviewing
+  # forty-four separate version bumps is how a real one gets waved through; a
+  # major is its own PR because it is its own decision.
+  #
+  # go.mod's ONE replace (github.com/nbd-wtf/go-nostr => the davotoula fork)
+  # is a thing Dependabot cannot bump: the pin is a commit hash on a fork of an
+  # ARCHIVED upstream. Expect it to either skip the module or propose an
+  # upstream version that the replace then overrides — either way the fork is
+  # what builds. The exit is BrollyZap-o34.18, and go.mod says so at the
+  # replace itself.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      go-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # The workflow SHA pins. Dependabot rewrites the SHA and keeps the trailing
+  # `# vX.Y.Z` comment in step — which internal/arch requires, since its
+  # pinning rule reads both the SHA and the comment. The first actions PR is
+  # where that is confirmed rather than assumed (0vk.25 acceptance 3).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # The base images. `directory: "/"` covers both Dockerfile.server and
+  # Dockerfile.guard, which sit at the repo root under non-default names.
+  #
+  # Grouped with no update-type filter — ALL of it in one PR — because the two
+  # files carry the SAME two digests and must not drift apart: two PRs merged a
+  # week apart would leave the guard on one Go toolchain and the server on
+  # another, which is a difference no test in this tree would notice.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "images"
+    groups:
+      base-images:
+        patterns: ["*"]
