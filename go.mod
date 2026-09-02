@@ -6,12 +6,34 @@ go 1.25.0
 //
 // Without it, `go` used whatever was installed — which locally was 1.25.0, so
 // the binaries the gate tested carried every standard-library vulnerability
-// fixed since then while the binaries that SHIPPED were built by
-// golang:1.26-alpine and did not. govulncheck reported 32 of them the first
-// time it ran, all in crypto/tls, crypto/x509, net/http and html/template, and
-// all reachable (review L12). This is the floor, not a pin: a newer toolchain
-// in the image is used as-is.
-toolchain go1.26.7
+// fixed since then while the binaries that SHIPPED were built by the
+// golang:1.26-alpine the Dockerfiles pinned AT THE TIME, and did not.
+// govulncheck reported 32 of them the first time it ran, all in crypto/tls,
+// crypto/x509, net/http and html/template, and all reachable (review L12).
+// This is the floor, not a pin: a newer toolchain in the image is used as-is.
+//
+// IT MUST NEVER EXCEED THE GO THE PINNED IMAGES SHIP, and NOTHING ENFORCES
+// THAT — which is why it is written here rather than assumed. This line governs
+// the gate: locally GOTOOLCHAIN is `auto`, so `go` downloads exactly this
+// toolchain, and on CI setup-go reads THIS line (not the `go` directive above)
+// and puts that Go on PATH. It does NOT reach the image build. Both Dockerfiles
+// set GOTOOLCHAIN=local, and under `local` a toolchain line is inert: a floor
+// above the image is silently ignored and the image's own Go compiles anyway.
+// Measured, not assumed (0vk.35) — with `toolchain go1.28.0` planted here, a
+// `--no-cache` image build succeeded on a base shipping go1.27.1.
+//
+// So the dangerous direction is floor ABOVE image: govulncheck would run under
+// the newer Go and report clean while the shipped binaries were built by the
+// older one and still carried whatever it had. Keeping the two equal is a
+// HUMAN step, and the patch level is READ OUT OF THE IMAGE rather than guessed:
+//
+//	docker run --rm --platform linux/amd64 golang@sha256:<digest> go version
+//
+// Read that way for 1.27 (0vk.35): golang:1.27-alpine@sha256:26402d86… ships
+// go1.27.1 on both linux/amd64 and linux/arm64, so this line and the two FROM
+// digests moved in one change. BrollyZap-0vk.39 is the bead to make it
+// mechanical.
+toolchain go1.27.1
 
 require (
 	github.com/coder/websocket v1.8.15

@@ -13,7 +13,17 @@ FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:26402d86be3d72e6a9410af
 # With GOTOOLCHAIN unset (default "auto") a go.mod toolchain line NEWER than the
 # image would be silently downloaded mid-build: the build would succeed, the
 # digest pin would quietly stop determining the compiler, and nothing would say
-# so. "local" turns that into a loud build failure naming the toolchain.
+# so. "local" is what stops that — the image's own Go compiles, always.
+#
+# WHAT IT DOES NOT DO is complain when go.mod asks for more than this image has.
+# An earlier version of this comment said "local" turned that into a loud build
+# failure naming the toolchain. It does not: under "local" a `toolchain` line is
+# INERT, and only the `go` directive (the language version) can refuse. Measured
+# during 0vk.35 — `toolchain go1.28.0` planted in go.mod, `--no-cache` build on a
+# base shipping go1.27.1, build succeeded silently. So a floor above this image
+# means the gate tests a newer Go than ships here and nothing says so, which is
+# the direction govulncheck cannot see past. BrollyZap-0vk.39 makes it an
+# assertion; until then the two move together by hand, and go.mod says how.
 ENV GOTOOLCHAIN=local
 ARG TARGETOS
 ARG TARGETARCH
