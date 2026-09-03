@@ -41,7 +41,7 @@ violation:
    from a developer machine and **is not the path** (BrollyZap-kwm).
 2. **Re-check the static IP and the manifest port.** Both live in namespaces the
    whole App Store shares, and packages land continuously. Last verified
-   2026-09-01 against `getumbrel/umbrel-apps@e08a7b4` (391 apps): `10.21.21.14`
+   2026-09-03 against `getumbrel/umbrel-apps@318cdcf` (391 apps): `10.21.21.14`
    free, neighbours `.13`/`.15` free, `3033` free.
 
    ```sh
