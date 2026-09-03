@@ -18,6 +18,7 @@ import (
 	gonostr "github.com/nbd-wtf/go-nostr"
 
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
+	"github.com/davotoula/brollyzapper/internal/logging"
 	"github.com/davotoula/brollyzapper/internal/nostr"
 )
 
@@ -470,6 +471,9 @@ func (h *blackHole) counts() int {
 // The two live relays are a positive control: a run in which everything failed
 // would be fast for the wrong reason.
 func TestAPublishIsNotHeldUpByARelayThatNeverConnects(t *testing.T) {
+	// Each of these pays the full connect budget on a black hole of its own;
+	// in series that is the package's slowest twenty seconds, twice under -race.
+	t.Parallel()
 	configured := newFleet(t, 2)
 	hole := newBlackHole(t)
 
@@ -526,6 +530,9 @@ func TestAPublishIsNotHeldUpByARelayThatNeverConnects(t *testing.T) {
 // It PASSES before du9 as well, in fifteen seconds rather than five: it is a
 // guard on the new dialling path, not a regression test for the bug.
 func TestARelayThatNeverCompletesItsHandshakeLeavesNothingBehind(t *testing.T) {
+	// Each of these pays the full connect budget on a black hole of its own;
+	// in series that is the package's slowest twenty seconds, twice under -race.
+	t.Parallel()
 	for _, tc := range []struct {
 		name        string
 		senderNamed bool
@@ -594,46 +601,46 @@ func loggedPool(t *testing.T, relays func() []string) (*nostr.Pool, *syncBuffer)
 	out := &syncBuffer{}
 	pool := nostr.NewPool(t.Context(), relays, nostr.Options{
 		Resolve: publicDNS,
-		Log:     slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Log:     logging.New(out, logging.NewLevelVar(slog.LevelDebug)),
 	})
 	nostr.StandDownDialPolicy(pool)
 	return pool, out
 }
 
-// costRecords picks the per-relay records out of a captured log, by relay.
-func costRecords(t *testing.T, logged string) map[string]struct {
-	Outcome string `json:"outcome"`
-	MS      int64  `json:"ms"`
-} {
+// costRecord is one relay's per-relay record as logged: its outcome and cost.
+type costRecord struct {
+	Outcome string
+	MS      int64
+}
+
+// relayCosts is the per-relay records of one captured log, keyed by relay.
+type relayCosts map[string]costRecord
+
+// relayKey is how the map is keyed: go-nostr's NormalizeURL gives a bare host a
+// trailing slash, and the tests write URLs without one, so both forms meet here.
+func relayKey(url string) string { return strings.TrimSuffix(url, "/") }
+
+// costFor is the record for a relay, looked up by the URL as the test wrote it.
+func (c relayCosts) costFor(url string) costRecord { return c[relayKey(url)] }
+
+// costRecords picks the per-relay records out of a captured log.
+func costRecords(t *testing.T, logged string) relayCosts {
 	t.Helper()
-	out := map[string]struct {
-		Outcome string `json:"outcome"`
-		MS      int64  `json:"ms"`
-	}{}
-	for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
-		if line == "" {
+	out := relayCosts{}
+	for _, record := range logLines(t, logged) {
+		msg, _ := record["msg"].(string)
+		if !strings.HasPrefix(msg, "relay outcome") {
 			continue
 		}
-		var record struct {
-			Msg     string `json:"msg"`
-			Relay   string `json:"relay"`
-			Outcome string `json:"outcome"`
-			MS      int64  `json:"ms"`
-		}
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("a log line is not JSON: %s", line)
-		}
-		if !strings.HasPrefix(record.Msg, "relay outcome") {
-			continue
-		}
-		if _, seen := out[record.Relay]; seen {
+		relay, _ := record["relay"].(string)
+		key := relayKey(relay)
+		if _, seen := out[key]; seen {
 			t.Errorf("two records for %s; one per relay, or the line cannot be read as "+
-				"a relay's cost", record.Relay)
+				"a relay's cost", relay)
 		}
-		out[strings.TrimSuffix(record.Relay, "/")] = struct {
-			Outcome string `json:"outcome"`
-			MS      int64  `json:"ms"`
-		}{record.Outcome, record.MS}
+		outcome, _ := record["outcome"].(string)
+		ms, _ := record["ms"].(float64)
+		out[key] = costRecord{Outcome: outcome, MS: int64(ms)}
 	}
 	return out
 }
@@ -650,6 +657,9 @@ func costRecords(t *testing.T, logged string) map[string]struct {
 // every healthy publish is noise an operator filters out, after which the lines
 // are absent on the day they are wanted.
 func TestASlowOrPartialPublishNamesWhatEachRelayCost(t *testing.T) {
+	// Each of these pays the full connect budget on a black hole of its own;
+	// in series that is the package's slowest twenty seconds, twice under -race.
+	t.Parallel()
 	t.Run("slow and partial", func(t *testing.T) {
 		live := newFleet(t, 1)
 		hole := newBlackHole(t)
@@ -672,7 +682,7 @@ func TestASlowOrPartialPublishNamesWhatEachRelayCost(t *testing.T) {
 		// and one that failed fast were the same word, which is the distinction
 		// TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently
 		// now owns. The claim here is unchanged — only the vocabulary moved.
-		down := records[strings.TrimSuffix(hole.url, "/")]
+		down := records.costFor(hole.url)
 		if down.Outcome != "over_budget" {
 			t.Errorf("the black hole's outcome is %q, want %q — a relay that ate the whole "+
 				"connect budget and one that merely failed to connect are different faults "+
@@ -688,7 +698,7 @@ func TestASlowOrPartialPublishNamesWhatEachRelayCost(t *testing.T) {
 		// And the relay that did NOT cost the time must not read as if it had,
 		// which is what makes the pair of numbers an answer rather than a
 		// timestamp. Its own dial and OK, with the connect barrier subtracted.
-		up := records[strings.TrimSuffix(live.urls()[0], "/")]
+		up := records.costFor(live.urls()[0])
 		if up.Outcome != "accepted" {
 			t.Errorf("the live relay's outcome is %q, want %q", up.Outcome, "accepted")
 		}
@@ -742,6 +752,9 @@ func newShedding(t *testing.T, status int) string {
 // The two are opposite operational facts. One ate the whole budget and IS why
 // the publish was slow; the other cost nothing and is merely unavailable.
 func TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently(t *testing.T) {
+	// Each of these pays the full connect budget on a black hole of its own;
+	// in series that is the package's slowest twenty seconds, twice under -race.
+	t.Parallel()
 	live := newFleet(t, 1)
 	hangs := newBlackHole(t)
 	refuses := newShedding(t, http.StatusServiceUnavailable)
@@ -760,8 +773,8 @@ func TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently(t *tes
 		t.Fatalf("%d per-relay records, want 3\n%s", len(records), logged.String())
 	}
 
-	hung := records[strings.TrimSuffix(hangs.url, "/")]
-	shed := records[strings.TrimSuffix(refuses, "/")]
+	hung := records.costFor(hangs.url)
+	shed := records.costFor(refuses)
 
 	// The claim, stated as the two labels differing rather than as two separate
 	// equality checks: an implementation that labelled both the same would

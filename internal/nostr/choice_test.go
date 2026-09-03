@@ -104,12 +104,11 @@ func TestOnePublishLogsWhichRelaysItUsedAndWhichItDropped(t *testing.T) {
 	}
 }
 
-// logLine finds the one JSON record carrying this message, and fails unless
-// there is exactly one — "ONE line per accepted zap request" is half the
-// criterion, and a per-relay line would be the noise it was written against.
-func logLine(t *testing.T, logged, msg string) map[string]any {
+// logLines parses every JSON record in a captured log, in order. The one place
+// a test decides what a log line is; logLine and costRecords both read through it.
+func logLines(t *testing.T, logged string) []map[string]any {
 	t.Helper()
-	var found []map[string]any
+	var out []map[string]any
 	for _, raw := range strings.Split(strings.TrimSpace(logged), "\n") {
 		if raw == "" {
 			continue
@@ -118,6 +117,18 @@ func logLine(t *testing.T, logged, msg string) map[string]any {
 		if err := json.Unmarshal([]byte(raw), &record); err != nil {
 			t.Fatalf("log line is not JSON: %s", raw)
 		}
+		out = append(out, record)
+	}
+	return out
+}
+
+// logLine finds the one JSON record carrying this message, and fails unless
+// there is exactly one — "ONE line per accepted zap request" is half the
+// criterion, and a per-relay line would be the noise it was written against.
+func logLine(t *testing.T, logged, msg string) map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, record := range logLines(t, logged) {
 		if record["msg"] == msg {
 			found = append(found, record)
 		}
