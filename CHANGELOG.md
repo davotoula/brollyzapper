@@ -2,6 +2,42 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.19 — 2026-09-03
+
+Three changes, all in the zap-receipt publish path, and all measured on the reference box with
+the same six relays: the receipt publish went from **15.0 s to 5.3 s**, and with the dead default
+relay gone it is expected under half a second. Nothing about receiving or sending changed.
+
+### Fixed
+
+- **A zap receipt publish no longer waits out a relay that is down.** go-nostr connects to each
+  relay under a hardcoded 15-second timeout that no caller can shorten, and waits for every relay
+  before returning — so one unreachable relay in the list cost every receipt a flat 15 seconds.
+  The app now connects to each relay itself, under a five-second budget, and hands the library
+  only relays that are already open. A relay that does not connect in time is one failed result,
+  never a longer wait. A relay that has connected and is slow to answer is still waited for, as
+  before.
+- **`relay.nostr.band` is no longer a default relay.** Measured dead from three networks — TCP
+  never completes — and, because it hangs rather than refuses, it consumed the whole connect
+  budget on every publish. It was also the third relay every new pairing was prefilled with.
+  Nothing replaces it; the defaults are `nos.lol`, `relay.damus.io` and `relay.primal.net`, and
+  the Relays setting overrides them.
+
+### Changed
+
+- **The receipt log line says how long the publish took** (`publish_ms`), and when a publish was
+  slow or partial, one DEBUG record per relay names its outcome and duration — `accepted`,
+  `refused`, `over_budget` (it hung and ate the budget), `not_connected` (it failed fast) — so
+  the relay costing the time can be named from a box rather than inferred.
+- The `relays chosen for this publish` line now counts every relay the sender named, with a new
+  `already_ours` field for the ones this node publishes to anyway; `named` equals `kept` plus
+  `dropped` plus `already_ours`.
+
+### Upgrading
+
+**Nothing to do.** No migration, no setting changes. An operator who typed `relay.nostr.band`
+into the Relays setting keeps it — the change is to the defaults only.
+
 ## 0.1.18 — 2026-09-02
 
 Cut before the App Store submission, on the first fresh-install trip's findings and the first
