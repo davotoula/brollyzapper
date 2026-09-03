@@ -1,7 +1,9 @@
 package zap_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -497,5 +499,60 @@ func TestABurstOfAbandonedReceiptsIsBoundedAndSaysSo(t *testing.T) {
 	if announcements != 1 {
 		t.Errorf("%d rows say the bound was reached, want exactly 1 — without it an operator "+
 			"cannot tell a quiet hour from a flood they are not being shown", announcements)
+	}
+}
+
+// slowPool stands in for a publish that takes measurable time.
+//
+// A fake that returned instantly would let publish_ms be a hardcoded zero and
+// the assertion below would still pass — which is how a measurement comes to
+// exist without measuring.
+type slowPool struct {
+	fakePool
+	takes time.Duration
+}
+
+func (s *slowPool) Publish(ctx context.Context, event gonostr.Event,
+	extra ...string) []nostr.PublishResult {
+	time.Sleep(s.takes)
+	return s.fakePool.Publish(ctx, event, extra...)
+}
+
+// du9 criterion 2 / k2z item 4: the receipt line carries how long the publish
+// took.
+//
+// The interval between "relays chosen for this publish" and this line is where a
+// flat fifteen seconds hid for weeks. The two lines bracketed it and neither
+// stated it, so it was findable only by a human holding two timestamps side by
+// side on a box — which is what eventually happened, and only by chance.
+func TestTheReceiptLineSaysHowLongThePublishTook(t *testing.T) {
+	const takes = 40 * time.Millisecond
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged bytes.Buffer
+
+	h.publisherWith(&slowPool{takes: takes}, &logged).PublishNow(t.Context(), hash)
+
+	line := ""
+	for _, candidate := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		if strings.Contains(candidate, "zap receipt published") {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatalf("no receipt line was logged at all:\n%s", logged.String())
+	}
+	var record struct {
+		PublishMS int64 `json:"publish_ms"`
+	}
+	if err := json.Unmarshal([]byte(line), &record); err != nil {
+		t.Fatalf("the receipt line is not JSON: %s", line)
+	}
+	// Against the fake's own delay, so the number has to come from the clock
+	// rather than from a constant. Halved, because a sleep is a floor and a
+	// loaded CI box rounds the wrong way often enough to matter.
+	if floor := (takes / 2).Milliseconds(); record.PublishMS < floor {
+		t.Errorf("publish_ms = %d, want at least %d — the publish took %s and the line must "+
+			"say so:\n%s", record.PublishMS, floor, takes, line)
 	}
 }

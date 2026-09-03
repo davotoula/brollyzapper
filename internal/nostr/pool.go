@@ -132,6 +132,44 @@ const MaxTransientRelays = 8
 // arrived.
 const publishTimeout = 30 * time.Second
 
+// connectBudget bounds the CONNECT phase of one publish, per relay (du9, §7).
+//
+// It exists because nothing else could bound it. go-nostr's EnsureRelay dials
+// under a hardcoded fifteen seconds hung off the POOL's context, so neither
+// publishTimeout nor the caller's context reaches it, and PublishMany closes its
+// result channel only when every per-relay goroutine has finished — so one relay
+// that is simply down cost every zap receipt a flat 15.0 s, measured five times
+// out of five on the box with relays=6 accepted=4. This app therefore connects
+// first, itself, under this budget, and hands the library only relays that are
+// already open.
+//
+// It bounds CONNECTING and nothing else. A relay that has answered the handshake
+// and is slow to send its OK is still waited for, up to publishTimeout — §8's
+// five-second NWC response budget must not leak onto the receipt path, and
+// TestTheReceiptPathIsNotNarrowedToTheNWCResponseBudget is what holds that.
+//
+// FIVE SECONDS, and the reason is a measurement rather than a feeling: a TLS
+// handshake to a healthy relay completes well under a second on the reference
+// box, and the four relays that accepted on the last trip answered in
+// milliseconds. Five leaves an order of magnitude of headroom for a relay having
+// a bad day.
+//
+// EXPIRY CONDITION. Raise it if a trip shows a relay that would have answered
+// being cut off — the DEBUG records below name which relay and how long it took,
+// which is the evidence that would say so. Lower it if a receipt publish is ever
+// on a path where a human is waiting; nobody is today, because §7 publishes
+// after settlement and retries for 24 hours.
+const connectBudget = 5 * time.Second
+
+// errConnectBudget is the cause a dial is cancelled with when the budget runs
+// out, so the failed result can say WHICH deadline bit.
+//
+// A cause rather than a comparison against connectBudget on the clock: the dial
+// context is derived from the publish context, so a caller that is already
+// nearly out of time shortens the budget, and a wall-clock test would then
+// report a budget that never applied.
+var errConnectBudget = errors.New("nostr: the connect budget ran out")
+
 // PublishResult is one relay's answer.
 //
 // Per relay, never one bool for the batch. §7 retries for 24 hours when every
@@ -579,11 +617,227 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 	before := p.Connected()
 	defer func() { p.closeTransient(before, configured) }()
 
+	// THE CONNECT PHASE IS OURS (du9, §7). Snapshot first, then dial: a relay
+	// this publish opens must land outside `before` so the teardown above still
+	// closes it, which is why this cannot move above the snapshot.
+	//
+	// The library is handed only relays that are already open, so EnsureRelay
+	// finds each one connected and returns at once. That is what keeps the
+	// invariant the three mechanisms around this call silently depend on — the
+	// `before` snapshot, the `exempt` pointer and the publishing lock all assume
+	// that when Publish returns, nothing it started is still dialling.
+	start := time.Now()
+	cost := make(map[string]relayCost, len(sending))
 	results := make([]PublishResult, 0, len(sending))
-	for result := range p.pool.PublishMany(ctx, sending, event) {
-		results = append(results, PublishResult{Relay: result.RelayURL, Err: result.Error})
+	connected := make([]string, 0, len(sending))
+	for _, outcome := range p.connect(ctx, sending) {
+		if outcome.err != nil {
+			// One failed RESULT, never a failed publish: o34.3's retry reads
+			// these per relay, and a relay that is down is not a reason to
+			// re-send to the ones that already have the event.
+			results = append(results, PublishResult{Relay: outcome.url, Err: outcome.err})
+			cost[outcome.url] = relayCost{outcome: "not_connected", took: outcome.took}
+			continue
+		}
+		connected = append(connected, outcome.url)
+		// Overwritten below when this relay answers. Labelled anyway rather than
+		// left zero, so a record that somehow escaped without an answer would
+		// say what was actually known about it.
+		cost[outcome.url] = relayCost{outcome: "no_answer", took: outcome.took}
 	}
+
+	// The send phase begins HERE, for every relay at once, which is why a
+	// relay's own cost is its dial plus its wait from this instant. Timing it
+	// from the start of the publish instead would add the slowest dial to
+	// everybody, and every relay would read as having cost the same — which is
+	// precisely the question these records exist to answer.
+	sendStart := time.Now()
+	for result := range p.pool.PublishMany(ctx, connected, event) {
+		results = append(results, PublishResult{Relay: result.RelayURL, Err: result.Error})
+		c := cost[result.RelayURL]
+		c.outcome, c.took = "accepted", c.took+time.Since(sendStart)
+		if result.Error != nil {
+			c.outcome = "refused"
+		}
+		cost[result.RelayURL] = c
+	}
+	p.logRelayCosts(time.Since(start), results, cost)
 	return results
+}
+
+// relayCost is what ONE relay cost, on its own (k2z item 3).
+//
+// Its own, and that is the whole design of the number. The two phases are
+// barriers — every relay dials at once and the send starts when the slowest dial
+// has finished — so a duration measured from the start of the publish would give
+// every relay the same figure, and a record whose numbers are all equal names
+// nobody. This is the relay's dial plus the relay's own wait for an OK, with the
+// barrier between them subtracted out.
+type relayCost struct {
+	// outcome is one of: accepted; refused (it connected and said no, or the
+	// send timed out); not_connected (the connect budget, or the dial itself);
+	// no_answer (connected, and PublishMany reported nothing for it, which
+	// should be unreachable). The distinction is the diagnosis — a relay that
+	// never connects and a relay that connects and stays silent are different
+	// faults on the box, and the bead's own 15-versus-7 prediction turned on
+	// exactly that difference.
+	outcome string
+	took    time.Duration
+}
+
+// logRelayCosts names, at DEBUG, what each relay cost — but only when the
+// publish was SLOW or PARTIAL (§7 part 3, k2z item 3).
+//
+// Only then, because the ordinary case is four or six relays all accepting in
+// milliseconds, and a line each for that is noise an operator would filter out —
+// after which the lines would not be there on the day they were wanted. Slow is
+// "longer than the connect budget", which is the shape of the fault this bead
+// fixed; partial is "somebody refused", which is the shape of the one it did
+// not.
+//
+// One record PER RELAY rather than one record carrying a group. The line is read
+// by grepping a box's journal for the relay whose name is already suspected, and
+// a group flattens differently in every log shipper, whereas relay= on its own
+// line does not. It also keeps the width fixed however many relays a stranger
+// named.
+//
+// Relay URLs only. They are logged already in "relays chosen for this publish",
+// they are not secrets, and an operator cannot match a line against their own
+// relay list if it is redacted. Nothing else is added — no payload, no identity,
+// and deliberately not the relay's own error text, which is unbounded input from
+// a stranger's relay.
+func (p *Pool) logRelayCosts(elapsed time.Duration, results []PublishResult,
+	cost map[string]relayCost) {
+	if elapsed <= connectBudget && Accepted(results) == len(results) {
+		return
+	}
+	for _, result := range results {
+		c := cost[result.Relay]
+		p.log.Debug("relay outcome in a slow or partial publish",
+			"relay", result.Relay, "outcome", c.outcome, "ms", c.took.Milliseconds())
+	}
+}
+
+// connectOutcome is one relay's answer to the connect phase.
+type connectOutcome struct {
+	url string
+	// err is nil when the relay is connected and stored in the pool.
+	err error
+	// took is this relay's OWN dial, and zero for one that was already open.
+	took time.Duration
+}
+
+// connect opens every relay this publish needs, under connectBudget, and reports
+// what happened to each.
+//
+// CONCURRENTLY, and that is load-bearing rather than an optimisation: in series,
+// eight sender-named relays that are all down would cost eight budgets — forty
+// seconds, past publishTimeout — on the path §7 says must never hold up a
+// settlement. The library's own fan-out is concurrent, so this also keeps the
+// wall time of a healthy publish exactly what it was.
+//
+// Every goroutine it starts is joined before it returns. That is the invariant
+// §7 part 2 spells out and the reason the rejected shape — keep the library's
+// fan-out and stop reading once the reachable relays have answered — was
+// rejected: a straggler that connects after the teardown has run stores itself
+// into the pool and is kept for ever.
+//
+// A relay already open is not re-dialled and costs nothing. This is the ordinary
+// case for the operator's own set, which the pool holds between publishes.
+func (p *Pool) connect(ctx context.Context, urls []string) []connectOutcome {
+	out := make([]connectOutcome, len(urls))
+	var wg sync.WaitGroup
+	for i, url := range urls {
+		out[i].url = url
+		if relay, ok := p.pool.Relays.Load(url); ok && relay != nil && relay.IsConnected() {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			began := time.Now()
+			out[i].err = p.dial(ctx, url)
+			out[i].took = time.Since(began)
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// dial connects one relay under the budget and stores it in the pool.
+//
+// THE OPTION HAS TO BE PASSED BY HAND. SimplePool.relayOptions is unexported, so
+// a relay built here carries none of the pool's — the dial-time address check
+// among them, which is the whole of vz1.4's protection against DNS rebinding.
+// internal/arch's checkDialAddressCheckWiring is what keeps that true, and it is
+// not the only guard: dropping the option here also turns
+// dialable_test.go's rebinding test red, which is the behavioural half.
+//
+// context.Background() as the relay's own parent, matching EnsureRelay. The
+// relay must outlive this publish — the operator's connections are held between
+// publishes on purpose — and a relay parented on the publish context would have
+// its socket torn down the instant Publish returned.
+func (p *Pool) dial(ctx context.Context, url string) error {
+	// Derived from the PUBLISH context, so a caller already near its own
+	// deadline shortens this rather than extending past it. That is the
+	// property go-nostr's hardcoded fifteen seconds lacked: it hangs off the
+	// pool's context, where no caller can reach it.
+	dialCtx, cancel := context.WithTimeoutCause(ctx, connectBudget, errConnectBudget)
+	defer cancel()
+
+	relay := gonostr.NewRelay(context.Background(), url,
+		gonostr.WithDialAddressCheck(p.checkDialAddress))
+	if err := relay.Connect(dialCtx); err != nil {
+		// CLOSED, not dropped. NewRelay starts no goroutines until Connect
+		// returns — verified against the pinned fork rather than assumed — so
+		// what this releases is the relay's own context, and with it any
+		// half-open socket the dial left behind.
+		_ = relay.Close()
+		if errors.Is(context.Cause(dialCtx), errConnectBudget) {
+			return fmt.Errorf("nostr: %s did not connect within the %s connect budget: %w",
+				url, connectBudget, err)
+		}
+		return fmt.Errorf("nostr: connecting to %s: %w", url, err)
+	}
+
+	// LOAD-OR-STORE, atomically, because namedLock is unexported: an NWC
+	// subscription dialling this same URL at this same instant is a real race,
+	// and two live *Relay for one URL is a leaked socket and two goroutines that
+	// nothing will ever close — closeTransient can only see the one in the map.
+	//
+	// Compute rather than LoadOrStore, for the case LoadOrStore gets wrong: a
+	// relay whose socket has dropped is still IN the map, because nothing
+	// removes it, so LoadOrStore would hand that dead entry back and discard the
+	// live relay this call just dialled. Be precise about the cost, because it
+	// is smaller than it first looks: EnsureRelay would then re-dial the URL
+	// itself and succeed, since this call has just proved the relay reachable —
+	// so what LoadOrStore buys is a wasted dial, a second socket to the same
+	// relay for the length of it, and a stale *Relay overwritten rather than
+	// closed. Not the fifteen seconds, which needs the relay to go down in the
+	// gap between the two dials. Compute costs the same line count and leaves
+	// none of it, which is why it is the one used; the fifteen seconds is not
+	// the argument for it.
+	//
+	// RESIDUAL, stated rather than implied away: EnsureRelay stores with a plain
+	// Store under its own lock, so a Subscribe that began dialling this URL
+	// before this call and finishes after it can still overwrite this entry and
+	// orphan the socket. It cannot be closed without the library's per-URL lock,
+	// the window is one concurrent subscribe to a relay a publish is dialling at
+	// that instant, and it is filed as BrollyZap-du9.1.
+	var duplicate *gonostr.Relay
+	p.pool.Relays.Compute(url,
+		func(existing *gonostr.Relay, loaded bool) (*gonostr.Relay, bool) {
+			if loaded && existing != nil && existing.IsConnected() {
+				duplicate = relay
+				return existing, false
+			}
+			duplicate = existing
+			return relay, false
+		})
+	if duplicate != nil {
+		_ = duplicate.Close()
+	}
+	return nil
 }
 
 // PublishToConnection sends the event to ONE PAIRING'S OWN relays, and is §8's
@@ -640,7 +894,35 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
 
-	for result := range p.pool.PublishMany(ctx, targets, event) {
+	// THE SAME CONNECT BUDGET (du9). It was a delegated decision and the answer
+	// is yes, for the reason that this path pays MORE for the bug rather than
+	// less: §8 bounds an NWC response attempt at five seconds, and that bound is
+	// on the caller's context, which go-nostr's connect timeout does not consult
+	// — so a pairing naming a relay that is down waited the full fifteen and
+	// blew a budget it appeared to be under. Dialling here derives from this
+	// context, so the five seconds finally binds.
+	//
+	// Safe here for the same reasons it is safe above, and they are the ones
+	// that made the shape worth checking separately. Nothing in this path has a
+	// `before` snapshot or a teardown, so a relay opened here stays in the pool
+	// exactly as EnsureRelay would have left it — the behaviour is unchanged,
+	// only bounded. It is outside the publishing lock, so two of these can dial
+	// one URL at once; Pool.dial stores with Compute for precisely that. And
+	// these relays are subscribed, so the dial-time check exempts them through
+	// exemptRelays' no-snapshot mode, which is what it was written for.
+	//
+	// No DEBUG records: k2z keeps the NWC line, and this bead folded in only its
+	// receipt half.
+	connected := make([]string, 0, len(targets))
+	for _, outcome := range p.connect(ctx, targets) {
+		if outcome.err != nil {
+			results = append(results, PublishResult{Relay: outcome.url, Err: outcome.err})
+			continue
+		}
+		connected = append(connected, outcome.url)
+	}
+
+	for result := range p.pool.PublishMany(ctx, connected, event) {
 		results = append(results, PublishResult{Relay: result.RelayURL, Err: result.Error})
 	}
 	return results

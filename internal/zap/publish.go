@@ -207,7 +207,14 @@ func (p *Publisher) attempt(ctx context.Context, zap store.SettledZap, pending s
 		return
 	}
 
+	// MEASURED (du9, k2z item 4). The two log lines that bracket this call
+	// already existed, and the interval between them is where a flat fifteen
+	// seconds hid for weeks — visible only because a box trip happened to have
+	// the timestamps side by side. An interval nothing states is an interval
+	// nobody reads.
+	started := time.Now()
 	results := p.pool.Publish(ctx, *event, relays...)
+	publishMS := time.Since(started).Milliseconds()
 	accepted := nostr.Accepted(results)
 	if accepted == 0 {
 		p.reschedule(ctx, pending, relayFailure(results))
@@ -220,7 +227,8 @@ func (p *Publisher) attempt(ctx context.Context, zap store.SettledZap, pending s
 	}
 	p.drop(ctx, pending)
 	p.log.Info("zap receipt published", logging.PaymentHash(zap.PaymentHash),
-		"event_id", logging.Short(event.ID), "relays", len(results), "accepted", accepted)
+		"event_id", logging.Short(event.ID), "relays", len(results), "accepted", accepted,
+		"publish_ms", publishMS)
 }
 
 // reschedule queues the next attempt, or gives up once the window has passed.

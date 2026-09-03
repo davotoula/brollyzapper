@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -377,4 +380,331 @@ func TestTheReceiptPathIsNotNarrowedToTheNWCResponseBudget(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Error("the receipt publish never returned after the relay answered")
 	}
+}
+
+// blackHole is a TCP listener that accepts connections and never answers the
+// websocket upgrade.
+//
+// A raw net.Listener and deliberately NOT an httptest.Server with a blocking
+// handler: httptest.Server.Close waits for its handlers to return, so a server
+// whose handler is parked for ever hangs the test's own cleanup rather than the
+// code under test.
+//
+// It HOLDS what it accepts. A listener that accepted and closed would hand the
+// dialler an immediate EOF, which fails fast — the opposite of the case this
+// exists to be. Holding is what makes the connect phase hang, which is the
+// failure the field measured.
+//
+// The fleet's `hold` is the OTHER case and the two are not interchangeable: that
+// one connects and withholds the OK, which §7 says must still be waited for.
+// This one withholds the handshake.
+type blackHole struct {
+	url string
+
+	mu    sync.Mutex
+	live  int
+	conns []net.Conn
+}
+
+func newBlackHole(t *testing.T) *blackHole {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &blackHole{url: "ws://" + listener.Addr().String()}
+	accepting := make(chan struct{})
+	go func() {
+		defer close(accepting)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			h.mu.Lock()
+			h.live++
+			h.conns = append(h.conns, conn)
+			h.mu.Unlock()
+			// Read and discard, so the count falls when the CLIENT closes —
+			// which is the assertion this type is here to support. Nothing is
+			// ever written back, so the upgrade never completes.
+			go func() {
+				_, _ = io.Copy(io.Discard, conn)
+				h.mu.Lock()
+				h.live--
+				h.mu.Unlock()
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-accepting
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for _, conn := range h.conns {
+			_ = conn.Close()
+		}
+	})
+	return h
+}
+
+func (h *blackHole) counts() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.live
+}
+
+// du9 criterion 1. A publish waits for relays that answer, never for relays that
+// are down (§7).
+//
+// The bug this replaces was a flat 15.0 s per zap receipt on any install with
+// one unreachable relay in its list, measured on the box five times out of five
+// with relays=6 accepted=4 — go-nostr's EnsureRelay dials under a hardcoded
+// fifteen seconds hung off the pool's context, and PublishMany closes its result
+// channel only once every per-relay goroutine has returned.
+//
+// The budget is read from the CONSTANT. Asserting against five seconds would
+// pass on the day somebody raised it to thirty, which is the change this test
+// exists to catch.
+//
+// The two live relays are a positive control: a run in which everything failed
+// would be fast for the wrong reason.
+func TestAPublishIsNotHeldUpByARelayThatNeverConnects(t *testing.T) {
+	configured := newFleet(t, 2)
+	hole := newBlackHole(t)
+
+	pool := lifetimePool(t, configured.urls)
+	defer pool.Close()
+
+	start := time.Now()
+	results := pool.Publish(t.Context(), signedNote(t), hole.url)
+	elapsed := time.Since(start)
+
+	// Two seconds of slack over the budget, for the two live relays' own
+	// handshake and OK on a loaded CI box.
+	if limit := nostr.ConnectBudget + 2*time.Second; elapsed > limit {
+		t.Errorf("the publish took %s, want under %s — a relay that is down must cost the "+
+			"connect budget (%s) and not the library's hardcoded fifteen seconds",
+			elapsed.Round(time.Millisecond), limit, nostr.ConnectBudget)
+	}
+	if got := nostr.Accepted(results); got != 2 {
+		t.Errorf("%d of the 2 live relays accepted the event: %+v — a fast publish that "+
+			"delivered nothing is not the fix", got, results)
+	}
+	// Per relay, never a failed batch: o34.3's retry reads these, and a
+	// black-holed relay is one failed result rather than a failed publish.
+	switch got := resultFor(results, hole.url); {
+	case got == nil:
+		t.Errorf("the black hole got no result at all: %+v; it was named, so it must be "+
+			"reported", results)
+	case got.OK():
+		t.Errorf("the black hole reported success: %+v", results)
+	case !strings.Contains(got.Err.Error(), nostr.ConnectBudget.String()):
+		t.Errorf("the failure does not name the budget: %v", got.Err)
+	}
+}
+
+// du9, and the case relay_lifecycle_test did not have: a relay that never
+// completes its handshake must leave nothing behind either.
+//
+// The closed sockets of 0ak were of relays that CONNECTED. A relay abandoned
+// mid-handshake is a different object — go-nostr's NewRelay starts no goroutines
+// until Connect returns, so what has to be true is that the half-open TCP
+// connection is closed and that nothing was stored in the pool under its URL.
+//
+// BOTH ARMS, because only the second one is load-bearing and the first one alone
+// looks like it is. A sender-named relay is covered whatever Pool.dial does: the
+// deferred closeTransient closes anything this publish added that is not the
+// operator's, so storing a relay that never connected would be swept up and the
+// assertion would pass. The operator's OWN relay is not swept, and storing a
+// never-connected one there is the bad case with teeth: IsConnected() is
+// "not closed" rather than "has a socket", so a stored never-connected relay
+// reads as live for ever — Pool.connect would stop dialling it and EnsureRelay
+// would hand the dead object to PublishMany, on the operator's own relay, on
+// every publish from then on.
+//
+// It PASSES before du9 as well, in fifteen seconds rather than five: it is a
+// guard on the new dialling path, not a regression test for the bug.
+func TestARelayThatNeverCompletesItsHandshakeLeavesNothingBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		senderNamed bool
+	}{
+		{name: "named by a sender", senderNamed: true},
+		{name: "the operator's own", senderNamed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := newFleet(t, 1)
+			hole := newBlackHole(t)
+
+			relays := live.urls
+			var extra []string
+			if tc.senderNamed {
+				extra = []string{hole.url}
+			} else {
+				relays = func() []string { return append(live.urls(), hole.url) }
+			}
+			pool := lifetimePool(t, relays)
+			defer pool.Close()
+
+			results := pool.Publish(t.Context(), signedNote(t), extra...)
+			if got := nostr.Accepted(results); got != 1 {
+				t.Fatalf("%d of 1 live relays accepted the event: %+v", got, results)
+			}
+			if got := resultFor(results, hole.url); got == nil || got.OK() {
+				t.Errorf("the black hole is not reported as failed: %+v", results)
+			}
+			lndtest.WaitFor(t, "the abandoned connection to the black hole to close", func() bool {
+				return hole.counts() == 0
+			})
+			if got := pool.Connected(); len(got) != 1 {
+				t.Errorf("the pool holds %d relays (%v), want only the 1 live one — a relay "+
+					"that never connected must not be stored, whoever named it", len(got), got)
+			}
+		})
+	}
+}
+
+// syncBuffer is a log sink two goroutines may reach.
+//
+// slog serialises a single record, not the buffer behind several handlers, and
+// the publish path logs from the dialler's goroutine as well as its own. A bare
+// bytes.Buffer here is a data race that -race would find on some runs and not
+// others.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// loggedPool builds a pool whose DEBUG output is captured.
+func loggedPool(t *testing.T, relays func() []string) (*nostr.Pool, *syncBuffer) {
+	t.Helper()
+	out := &syncBuffer{}
+	pool := nostr.NewPool(t.Context(), relays, nostr.Options{
+		Resolve: publicDNS,
+		Log:     slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	})
+	nostr.StandDownDialPolicy(pool)
+	return pool, out
+}
+
+// costRecords picks the per-relay records out of a captured log, by relay.
+func costRecords(t *testing.T, logged string) map[string]struct {
+	Outcome string `json:"outcome"`
+	MS      int64  `json:"ms"`
+} {
+	t.Helper()
+	out := map[string]struct {
+		Outcome string `json:"outcome"`
+		MS      int64  `json:"ms"`
+	}{}
+	for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Msg     string `json:"msg"`
+			Relay   string `json:"relay"`
+			Outcome string `json:"outcome"`
+			MS      int64  `json:"ms"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("a log line is not JSON: %s", line)
+		}
+		if !strings.HasPrefix(record.Msg, "relay outcome") {
+			continue
+		}
+		if _, seen := out[record.Relay]; seen {
+			t.Errorf("two records for %s; one per relay, or the line cannot be read as "+
+				"a relay's cost", record.Relay)
+		}
+		out[strings.TrimSuffix(record.Relay, "/")] = struct {
+			Outcome string `json:"outcome"`
+			MS      int64  `json:"ms"`
+		}{record.Outcome, record.MS}
+	}
+	return out
+}
+
+// du9 criterion 2 / §7 part 3: the measurement lands with the fix.
+//
+// Without it nobody can show the fix worked, and the bug it fixed hid for weeks
+// precisely because nothing stated the interval. The claim is not "a DEBUG call
+// exists" but "the relay that cost the time can be named from a box", so the
+// assertions are on the numbers: the black hole must show the budget and the
+// live relay must not.
+//
+// The quiet half is as much of the rule as the loud one. A record per relay on
+// every healthy publish is noise an operator filters out, after which the lines
+// are absent on the day they are wanted.
+func TestASlowOrPartialPublishNamesWhatEachRelayCost(t *testing.T) {
+	t.Run("slow and partial", func(t *testing.T) {
+		live := newFleet(t, 1)
+		hole := newBlackHole(t)
+		pool, logged := loggedPool(t, live.urls)
+		defer pool.Close()
+
+		results := pool.Publish(t.Context(), signedNote(t), hole.url)
+		if nostr.Accepted(results) != 1 {
+			t.Fatalf("the live relay did not accept: %+v", results)
+		}
+
+		records := costRecords(t, logged.String())
+		if len(records) != 2 {
+			t.Fatalf("%d per-relay records, want 2 — one for each relay in the publish\n%s",
+				len(records), logged.String())
+		}
+
+		// The relay that cost the time, named, with the cost on it.
+		down := records[strings.TrimSuffix(hole.url, "/")]
+		if down.Outcome != "not_connected" {
+			t.Errorf("the black hole's outcome is %q, want %q — a relay that never connects "+
+				"and one that connects and refuses are different faults on a box",
+				down.Outcome, "not_connected")
+		}
+		// Within a tenth of the budget: the assertion is that the duration is
+		// the real one and not a zero that happens to be logged.
+		if floor := (nostr.ConnectBudget - nostr.ConnectBudget/10).Milliseconds(); down.MS < floor {
+			t.Errorf("the black hole is recorded at %dms, want at least %dms — it held the "+
+				"publish for the whole budget", down.MS, floor)
+		}
+
+		// And the relay that did NOT cost the time must not read as if it had,
+		// which is what makes the pair of numbers an answer rather than a
+		// timestamp. Its own dial and OK, with the connect barrier subtracted.
+		up := records[strings.TrimSuffix(live.urls()[0], "/")]
+		if up.Outcome != "accepted" {
+			t.Errorf("the live relay's outcome is %q, want %q", up.Outcome, "accepted")
+		}
+		if ceiling := nostr.ConnectBudget / 2; up.MS >= ceiling.Milliseconds() {
+			t.Errorf("the live relay is recorded at %dms, want well under %s — it answered "+
+				"at once, and a record that blames it too names nobody", up.MS, ceiling)
+		}
+	})
+
+	t.Run("a healthy publish says nothing", func(t *testing.T) {
+		live := newFleet(t, 2)
+		pool, logged := loggedPool(t, live.urls)
+		defer pool.Close()
+
+		if got := nostr.Accepted(pool.Publish(t.Context(), signedNote(t))); got != 2 {
+			t.Fatalf("%d of 2 relays accepted the event", got)
+		}
+		if records := costRecords(t, logged.String()); len(records) != 0 {
+			t.Errorf("%d per-relay records on a fast, complete publish, want none\n%s",
+				len(records), logged.String())
+		}
+	})
 }
