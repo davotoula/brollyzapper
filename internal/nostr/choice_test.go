@@ -62,7 +62,7 @@ func TestOnePublishLogsWhichRelaysItUsedAndWhichItDropped(t *testing.T) {
 
 	pool.Publish(t.Context(), signedNote(t), named...)
 
-	line := logLine(t, &out, "relays chosen for this publish")
+	line := logLine(t, out.String(), "relays chosen for this publish")
 
 	// The cap is on CANDIDATES, so the first eight of the ten are examined: the
 	// LAN literal, refused on content, and seven names that resolve public. The
@@ -107,10 +107,10 @@ func TestOnePublishLogsWhichRelaysItUsedAndWhichItDropped(t *testing.T) {
 // logLine finds the one JSON record carrying this message, and fails unless
 // there is exactly one — "ONE line per accepted zap request" is half the
 // criterion, and a per-relay line would be the noise it was written against.
-func logLine(t *testing.T, out *bytes.Buffer, msg string) map[string]any {
+func logLine(t *testing.T, logged, msg string) map[string]any {
 	t.Helper()
 	var found []map[string]any
-	for _, raw := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+	for _, raw := range strings.Split(strings.TrimSpace(logged), "\n") {
 		if raw == "" {
 			continue
 		}
@@ -123,7 +123,7 @@ func logLine(t *testing.T, out *bytes.Buffer, msg string) map[string]any {
 		}
 	}
 	if len(found) != 1 {
-		t.Fatalf("found %d %q lines, want exactly 1:\n%s", len(found), msg, out.String())
+		t.Fatalf("found %d %q lines, want exactly 1:\n%s", len(found), msg, logged)
 	}
 	return found[0]
 }
@@ -145,4 +145,86 @@ func stringList(t *testing.T, line map[string]any, key string) []string {
 		out = append(out, fmt.Sprint(item))
 	}
 	return out
+}
+
+// du9.4: the line must tell "the sender named nothing" from "the sender named
+// relays we already have".
+//
+// It could not. The counting loop skipped a relay that was also the operator's
+// BEFORE counting it, so a request naming exactly the relays already configured
+// logged named=0 kept=0 dropped=0 — the same line a request naming no relays at
+// all produces. The relay probe hit exactly that (two publishes, Amethyst's two
+// relays pasted into the operator's list) and the line could not explain itself,
+// while earlier zaps from the same client had logged named=2 kept=2.
+//
+// THE TABLE IS THE TEST. A single case would pass against a counter that always
+// reported what that case wanted; the three rows move named, already_ours and
+// kept independently of each other, and the last row is the one the old code got
+// right — so a change that fixed the first two by breaking it cannot hide.
+func TestTheChosenRelaysLineSaysWhichNamedRelaysWeAlreadyHad(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		ours, fresh                   int
+		wantNamed, wantOurs, wantKept int
+	}{{
+		name: "the sender names exactly the relays we already have",
+		ours: 2, fresh: 0,
+		wantNamed: 2, wantOurs: 2, wantKept: 0,
+	}, {
+		name: "the sender names one of ours and one new",
+		ours: 1, fresh: 1,
+		wantNamed: 2, wantOurs: 1, wantKept: 1,
+	}, {
+		// The case the old code already got right, kept as the control.
+		name: "the sender names only relays we did not have",
+		ours: 0, fresh: 2,
+		wantNamed: 2, wantOurs: 0, wantKept: 2,
+	}, {
+		// And the reading that used to be ambiguous with the first row.
+		name: "the sender names nothing",
+		ours: 0, fresh: 0,
+		wantNamed: 0, wantOurs: 0, wantKept: 0,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			configured := newFleet(t, 2)
+			strangers := newFleet(t, 2)
+			named := append(configured.urls()[:tc.ours], strangers.urls()[:tc.fresh]...)
+
+			pool, logged := loggedPool(t, configured.urls)
+			defer pool.Close()
+
+			results := pool.Publish(t.Context(), signedNote(t), named...)
+			if got := nostr.Accepted(results); got != 2+tc.fresh {
+				t.Fatalf("%d relays accepted, want %d — the fleets are not answering, so "+
+					"the counters below would be measuring nothing: %+v",
+					got, 2+tc.fresh, results)
+			}
+
+			line := logLine(t, logged.String(), "relays chosen for this publish")
+			for _, want := range []struct {
+				key string
+				val int
+			}{{"named", tc.wantNamed}, {"already_ours", tc.wantOurs}, {"kept", tc.wantKept}} {
+				if got, ok := line[want.key].(float64); !ok || int(got) != want.val {
+					t.Errorf("%s = %v, want %d\n%s", want.key, line[want.key], want.val,
+						logged.String())
+				}
+			}
+			// The arithmetic closes, which is what makes the line readable
+			// rather than four numbers that happen to be near each other: every
+			// relay the sender named is accounted for exactly once.
+			sum := 0
+			for _, key := range []string{"kept", "dropped", "already_ours"} {
+				got, ok := line[key].(float64)
+				if !ok {
+					t.Fatalf("%s is missing from the line\n%s", key, logged.String())
+				}
+				sum += int(got)
+			}
+			if named, _ := line["named"].(float64); sum != int(named) {
+				t.Errorf("kept + dropped + already_ours = %d, but named = %v\n%s",
+					sum, line["named"], logged.String())
+			}
+		})
+	}
 }
