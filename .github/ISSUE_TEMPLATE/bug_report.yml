@@ -1,0 +1,77 @@
+name: Bug report
+description: Something the app did that it should not have, or did not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. This issue is **public**. Before you paste anything, remove
+        macaroons, nostr private keys (`nsec…`), pairing URIs (`nostr+walletconnect://…`),
+        preimages and your LAN address — the app never logs them, but a copied settings page or
+        connection screen can carry them. The checkbox at the bottom is there to make you look.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The number next to the wordmark at the top of every page, or `brollyzapper --version` in the server container.
+      placeholder: "0.1.18"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it was installed
+      description: The packaging decides what runs beside the app, so the same symptom can have different causes.
+      options:
+        - Umbrel App Store
+        - Umbrel community app store (brollyzapper-umbrel-store)
+        - Plain docker-compose, outside Umbrel
+        - Other (say what in the description)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: umbrelOS version and architecture (arm64 Raspberry Pi, amd64), or the host OS if you run it elsewhere.
+      placeholder: "umbrelOS 1.7.4, Raspberry Pi 4 (arm64)"
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Wallet or client involved, and its version
+      description: If a nostr client or wallet was part of it — Amethyst, Primal, Alby, Wallet of Satoshi… Several bugs so far have been in the client, so this is where the search starts.
+      placeholder: "Amethyst 0.94.2"
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did, what happened, what you expected
+      description: One step per line. Say which page or which wallet action, and what the app showed — the Security page's Events table is often the answer.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        On Umbrel: `docker logs brollyzapper_server_1` over SSH (and `brollyzapper_guard_1` if sending is involved), or Settings → Troubleshoot → app logs. Turning the log level to `debug` on the Settings page for a minute usually shows the reason next to the symptom. Paste only the lines around the event.
+      render: text
+  - type: dropdown
+    id: reproduce
+    attributes:
+      label: Can you make it happen again?
+      options:
+        - Every time
+        - Sometimes
+        - Once, so far
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      description: This issue is public and stays public.
+      options:
+        - label: I have removed macaroons, nostr private keys (nsec), pairing / connection URIs (nostr+walletconnect://…), preimages, and my LAN address from everything above.
+          required: true

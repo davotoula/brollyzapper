@@ -1,0 +1,11 @@
+# Issue forms, not free text: the first strangers arrive through "New issue", and a
+# form is where the version, the install method and the redaction warning can be
+# made mandatory. A blank issue would carry none of them.
+#
+# No security link here: GitHub adds "Report a security vulnerability" to the chooser
+# itself because SECURITY.md exists, and it points at private vulnerability reporting.
+blank_issues_enabled: false
+contact_links:
+  - name: Running it — the operator guide
+    url: https://github.com/davotoula/brollyzapper/blob/main/OPERATING.md
+    about: Settings, sending and the two caps, backups, macaroon rotation, running outside Umbrel. Read this before asking how something is meant to work.

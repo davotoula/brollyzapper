@@ -1,0 +1,49 @@
+name: Feature request
+description: Something you cannot do today and would like to.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is **safety over features**: it brokers credentials for a Lightning node, and
+        the design keeps the list of what the app may do deliberately short. A request is much
+        easier to weigh when it starts from the problem rather than the feature, and says which
+        side of that line it sits on.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you cannot do today, and what it costs you. Not the feature yet — the same problem often has a smaller answer than the one that first comes to mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Your proposal
+      description: How you imagine it working, from the operator's or the sender's point of view.
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Does it touch spending, credentials, or what is exposed to the public internet?
+      description: Anything that can move sats, that changes which macaroon the app holds, or that adds to the three public routes gets a design review before any code. Saying so here saves a round trip.
+      options:
+        - "No — it stays inside what the app can already do"
+        - "Yes — spending or the spending caps"
+        - "Yes — credentials, macaroons or keys"
+        - "Yes — the public LNURL surface or what strangers can reach"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: bounty
+    attributes:
+      label: Bounty, in sats (optional)
+      description: If you would pay for this to exist, say how much. A bounty is one of the inputs to what gets built next, weighed against the work it takes and the safety line above; it does not buy a way past that line. Leaving it empty is an honest answer too. Terms are agreed on the issue before anyone starts, and nothing changes hands before it ships.
+      placeholder: "21000"
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including doing it in the wallet or client instead, or not doing it at all.
