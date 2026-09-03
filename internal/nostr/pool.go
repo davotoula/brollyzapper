@@ -685,10 +685,12 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 			continue
 		}
 		connected = append(connected, outcome.url)
-		// Overwritten below when this relay answers. Labelled anyway rather than
-		// left zero, so a record that somehow escaped without an answer would
-		// say what was actually known about it.
-		cost[outcome.url] = relayCost{outcome: "no_answer", took: outcome.took}
+		// The outcome is set below, when PublishMany reports this relay — and it
+		// reports every relay it is handed, so nothing connected goes unlabelled
+		// (a label set here "in case" was dead code: logRelayCosts reads cost
+		// only through results, which PublishMany fills). Only the dial's own
+		// duration is known at this point.
+		cost[outcome.url] = relayCost{took: outcome.took}
 	}
 
 	// The send phase begins HERE, for every relay at once, which is why a
@@ -725,8 +727,6 @@ type relayCost struct {
 	//	refused        it connected and said no, or the send timed out
 	//	over_budget    it never finished connecting and ate the whole budget
 	//	not_connected  the dial failed on its own, fast and for free
-	//	no_answer      connected, and PublishMany reported nothing for it,
-	//	               which should be unreachable
 	//
 	// The distinctions are the diagnosis. over_budget versus not_connected is
 	// du9.3 and is the one that costs money: the first names the relay this
@@ -769,6 +769,13 @@ type relayCost struct {
 // relay list if it is redacted. Nothing else is added — no payload, no identity,
 // and deliberately not the relay's own error text, which is unbounded input from
 // a stranger's relay.
+// "Slow" is measured on the pool's own clock: from after the publishing lock,
+// the exemption store and chooseTargets' resolver pre-check, to the last relay's
+// answer. The receipt line's publish_ms (internal/zap) is taken around the whole
+// Publish call and so also counts lock wait and the pre-check. The two numbers
+// can differ, and a publish slowed by the resolver or by queueing behind the
+// lock can exceed the budget on the receipt line while producing no records
+// here — by design, because those records are about relays.
 func (p *Pool) logRelayCosts(elapsed time.Duration, results []PublishResult,
 	cost map[string]relayCost) {
 	if elapsed <= connectBudget && Accepted(results) == len(results) {
