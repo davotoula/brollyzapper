@@ -38,6 +38,11 @@ const SettingRelays = "default_relays"
 // lands on entries zero through two rather than on entry zero alone, and one of
 // them being unreachable is no longer a total outage for that pairing.
 //
+// With this set at three, entries zero through two ARE all of it, and that is
+// worth saying because it is how a dead entry here cost more than the receipt
+// latency it was found through: until 2xw entry two was relay.nostr.band, so
+// every stock pairing was prefilled with a relay that never connects.
+//
 // Entry zero still matters more than the rest, for a reason outside this
 // codebase: NIP-47 says a connection URI's relay parameter "may be more than
 // one", and a client that implements only the first pairs on exactly that one.
@@ -50,10 +55,33 @@ const SettingRelays = "default_relays"
 // entry zero). relay.damus.io stays in the SET — it is large, many senders read
 // there, and §7 says a receipt published only where the sender does not read is
 // invisible. Removing it would trade a pairing problem for a receipt problem.
+// RE-EXAMINED UNDER 2xw AND KEPT: it sheds connections rather than being down —
+// 503 interleaved with 101 from every network probed, no consecutive run of
+// either, TLS completing in 0.10-0.13 s every time — and a shed connection costs
+// about a quarter of a second, not the budget.
+//
+// relay.nostr.band was REMOVED (2xw, 3 Sep 2026). The measurement is the reason,
+// and it is the first one taken with du9's per-relay records: on the 0.1.19-rc1
+// trip its record read not_connected at exactly 5000 ms — the whole connect
+// budget — on every publish, while the relays that accepted answered in 195-806
+// ms. A devops probe then found the same from three vantage points, twenty
+// attempts each: TCP never completes, from the laptop, from the box's host and
+// from inside the server's own network namespace, against a single stable A
+// record. A relay that HANGS is the worst kind to ship, because it costs the
+// whole budget every time where one that refuses costs nothing at all — it was
+// the entire remaining publish cost on the reference box, ~5.2 s down to under
+// half a second without it.
+//
+// NOTHING REPLACED IT, deliberately. sendit.nosflare.com was fastest on the one
+// night anybody measured it, which is not a reason to ship it to every user;
+// three good defaults beat four with a stranger, and the list is an operator
+// setting for exactly this. Whether this set should be fixed at build time at
+// all — rather than re-validated by a periodic probe, with a relay that fails N
+// consecutive publishes named on the Security page — is the open question that
+// would change this, and it is on 2xw.
 var DefaultRelays = []string{
 	"wss://nos.lol",
 	"wss://relay.damus.io",
-	"wss://relay.nostr.band",
 	"wss://relay.primal.net",
 }
 
