@@ -32,3 +32,10 @@ func StandDownDialPolicy(p *Pool) {
 func CheckDialAddress(p *Pool, relayURL, resolved string) error {
 	return p.checkDialAddress("tcp4", relayURL, resolved)
 }
+
+// ConnectBudget is du9's connect-phase bound, exported for the regression test.
+//
+// The test asserts against the CONSTANT and not against five seconds: the number
+// is delegated and will move, and a test carrying its own copy of it would pass
+// on the day the budget was raised to thirty.
+const ConnectBudget = connectBudget

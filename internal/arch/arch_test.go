@@ -1891,9 +1891,16 @@ func second() {
 //
 // The second half matters as much: gonostr.NewRelay and gonostr.RelayConnect
 // build a relay outside the pool, so they carry none of the pool's options and
-// their connections are vetted by nothing. Neither is used today. This is what
-// keeps it that way, and it is the same shape as the NewSimplePool rule above —
-// one door, so that fixing the door fixes everything.
+// their connections would be vetted by nothing.
+//
+// AMENDED 2026-09-03 (du9). They are no longer forbidden outright; they must
+// carry the check themselves. §7's connect budget requires this app to dial a
+// relay itself — the library's fifteen-second connect timeout hangs off the
+// POOL's context, where no caller can reach it — and SimplePool.relayOptions is
+// unexported, so the dialler has to pass WithDialAddressCheck by hand. The rule
+// therefore asks the question it always meant to ask, of all three doors: does
+// THIS construction carry the check. A NewRelay without it still fails, which is
+// the case the flat ban was standing in for.
 //
 // Through the AST, like checkSecretBearingFields, and NOT by scanning text. The
 // real construction spans two lines, so a line-based rule would be satisfied by
@@ -1901,7 +1908,8 @@ func second() {
 // which handles that but miscounts a paren inside a string literal — codeLines
 // blanks comments, not strings. A parser sees neither lines nor literals.
 func checkDialAddressCheckWiring(t *testing.T, files []sourceFile) []problem {
-	// Building a relay outside the pool: it gets none of the pool's options.
+	// Building a relay outside the pool: it gets none of the pool's options, so
+	// it must be given the dial-time check itself.
 	bypasses := []string{"gonostr.NewRelay", "gonostr.RelayConnect"}
 
 	fset := token.NewFileSet()
@@ -1918,10 +1926,11 @@ func checkDialAddressCheckWiring(t *testing.T, files []sourceFile) []problem {
 			}
 			callee := typeString(call.Fun)
 			line := fset.Position(call.Pos()).Line
-			if slices.Contains(bypasses, callee) {
+			if slices.Contains(bypasses, callee) && !mentions(call, "WithDialAddressCheck") {
 				found = append(found, problem{file.rel, line, "calls " + callee +
-					", which builds a relay outside the pool and so carries none of its " +
-					"options — the dial-time address check among them (vz1.4)"})
+					" without WithDialAddressCheck; a relay built outside the pool carries " +
+					"none of its options, so this one connects to whatever it resolves to " +
+					"(vz1.4, amended by du9)"})
 			}
 			if callee == "gonostr.NewSimplePool" && !mentions(call, "WithDialAddressCheck") {
 				found = append(found, problem{file.rel, line,
@@ -1968,6 +1977,26 @@ func direct() {
 	_ = r
 }
 `)}), "outside the pool")
+
+	// du9: the same, for the door this app now uses itself. A relay built by
+	// hand WITHOUT the check is the violation; one built WITH it is the shipped
+	// shape of Pool.dial and must stay clean.
+	catches(t, checkDialAddressCheckWiring(t, []sourceFile{planted("internal/nostr", `package nostr
+
+func dial() {
+	r := gonostr.NewRelay(context.Background(), url)
+	_ = r
+}
+`)}), "outside the pool")
+
+	clean(t, checkDialAddressCheckWiring(t, []sourceFile{planted("internal/nostr", `package nostr
+
+func dial() {
+	r := gonostr.NewRelay(context.Background(), url,
+		gonostr.WithDialAddressCheck(p.checkDialAddress))
+	_ = r
+}
+`)}))
 
 	// No false positive on the shapes a real author writes: the option spread
 	// over several lines, and a string literal carrying an unbalanced paren —
