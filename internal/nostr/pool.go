@@ -189,14 +189,21 @@ const publishTimeout = 30 * time.Second
 // after settlement and retries for 24 hours.
 const connectBudget = 5 * time.Second
 
-// errConnectBudget is the cause a dial is cancelled with when the budget runs
-// out, so the failed result can say WHICH deadline bit.
+// errConnectBudget marks a dial that ran out of connect budget.
 //
 // A cause rather than a comparison against connectBudget on the clock: the dial
 // context is derived from the publish context, so a caller that is already
 // nearly out of time shortens the budget, and a wall-clock test would then
 // report a budget that never applied.
-var errConnectBudget = errors.New("nostr: the connect budget ran out")
+//
+// It is the context's cause AND is wrapped into the error dial returns (du9.3),
+// which is not redundant: a cause dies with its context, and the question "did
+// this relay HANG or fail fast" is asked later — by the DEBUG records now, and
+// by o34.3's retry the day it decides to back off differently for the two. A
+// relay that eats the whole budget on every attempt and one that refuses in
+// 200 ms are the same failure to a caller that cannot tell them apart, and
+// telling them apart was the whole of du9.3.
+var errConnectBudget = errors.New("the connect budget ran out")
 
 // PublishResult is one relay's answer.
 //
@@ -664,7 +671,17 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 			// these per relay, and a relay that is down is not a reason to
 			// re-send to the ones that already have the event.
 			results = append(results, PublishResult{Relay: outcome.url, Err: outcome.err})
-			cost[outcome.url] = relayCost{outcome: "not_connected", took: outcome.took}
+			// SPLIT (du9.3), because the two cost opposite amounts. A relay that
+			// hung ate the whole budget and is why this publish was slow; one
+			// that failed fast cost nothing and is merely unavailable. Both read
+			// not_connected until now, and the first per-relay records ever
+			// taken off a box had them side by side — nostr.band at 5000 ms and
+			// damus at 241 ms, identically labelled.
+			label := "not_connected"
+			if errors.Is(outcome.err, errConnectBudget) {
+				label = "over_budget"
+			}
+			cost[outcome.url] = relayCost{outcome: label, took: outcome.took}
 			continue
 		}
 		connected = append(connected, outcome.url)
@@ -702,13 +719,31 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 // nobody. This is the relay's dial plus the relay's own wait for an OK, with the
 // barrier between them subtracted out.
 type relayCost struct {
-	// outcome is one of: accepted; refused (it connected and said no, or the
-	// send timed out); not_connected (the connect budget, or the dial itself);
-	// no_answer (connected, and PublishMany reported nothing for it, which
-	// should be unreachable). The distinction is the diagnosis — a relay that
-	// never connects and a relay that connects and stays silent are different
-	// faults on the box, and the bead's own 15-versus-7 prediction turned on
-	// exactly that difference.
+	// outcome is one of:
+	//
+	//	accepted       it took the event
+	//	refused        it connected and said no, or the send timed out
+	//	over_budget    it never finished connecting and ate the whole budget
+	//	not_connected  the dial failed on its own, fast and for free
+	//	no_answer      connected, and PublishMany reported nothing for it,
+	//	               which should be unreachable
+	//
+	// The distinctions are the diagnosis. over_budget versus not_connected is
+	// du9.3 and is the one that costs money: the first names the relay this
+	// publish waited for, the second a relay that was simply unavailable. refused
+	// versus either is a working relay declining an event, which is not a
+	// connectivity fault at all and must not be conflated with one.
+	//
+	// WHAT over_budget DOES NOT SPLIT, and why: a relay that completes TCP and
+	// TLS and then rejects the HTTP upgrade — a 502 or 503 from a front proxy,
+	// which is how relay.damus.io sheds load — lands in not_connected beside a
+	// TCP reset. Telling those apart would mean matching text in a dependency's
+	// error string: coder/websocket returns a plain fmt.Errorf for a non-101
+	// status and DISCARDS the *http.Response (dial.go:243), and go-nostr's
+	// NewConnection discards it again (connection.go:22). Neither the status nor
+	// a typed error survives. That match would sit two libraries deep and break
+	// silently on a bump, on the path o34.18 intends to replace. Both are "the
+	// relay was not usable and it cost nothing", which is one operational fact.
 	outcome string
 	took    time.Duration
 }
@@ -822,8 +857,8 @@ func (p *Pool) dial(ctx context.Context, url string) error {
 		// half-open socket the dial left behind.
 		_ = relay.Close()
 		if errors.Is(context.Cause(dialCtx), errConnectBudget) {
-			return fmt.Errorf("nostr: %s did not connect within the %s connect budget: %w",
-				url, connectBudget, err)
+			return fmt.Errorf("nostr: %s: %w after %s: %w",
+				url, errConnectBudget, connectBudget, err)
 		}
 		return fmt.Errorf("nostr: connecting to %s: %w", url, err)
 	}
@@ -967,8 +1002,22 @@ type transientChoice struct {
 	// sending is what the publish will use: the operator's relays plus the
 	// stranger-named ones that survived, in the order they were named.
 	sending []string
-	// named counts the stranger-named targets the caller passed.
+	// named counts the relays the SENDER named — normalised and deduplicated,
+	// so a request naming one relay twice counts one, and an unusable URL counts
+	// none.
+	//
+	// It counts them whether or not this node already has them (du9.4). It did
+	// not until then: the loop skipped a relay that was also the operator's
+	// before counting it, so a request naming exactly the relays already
+	// configured logged named=0 kept=0 — indistinguishable from a request that
+	// named nothing at all, which is what the relay probe hit and could not
+	// explain from the line. The field's own doc said "the targets the caller
+	// passed" throughout, which was the behaviour nobody had.
 	named int
+	// alreadyOurs counts the named ones this node was going to publish to
+	// anyway. It is what makes named=2 kept=0 legible rather than alarming: they
+	// were not dropped, they were already in the list.
+	alreadyOurs int
 	// refused is the ones the allow-list rejected — a LAN address, a name that
 	// resolves to one, or a name nothing answers for.
 	refused []string
@@ -988,14 +1037,20 @@ type transientChoice struct {
 func (c transientChoice) log(log *slog.Logger) {
 	dropped := len(c.refused) + len(c.overCap)
 	log.Info("relays chosen for this publish",
-		// named/kept/dropped are about the STRANGER-named relays only, so the
-		// arithmetic closes: kept + dropped == named. The operator's own relays
-		// are in `relays` but are not counted, because they were never at risk
-		// of being dropped and counting them would make "dropped 2 of 10" read
-		// as though two of the operator's had failed.
+		// THE ARITHMETIC CLOSES, and du9.4 widened it by one term rather than
+		// breaking it: named == kept + dropped + already_ours. Every relay the
+		// sender named is accounted for exactly once — we took it, we dropped
+		// it, or we had it already.
+		//
+		// The operator's OWN relays are still not counted here. They are in
+		// `relays`, they were never at risk of being dropped, and counting them
+		// would make "dropped 2 of 10" read as though two of the operator's had
+		// failed. already_ours is not that: it counts only relays the sender
+		// named which happen to be ours too.
 		"named", c.named,
-		"kept", c.named-dropped,
+		"kept", c.named-dropped-c.alreadyOurs,
 		"dropped", dropped,
+		"already_ours", c.alreadyOurs,
 		"relays", c.sending,
 		"refused", c.refused,
 		"over_cap", c.overCap)
@@ -1030,14 +1085,24 @@ func (c transientChoice) log(log *slog.Logger) {
 // resolver timeouts on a path §7 says must never hold up a settlement.
 func (p *Pool) chooseTargets(ctx context.Context, configured, extra []string) transientChoice {
 	sending := targets(configured, extra...)
-	choice := transientChoice{sending: make([]string, 0, len(sending))}
+	// What the SENDER said, normalised and deduplicated exactly as `sending`
+	// was, so membership below is decided by one notion of relay identity
+	// rather than two. Counting from `sending` instead is what du9.4 fixed:
+	// it has the operator's list folded in, so a relay in both appears once
+	// and the loop could not tell "the sender did not name it" from "the
+	// sender named it and we had it".
+	named := targets(nil, extra...)
+	choice := transientChoice{sending: make([]string, 0, len(sending)), named: len(named)}
 
 	var candidates []string
-	for _, relay := range sending {
+	for _, relay := range named {
 		if slices.Contains(configured, relay) {
+			// Already a target, so not a candidate and not capped — it consumes
+			// no room, exactly as before. What changed is that it is now
+			// counted instead of vanishing.
+			choice.alreadyOurs++
 			continue
 		}
-		choice.named++
 		if len(candidates) < MaxTransientRelays {
 			candidates = append(candidates, relay)
 			continue

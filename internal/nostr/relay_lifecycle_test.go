@@ -667,12 +667,16 @@ func TestASlowOrPartialPublishNamesWhatEachRelayCost(t *testing.T) {
 				len(records), logged.String())
 		}
 
-		// The relay that cost the time, named, with the cost on it.
+		// The relay that cost the time, named, with the cost on it. The label
+		// was not_connected until du9.3 split it: a relay that ate the budget
+		// and one that failed fast were the same word, which is the distinction
+		// TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently
+		// now owns. The claim here is unchanged — only the vocabulary moved.
 		down := records[strings.TrimSuffix(hole.url, "/")]
-		if down.Outcome != "not_connected" {
-			t.Errorf("the black hole's outcome is %q, want %q — a relay that never connects "+
-				"and one that connects and refuses are different faults on a box",
-				down.Outcome, "not_connected")
+		if down.Outcome != "over_budget" {
+			t.Errorf("the black hole's outcome is %q, want %q — a relay that ate the whole "+
+				"connect budget and one that merely failed to connect are different faults "+
+				"on a box", down.Outcome, "over_budget")
 		}
 		// Within a tenth of the budget: the assertion is that the duration is
 		// the real one and not a zero that happens to be logged.
@@ -707,4 +711,81 @@ func TestASlowOrPartialPublishNamesWhatEachRelayCost(t *testing.T) {
 				len(records), logged.String())
 		}
 	})
+}
+
+// shedding is a relay that completes TCP and TLS and then rejects the websocket
+// upgrade, which is how a front proxy sheds load — relay.damus.io's 503s on the
+// relay probe are exactly this.
+//
+// An ordinary httptest.Server is right here and wrong for the black hole, which
+// is the distinction worth keeping straight: this handler RETURNS, so Close has
+// nothing to wait for, while a handler parked for ever would hang the test's own
+// cleanup. See newBlackHole, which is a raw listener for that reason.
+func newShedding(t *testing.T, status int) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(server.Close)
+	return "ws://" + strings.TrimPrefix(server.URL, "http://")
+}
+
+// du9.3: a relay that HANGS and a relay that REFUSES FAST must not read the same.
+//
+// They did. On the 0.1.19-rc1 trip — the first per-relay records ever read off a
+// box — relay.nostr.band (TCP never completes) and relay.damus.io (503 at the
+// upgrade) were both recorded not_connected, one at 5000 ms and the other at
+// 241 ms. The durations told them apart and the labels did not, which is a
+// diagnosis left as arithmetic for whoever reads the journal: "is 241 ms fast?"
+// requires already knowing what the budget is.
+//
+// The two are opposite operational facts. One ate the whole budget and IS why
+// the publish was slow; the other cost nothing and is merely unavailable.
+func TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently(t *testing.T) {
+	live := newFleet(t, 1)
+	hangs := newBlackHole(t)
+	refuses := newShedding(t, http.StatusServiceUnavailable)
+
+	pool, logged := loggedPool(t, live.urls)
+	defer pool.Close()
+
+	results := pool.Publish(t.Context(), signedNote(t), hangs.url, refuses)
+	if nostr.Accepted(results) != 1 {
+		t.Fatalf("the live relay did not accept, so this proves nothing about the other "+
+			"two: %+v", results)
+	}
+
+	records := costRecords(t, logged.String())
+	if len(records) != 3 {
+		t.Fatalf("%d per-relay records, want 3\n%s", len(records), logged.String())
+	}
+
+	hung := records[strings.TrimSuffix(hangs.url, "/")]
+	shed := records[strings.TrimSuffix(refuses, "/")]
+
+	// The claim, stated as the two labels differing rather than as two separate
+	// equality checks: an implementation that labelled both the same would
+	// satisfy either check alone if the expected value were the one it chose.
+	if hung.Outcome == shed.Outcome {
+		t.Errorf("both are recorded %q — a relay that ate the %s budget and one that "+
+			"refused the upgrade in milliseconds are the same line",
+			hung.Outcome, nostr.ConnectBudget)
+	}
+	if hung.Outcome != "over_budget" {
+		t.Errorf("the relay that hung is recorded %q, want %q", hung.Outcome, "over_budget")
+	}
+	if shed.Outcome != "not_connected" {
+		t.Errorf("the relay that refused the upgrade is recorded %q, want %q — it never "+
+			"connected, and it did not cost the budget either", shed.Outcome, "not_connected")
+	}
+
+	// And the durations still agree with the labels, so the two halves of the
+	// record cannot drift apart.
+	if floor := (nostr.ConnectBudget - nostr.ConnectBudget/10).Milliseconds(); hung.MS < floor {
+		t.Errorf("the relay that hung is recorded at %dms, want at least %dms", hung.MS, floor)
+	}
+	if ceiling := (nostr.ConnectBudget / 2).Milliseconds(); shed.MS >= ceiling {
+		t.Errorf("the relay that refused is recorded at %dms, want well under %dms — it "+
+			"answered at once", shed.MS, ceiling)
+	}
 }
