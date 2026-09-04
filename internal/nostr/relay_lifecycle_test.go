@@ -124,14 +124,15 @@ func (f *fleet) serve(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(msg[1], &event); err != nil {
 			continue
 		}
-		if hold := f.received(); hold != nil {
+		hold, closeWithout := f.received()
+		if hold != nil {
 			select {
 			case <-hold:
 			case <-ctx.Done():
 				return
 			}
 		}
-		if f.drops() {
+		if closeWithout {
 			// The event is booked and the socket goes. Returning runs the
 			// deferred CloseNow, which is the close this models.
 			return
@@ -146,17 +147,14 @@ func (f *fleet) serve(w http.ResponseWriter, r *http.Request) {
 func (f *fleet) enter() { f.mu.Lock(); f.live++; f.mu.Unlock() }
 func (f *fleet) leave() { f.mu.Lock(); f.live--; f.mu.Unlock() }
 
-// dropAfterEventualOK makes every relay take the event and close without an OK.
-func (f *fleet) dropAfterEventualOK() {
+// closeWithoutOK makes every relay take the event and close, never answering.
+//
+// Named for what happens rather than for what does not: the first name said
+// "after the eventual OK", and there is never an OK.
+func (f *fleet) closeWithoutOK() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dropAfterEvent = true
-}
-
-func (f *fleet) drops() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.dropAfterEvent
 }
 
 // holdUntil makes every relay in the fleet wait for release before answering.
@@ -166,13 +164,16 @@ func (f *fleet) holdUntil(release chan struct{}) {
 	f.hold = release
 }
 
-// received books an event in and reports what, if anything, the relay must wait
-// for before answering it.
-func (f *fleet) received() chan struct{} {
+// received books an event in and reports what the relay should do with it: what
+// to wait for before answering, and whether to answer at all.
+//
+// Both under ONE lock and at one moment, so a relay cannot be told to hold by
+// one state of the fleet and to close by another.
+func (f *fleet) received() (hold chan struct{}, closeWithout bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.arrived++
-	return f.hold
+	return f.hold, f.dropAfterEvent
 }
 
 func (f *fleet) counts() (live, arrived int) {
@@ -1041,7 +1042,7 @@ func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
 func TestARelayThatTakesTheEventAndClosesWithoutAnOKIsNotAccepted(t *testing.T) {
 	t.Parallel()
 	relays := newFleet(t, 1)
-	relays.dropAfterEventualOK()
+	relays.closeWithoutOK()
 
 	pool := lifetimePool(t, relays.urls)
 	defer pool.Close()
@@ -1069,5 +1070,63 @@ func TestARelayThatTakesTheEventAndClosesWithoutAnOKIsNotAccepted(t *testing.T) 
 	case !errors.Is(got.Err, nostr.ErrNoAnswer):
 		t.Errorf("the failure is %v, want one wrapping ErrNoAnswer — the label exists for "+
 			"exactly this and was never applied before", got.Err)
+	}
+}
+
+// The classifier's whole table, including the two rows nothing else reaches.
+//
+// `refused` needs a relay that answers OK(false) and the documented false
+// negative is a race that cannot be held open, so through a real relay they are
+// a fixture and a flake respectively. The fact being asserted is a FORK QUIRK —
+// go-nostr returns a nil error when the connection dies before the OK — and
+// o34.18's migration has to re-check every row of this against the successor
+// library. That is the reason it is a table rather than prose.
+func TestSendOutcomeClassifiesEveryCombination(t *testing.T) {
+	t.Parallel()
+	refusal := errors.New("msg: blocked: pubkey not allowed")
+
+	for _, tc := range []struct {
+		name        string
+		err         error
+		connected   bool
+		wantOutcome string
+		// wantErr is what the caller must see: the same error, or the sentinel
+		// substituted for a nil that meant nothing of the sort.
+		wantErr error
+	}{{
+		name: "it took the event",
+		err:  nil, connected: true,
+		wantOutcome: "accepted", wantErr: nil,
+	}, {
+		// The nok row. A nil error and a dead socket is go-nostr saying "the
+		// connection went away", not "the relay said yes".
+		name: "it took the event and the socket went away before any OK",
+		err:  nil, connected: false,
+		wantOutcome: "no_answer", wantErr: nostr.ErrNoAnswer,
+	}, {
+		// The row with no other test: a working relay declining this event.
+		name: "a working relay declined it",
+		err:  refusal, connected: true,
+		wantOutcome: "refused", wantErr: refusal,
+	}, {
+		// The write never landed. Same operational fact as a dial that never
+		// got a socket, and deliberately not refused.
+		name: "the write failed and the socket was already gone",
+		err:  refusal, connected: false,
+		wantOutcome: "not_connected", wantErr: refusal,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			outcome, err := nostr.SendOutcome(tc.err, tc.connected)
+			if outcome != tc.wantOutcome {
+				t.Errorf("outcome = %q, want %q", outcome, tc.wantOutcome)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Errorf("err = %v, want nil — a relay that acknowledged the event", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("err = %v, want one wrapping %v", err, tc.wantErr)
+			}
+		})
 	}
 }

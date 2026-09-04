@@ -1720,9 +1720,10 @@ func watch() {
 // still exported, still the obvious thing to reach for, and re-adding it would
 // reopen both findings silently — every test in this package would stay green.
 //
-// The AUTH-REQUIRED RETRY the fan-out offers is not a reason to go back: it is
-// gated on an auth handler, this pool installs none, and the only
-// WithAuthHandler in the tree is the planted violation in the rule above.
+// The AUTH-REQUIRED RETRY the fan-out offers is not a reason to go back, and
+// internal/nostr's publishOne carries that argument — the only WithAuthHandler
+// in this tree is the planted violation in
+// TestTheRelayPoolIsBuiltWithTheDialAddressCheck, below.
 func checkPublishFanOutSites(t *testing.T, files []sourceFile) []problem {
 	var found []problem
 	for _, f := range files {

@@ -46,3 +46,12 @@ const ConnectBudget = connectBudget
 // it yet — internal/zap only asks whether anything was Accepted — and an
 // exported sentinel is a promise to keep it stable.
 var ErrNoAnswer = errNoAnswer
+
+// SendOutcome is the pure classifier behind publishOne, exported so its table
+// can be asserted directly.
+//
+// Two of its four rows have no other test and are awkward to reach through a
+// real relay: `refused` needs a relay that answers OK(false), and the
+// documented false negative — a socket dropping just after a genuine OK — is a
+// race nothing can hold open. As a pure function they are four lines.
+func SendOutcome(err error, connected bool) (string, error) { return sendOutcome(err, connected) }
