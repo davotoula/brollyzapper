@@ -802,3 +802,194 @@ func TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently(t *tes
 			"answered at once", shed.MS, ceiling)
 	}
 }
+
+// The three d1o tests below share a shape, and these two helpers are all of it.
+// Each runs t.Parallel: each pays a full connect budget on a black hole of its
+// own, and in series they would add fifteen seconds to the package, more under
+// -race. The timing claim survives the parallelism because it is a bound rather
+// than a race — see assertPromptly.
+//
+// awaitPublish takes the publish's answer, or fails if it never arrives.
+//
+// The timeout is the budget plus five seconds: long enough that only a hang
+// reaches it, since a publish holding a black hole returns at the budget. The
+// three tests assert different things about the results, so this returns them
+// rather than checking anything itself.
+func awaitPublish(t *testing.T, done <-chan []nostr.PublishResult) []nostr.PublishResult {
+	t.Helper()
+	select {
+	case results := <-done:
+		return results
+	case <-time.After(nostr.ConnectBudget + 5*time.Second):
+		t.Fatal("the publish never returned")
+		return nil
+	}
+}
+
+// assertPromptly is how the three d1o tests state their claim: the relay had the
+// event long before the dead one's dial could possibly have finished.
+//
+// A POSITIVE TIME BOUND, and the first version of these tests did not have one —
+// it asserted instead that Publish had not returned yet, with a non-blocking
+// receive taken the moment the relay's arrival count moved. That is a RACE
+// AGAINST THE BUG rather than a measurement of it. Under the barrier being
+// fixed, the dial finishes and the send to the open relay follows within
+// milliseconds, so "the event arrived" and "Publish returned" land together and
+// which one the poll sees is a coin flip: measured against the pre-fix code, one
+// of those tests passed 3 times in 10 and another 4 times in 10 — passing
+// against exactly the bug it exists to catch. It looked reliable only because
+// the whole-tree plant runs it alongside everything else, and the load hid it.
+//
+// Half the connect budget is the bound. Under the fix the arrival is immediate;
+// under the barrier it cannot happen before the budget elapses. Nothing lives in
+// between, which is what makes the margin wide instead of tight.
+func assertPromptly(t *testing.T, started time.Time, what string) {
+	t.Helper()
+	elapsed, limit := time.Since(started), nostr.ConnectBudget/2
+	if elapsed > limit {
+		t.Errorf("%s after %s, want under %s — it waited for the dead relay's dial",
+			what, elapsed.Round(time.Millisecond), limit)
+	}
+}
+
+// d1o, the NWC half and the one that matters: §8 gives one response attempt
+// exactly the connect budget, so a dead relay in a pairing's list can spend all
+// of it dialling and leave nothing for the live one.
+//
+// ResponseAttemptTimeout is 5 s (internal/nwc/publish.go) and connectBudget is
+// 5 s, and the dial context DERIVES from the attempt's. Before this fix the
+// connect phase was a barrier: every dial had to finish before anything was
+// sent, so a pairing holding one dead relay dialled it for the whole attempt and
+// then published to its live, already-subscribed relay against a context that
+// had just expired.
+//
+// It is a REGRESSION introduced by du9. Before that, the library's own fan-out
+// sent to the live relay immediately while the dead one was still dialling.
+//
+// The live relay is SUBSCRIBED, which is what makes it already-open and is the
+// real shape: an NWC pairing holds its relays open for the life of the pairing.
+func TestAnNWCResponseReachesTheLiveRelayWhileADeadOneIsStillDialling(t *testing.T) {
+	t.Parallel()
+	live := newFleet(t, 1)
+	hole := newBlackHole(t)
+
+	pool := lifetimePool(t, func() []string { return nil })
+	defer pool.Close()
+
+	sub, err := pool.Subscribe(t.Context(), live.urls()[0], gonostr.Filter{Kinds: []int{23194}})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	lndtest.WaitFor(t, "the pairing's relay to accept the subscription", func() bool {
+		open, _ := live.counts()
+		return open == 1
+	})
+
+	// The attempt budget, exactly as §8 sets it and exactly equal to the connect
+	// budget. This is the arrangement the bug needs, not a contrived one.
+	ctx, cancel := context.WithTimeout(t.Context(), nostr.ConnectBudget)
+	defer cancel()
+
+	started := time.Now()
+	done := make(chan []nostr.PublishResult, 1)
+	go func() {
+		done <- pool.PublishToConnection(ctx, signedNote(t),
+			nostr.PairingRelays([]string{live.urls()[0], hole.url}))
+	}()
+
+	// The claim, measured from the RELAY's side: the response is handed to the
+	// live relay while the dead one is still being dialled, not after it.
+	lndtest.WaitFor(t, "the live relay to be handed the response", func() bool {
+		_, arrived := live.counts()
+		return arrived == 1
+	})
+	assertPromptly(t, started, "the live relay was handed the response")
+
+	// And the result says so. Against an expired context the send fails, the
+	// attempt is recorded as failed and retried, and every retry pays the same
+	// five seconds again.
+	results := awaitPublish(t, done)
+	if got := resultFor(results, live.urls()[0]); got == nil || !got.OK() {
+		t.Errorf("the live, already-subscribed relay did not take the response: %+v — "+
+			"the dial for the dead relay spent the whole attempt budget", results)
+	}
+	if got := resultFor(results, hole.url); got == nil || got.OK() {
+		t.Errorf("the dead relay is not reported as failed: %+v", results)
+	}
+}
+
+// d1o, the receipt half: latency only, but the same barrier.
+//
+// §7 says nobody is waiting on a receipt and publishTimeout is 30 s, so the
+// event still goes out — every healthy relay just gets it up to a whole connect
+// budget later than it could have, whenever one dead relay is in the list. That
+// is the ordinary case on an install with a stale relay list.
+//
+// The configured relay is opened by a first publish, so the second one finds it
+// already connected — which is the state the pool is in for every publish after
+// the first.
+func TestAnAlreadyOpenRelayIsSentToWhileAnotherIsStillDialling(t *testing.T) {
+	t.Parallel()
+	configured := newFleet(t, 1)
+	hole := newBlackHole(t)
+
+	pool := lifetimePool(t, configured.urls)
+	defer pool.Close()
+
+	if got := nostr.Accepted(pool.Publish(t.Context(), signedNote(t))); got != 1 {
+		t.Fatalf("%d of 1 relays accepted the first event; the fleet is not answering", got)
+	}
+
+	started := time.Now()
+	done := make(chan []nostr.PublishResult, 1)
+	go func() { done <- pool.Publish(t.Context(), signedNote(t), hole.url) }()
+
+	lndtest.WaitFor(t, "the open relay to be handed the second event", func() bool {
+		_, arrived := configured.counts()
+		return arrived == 2
+	})
+	assertPromptly(t, started, "the open relay was handed the event")
+
+	if got := nostr.Accepted(awaitPublish(t, done)); got != 1 {
+		t.Errorf("%d relays accepted, want 1", got)
+	}
+}
+
+// d1o, and the case that decides the SHAPE of the fix rather than whether to
+// fix it.
+//
+// The bead proposed two phases: send to the already-open relays at once,
+// concurrently with dialling the rest. That leaves the same barrier inside the
+// dialled group — nothing is open on the first publish after a restart, so a
+// live relay would still wait for a dead one, and for an NWC pairing that is
+// precisely the moment a subscription has dropped and the response matters most.
+//
+// So: no relay waits for another, open or not. This is the FIRST publish on a
+// fresh pool, which is what makes the live relay unopened.
+func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
+	t.Parallel()
+	configured := newFleet(t, 1)
+	hole := newBlackHole(t)
+
+	pool := lifetimePool(t, configured.urls)
+	defer pool.Close()
+	if got := pool.Connected(); len(got) != 0 {
+		t.Fatalf("the pool already holds %v; this test needs the live relay UNOPENED, or it "+
+			"is the already-open case again", got)
+	}
+
+	started := time.Now()
+	done := make(chan []nostr.PublishResult, 1)
+	go func() { done <- pool.Publish(t.Context(), signedNote(t), hole.url) }()
+
+	lndtest.WaitFor(t, "the live relay to be handed the event", func() bool {
+		_, arrived := configured.counts()
+		return arrived == 1
+	})
+	assertPromptly(t, started, "the live relay was handed the event")
+
+	if got := nostr.Accepted(awaitPublish(t, done)); got != 1 {
+		t.Errorf("%d relays accepted, want 1", got)
+	}
+}
