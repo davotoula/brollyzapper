@@ -803,6 +803,32 @@ func TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently(t *tes
 	}
 }
 
+// assertPromptly is how the three d1o tests state their claim: the relay had the
+// event long before the dead one's dial could possibly have finished.
+//
+// A POSITIVE TIME BOUND, and the first version of these tests did not have one —
+// it asserted instead that Publish had not returned yet, with a non-blocking
+// receive taken the moment the relay's arrival count moved. That is a RACE
+// AGAINST THE BUG rather than a measurement of it. Under the barrier being
+// fixed, the dial finishes and the send to the open relay follows within
+// milliseconds, so "the event arrived" and "Publish returned" land together and
+// which one the poll sees is a coin flip: measured against the pre-fix code, one
+// of those tests passed 3 times in 10 and another 4 times in 10 — passing
+// against exactly the bug it exists to catch. It looked reliable only because
+// the whole-tree plant runs it alongside everything else, and the load hid it.
+//
+// Half the connect budget is the bound. Under the fix the arrival is immediate;
+// under the barrier it cannot happen before the budget elapses. Nothing lives in
+// between, which is what makes the margin wide instead of tight.
+func assertPromptly(t *testing.T, started time.Time, what string) {
+	t.Helper()
+	elapsed, limit := time.Since(started), nostr.ConnectBudget/2
+	if elapsed > limit {
+		t.Errorf("%s after %s, want under %s — it waited for the dead relay's dial",
+			what, elapsed.Round(time.Millisecond), limit)
+	}
+}
+
 // d1o, the NWC half and the one that matters: §8 gives one response attempt
 // exactly the connect budget, so a dead relay in a pairing's list can spend all
 // of it dialling and leave nothing for the live one.
@@ -846,6 +872,7 @@ func TestAnNWCResponseReachesTheLiveRelayWhileADeadOneIsStillDialling(t *testing
 	ctx, cancel := context.WithTimeout(t.Context(), nostr.ConnectBudget)
 	defer cancel()
 
+	started := time.Now()
 	done := make(chan []nostr.PublishResult, 1)
 	go func() {
 		done <- pool.PublishToConnection(ctx, signedNote(t),
@@ -858,19 +885,7 @@ func TestAnNWCResponseReachesTheLiveRelayWhileADeadOneIsStillDialling(t *testing
 		_, arrived := live.counts()
 		return arrived == 1
 	})
-	if _, arrived := live.counts(); arrived != 1 {
-		t.Fatalf("the live relay was handed %d events, want 1", arrived)
-	}
-	// WHILE, not after. The arrival alone is not the claim — the event reaches
-	// the relay eventually even with the barrier, because go-nostr writes the
-	// frame on the connection's own context before waiting for the OK. What
-	// makes this about ordering is that the call has not returned yet.
-	select {
-	case results := <-done:
-		t.Fatalf("the publish had already returned, so the arrival proves nothing about "+
-			"ordering: %+v", results)
-	default:
-	}
+	assertPromptly(t, started, "the live relay was handed the response")
 
 	select {
 	case results := <-done:
@@ -915,6 +930,7 @@ func TestAnAlreadyOpenRelayIsSentToWhileAnotherIsStillDialling(t *testing.T) {
 		t.Fatalf("%d of 1 relays accepted the first event; the fleet is not answering", got)
 	}
 
+	started := time.Now()
 	done := make(chan []nostr.PublishResult, 1)
 	go func() { done <- pool.Publish(t.Context(), signedNote(t), hole.url) }()
 
@@ -922,14 +938,7 @@ func TestAnAlreadyOpenRelayIsSentToWhileAnotherIsStillDialling(t *testing.T) {
 		_, arrived := configured.counts()
 		return arrived == 2
 	})
-	// Still dialling: the publish has NOT returned, so what was just measured is
-	// a send that overlapped the dial rather than one that followed it.
-	select {
-	case results := <-done:
-		t.Fatalf("the publish had already returned, so the relay being handed the event "+
-			"proves nothing about ordering: %+v", results)
-	default:
-	}
+	assertPromptly(t, started, "the open relay was handed the event")
 
 	select {
 	case results := <-done:
@@ -968,6 +977,7 @@ func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
 			"is the already-open case again", got)
 	}
 
+	started := time.Now()
 	done := make(chan []nostr.PublishResult, 1)
 	go func() { done <- pool.Publish(t.Context(), signedNote(t), hole.url) }()
 
@@ -975,12 +985,7 @@ func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
 		_, arrived := configured.counts()
 		return arrived == 1
 	})
-	select {
-	case results := <-done:
-		t.Fatalf("the publish had already returned, so the arrival proves nothing about "+
-			"ordering: %+v", results)
-	default:
-	}
+	assertPromptly(t, started, "the live relay was handed the event")
 
 	select {
 	case results := <-done:
