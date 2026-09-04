@@ -705,13 +705,14 @@ type relayCost struct {
 	// worth explaining rather than looking like a revert. That reading was right
 	// for the shape it was made against: results were APPENDED as PublishMany
 	// reported them, so a relay it never reported simply had no result, and
-	// logRelayCosts — which reads cost only through results — never looked the
-	// label up. d1o publishes per relay into a pre-sized slot instead, so the
-	// slot exists whether or not the library answers, and the zero PublishResult
-	// in it has a NIL error, which Accepted counts as a success. The label and
-	// its errNoAnswer are the fail-closed value of that slot: still unreachable,
-	// but now the thing it guards is "a relay nobody heard from is reported as
-	// having taken the receipt" rather than "a map entry goes unread".
+	// logRelayCosts, which walked the costs only through results, never looked
+	// the label up. d1o publishes per relay into a pre-sized slot instead, so
+	// the slot exists whether or not the library answers, and the zero
+	// PublishResult in it has a NIL error, which Accepted counts as a success.
+	// The label and its errNoAnswer are the fail-closed value of that slot:
+	// still unreachable, but the thing it guards is now "a relay nobody heard
+	// from is reported as having taken the receipt" rather than "an unread
+	// entry".
 	//
 	// The distinctions are the diagnosis. over_budget versus not_connected is
 	// du9.3 and is the one that costs money: the first names the relay this
@@ -761,13 +762,22 @@ type relayCost struct {
 // can differ, and a publish slowed by the resolver or by queueing behind the
 // lock can exceed the budget on the receipt line while producing no records
 // here — by design, because those records are about relays.
+// The two slices are INDEX-ALIGNED, not keyed. sendAndDial writes results[i] and
+// costs[i] from the same goroutine for targets[i], so position already carries
+// the association. Keying by relay URL was the old shape: the batched
+// PublishMany yielded results in COMPLETION order, so matching a result to its
+// relay genuinely needed a map. Publishing per relay removed that reason, and
+// the map removed with it — along with the one way this could go wrong, which
+// was looking up by result.Relay (what the library echoed back) rather than by
+// the target this app handed it, and silently logging a zero cost if the two
+// ever differed by a trailing slash.
 func (p *Pool) logRelayCosts(elapsed time.Duration, results []PublishResult,
-	cost map[string]relayCost) {
+	costs []relayCost) {
 	if elapsed <= connectBudget && Accepted(results) == len(results) {
 		return
 	}
-	for _, result := range results {
-		c := cost[result.Relay]
+	for i, result := range results {
+		c := costs[i]
 		p.log.Debug("relay outcome in a slow or partial publish",
 			"relay", result.Relay, "outcome", c.outcome, "ms", c.took.Milliseconds())
 	}
@@ -812,7 +822,7 @@ func (p *Pool) logRelayCosts(elapsed time.Duration, results []PublishResult,
 // internal/zap's relayFailure reported whichever goroutine happened to lose. It
 // is now the first relay in the list, every time.
 func (p *Pool) sendAndDial(ctx context.Context, targets []string,
-	event gonostr.Event) ([]PublishResult, map[string]relayCost) {
+	event gonostr.Event) ([]PublishResult, []relayCost) {
 	results := make([]PublishResult, len(targets))
 	costs := make([]relayCost, len(targets))
 
@@ -825,12 +835,7 @@ func (p *Pool) sendAndDial(ctx context.Context, targets []string,
 		}()
 	}
 	wg.Wait()
-
-	cost := make(map[string]relayCost, len(targets))
-	for i, url := range targets {
-		cost[url] = costs[i]
-	}
-	return results, cost
+	return results, costs
 }
 
 // publishOne connects one relay if it is not already open, sends, and reports
@@ -870,6 +875,20 @@ func (p *Pool) publishOne(ctx context.Context, url string,
 		}
 	}
 
+	// A BATCH OF ONE, deliberately. Going through PublishMany rather than
+	// relay.Publish keeps whatever the library does around a send — today that
+	// is its auth-required retry, which is inert here because this pool
+	// installs no auth handler, and which starts working for free if one is
+	// ever added.
+	//
+	// It costs goroutines: PublishMany spawns a wrapper plus one per URL and
+	// allocates a channel, so N calls of one are 2N goroutines and N channels
+	// where a single batched call was N+1 and one. For twelve relays that is 36
+	// against 13 — tens of microseconds on Pi-class hardware, against a path
+	// whose own per-relay costs this file records at 195 ms to 5 s. The batched
+	// alternative is the barrier this bead exists to remove, because the library
+	// dials and sends as one unit per call.
+	//
 	// EnsureRelay finds this one open and returns at once, which is what makes
 	// the timing below a measurement of the relay rather than of the dial.
 	sendStart := time.Now()

@@ -42,6 +42,16 @@ const ClientResponseBudget = 60 * time.Second
 // EXPIRY CONDITION: this and ClientResponseBudget are one policy. Three attempts
 // must fit inside the budget with the margin to spare, so if the budget shrinks
 // this shrinks with it.
+//
+// IT ONCE HAD TO STAY ABOVE internal/nostr's connectBudget, AND NO LONGER DOES
+// (d1o, 4 Sep 2026). Both were five seconds, and the relay pool dialled every
+// relay before sending to any of them — so a pairing holding one dead relay
+// spent this entire attempt dialling it, and the live relay's send then ran
+// against a context that had just expired. Every attempt failed and every retry
+// paid it again. The pool now sends per relay, so an already-open relay is
+// published to without waiting on any other relay's dial and the two constants
+// are independent again. Tuning this one is safe; the reasoning that made them
+// a pair is in internal/nostr/pool.go, on sendAndDial.
 const ResponseAttemptTimeout = 5 * time.Second
 
 // ResponseDeliveryMargin is how much of the client's budget must remain for a

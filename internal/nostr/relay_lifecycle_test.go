@@ -803,6 +803,29 @@ func TestARelayThatHangsAndOneThatRefusesTheUpgradeAreRecordedDifferently(t *tes
 	}
 }
 
+// The three d1o tests below share a shape, and these two helpers are all of it.
+// Each runs t.Parallel: each pays a full connect budget on a black hole of its
+// own, and in series they would add fifteen seconds to the package, more under
+// -race. The timing claim survives the parallelism because it is a bound rather
+// than a race — see assertPromptly.
+//
+// awaitPublish takes the publish's answer, or fails if it never arrives.
+//
+// The timeout is the budget plus five seconds: long enough that only a hang
+// reaches it, since a publish holding a black hole returns at the budget. The
+// three tests assert different things about the results, so this returns them
+// rather than checking anything itself.
+func awaitPublish(t *testing.T, done <-chan []nostr.PublishResult) []nostr.PublishResult {
+	t.Helper()
+	select {
+	case results := <-done:
+		return results
+	case <-time.After(nostr.ConnectBudget + 5*time.Second):
+		t.Fatal("the publish never returned")
+		return nil
+	}
+}
+
 // assertPromptly is how the three d1o tests state their claim: the relay had the
 // event long before the dead one's dial could possibly have finished.
 //
@@ -846,10 +869,6 @@ func assertPromptly(t *testing.T, started time.Time, what string) {
 // The live relay is SUBSCRIBED, which is what makes it already-open and is the
 // real shape: an NWC pairing holds its relays open for the life of the pairing.
 func TestAnNWCResponseReachesTheLiveRelayWhileADeadOneIsStillDialling(t *testing.T) {
-	// Another black hole, another full connect budget; in series these three
-	// would add fifteen seconds to the package, more under -race. The timing
-	// claim below survives it: what it asserts is that the publish has not
-	// returned in the seconds the dead relay still has left to dial.
 	t.Parallel()
 	live := newFleet(t, 1)
 	hole := newBlackHole(t)
@@ -887,20 +906,16 @@ func TestAnNWCResponseReachesTheLiveRelayWhileADeadOneIsStillDialling(t *testing
 	})
 	assertPromptly(t, started, "the live relay was handed the response")
 
-	select {
-	case results := <-done:
-		// And the result says so. Against an expired context the send fails,
-		// the attempt is recorded as failed and retried, and every retry pays
-		// the same five seconds again.
-		if got := resultFor(results, live.urls()[0]); got == nil || !got.OK() {
-			t.Errorf("the live, already-subscribed relay did not take the response: %+v — "+
-				"the dial for the dead relay spent the whole attempt budget", results)
-		}
-		if got := resultFor(results, hole.url); got == nil || got.OK() {
-			t.Errorf("the dead relay is not reported as failed: %+v", results)
-		}
-	case <-time.After(nostr.ConnectBudget + 5*time.Second):
-		t.Fatal("PublishToConnection never returned")
+	// And the result says so. Against an expired context the send fails, the
+	// attempt is recorded as failed and retried, and every retry pays the same
+	// five seconds again.
+	results := awaitPublish(t, done)
+	if got := resultFor(results, live.urls()[0]); got == nil || !got.OK() {
+		t.Errorf("the live, already-subscribed relay did not take the response: %+v — "+
+			"the dial for the dead relay spent the whole attempt budget", results)
+	}
+	if got := resultFor(results, hole.url); got == nil || got.OK() {
+		t.Errorf("the dead relay is not reported as failed: %+v", results)
 	}
 }
 
@@ -915,10 +930,6 @@ func TestAnNWCResponseReachesTheLiveRelayWhileADeadOneIsStillDialling(t *testing
 // already connected — which is the state the pool is in for every publish after
 // the first.
 func TestAnAlreadyOpenRelayIsSentToWhileAnotherIsStillDialling(t *testing.T) {
-	// Another black hole, another full connect budget; in series these three
-	// would add fifteen seconds to the package, more under -race. The timing
-	// claim below survives it: what it asserts is that the publish has not
-	// returned in the seconds the dead relay still has left to dial.
 	t.Parallel()
 	configured := newFleet(t, 1)
 	hole := newBlackHole(t)
@@ -940,13 +951,8 @@ func TestAnAlreadyOpenRelayIsSentToWhileAnotherIsStillDialling(t *testing.T) {
 	})
 	assertPromptly(t, started, "the open relay was handed the event")
 
-	select {
-	case results := <-done:
-		if got := nostr.Accepted(results); got != 1 {
-			t.Errorf("%d relays accepted: %+v", got, results)
-		}
-	case <-time.After(nostr.ConnectBudget + 5*time.Second):
-		t.Fatal("the publish never returned")
+	if got := nostr.Accepted(awaitPublish(t, done)); got != 1 {
+		t.Errorf("%d relays accepted, want 1", got)
 	}
 }
 
@@ -962,10 +968,6 @@ func TestAnAlreadyOpenRelayIsSentToWhileAnotherIsStillDialling(t *testing.T) {
 // So: no relay waits for another, open or not. This is the FIRST publish on a
 // fresh pool, which is what makes the live relay unopened.
 func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
-	// Another black hole, another full connect budget; in series these three
-	// would add fifteen seconds to the package, more under -race. The timing
-	// claim below survives it: what it asserts is that the publish has not
-	// returned in the seconds the dead relay still has left to dial.
 	t.Parallel()
 	configured := newFleet(t, 1)
 	hole := newBlackHole(t)
@@ -987,12 +989,7 @@ func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
 	})
 	assertPromptly(t, started, "the live relay was handed the event")
 
-	select {
-	case results := <-done:
-		if got := nostr.Accepted(results); got != 1 {
-			t.Errorf("%d relays accepted: %+v", got, results)
-		}
-	case <-time.After(nostr.ConnectBudget + 5*time.Second):
-		t.Fatal("the publish never returned")
+	if got := nostr.Accepted(awaitPublish(t, done)); got != 1 {
+		t.Errorf("%d relays accepted, want 1", got)
 	}
 }
