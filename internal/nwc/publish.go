@@ -43,15 +43,23 @@ const ClientResponseBudget = 60 * time.Second
 // must fit inside the budget with the margin to spare, so if the budget shrinks
 // this shrinks with it.
 //
-// IT ONCE HAD TO STAY ABOVE internal/nostr's connectBudget, AND NO LONGER DOES
-// (d1o, 4 Sep 2026). Both were five seconds, and the relay pool dialled every
-// relay before sending to any of them — so a pairing holding one dead relay
-// spent this entire attempt dialling it, and the live relay's send then ran
-// against a context that had just expired. Every attempt failed and every retry
-// paid it again. The pool now sends per relay, so an already-open relay is
-// published to without waiting on any other relay's dial and the two constants
-// are independent again. Tuning this one is safe; the reasoning that made them
-// a pair is in internal/nostr/pool.go, on sendAndDial.
+// ITS RELATION TO internal/nostr's connectBudget CHANGED WITH d1o (4 Sep 2026),
+// from a correctness coupling to a latency one. It did not go away, and an
+// earlier version of this note claimed it had.
+//
+// Both are five seconds. The pool used to dial every relay before sending to
+// any of them, so a pairing holding one dead relay spent this entire attempt
+// dialling it and the live relay's send then ran against a context that had
+// just expired: every attempt FAILED and every retry paid it again. The pool
+// now sends per relay, so an already-open relay is published to without waiting
+// on any other relay's dial, and that failure is gone.
+//
+// WHAT REMAINS, and it is why this is not "safe to tune in isolation": the
+// dial context still DERIVES from the attempt context, so the effective dial
+// bound is min(connectBudget, this). A pairing with a dead relay still COSTS
+// the whole of it — the attempt no longer fails, it just takes that long — and
+// shrinking this constant shortens every dial on the NWC path with it.
+// The reasoning is in internal/nostr/pool.go, on sendAndDial and connectBudget.
 const ResponseAttemptTimeout = 5 * time.Second
 
 // ResponseDeliveryMargin is how much of the client's budget must remain for a

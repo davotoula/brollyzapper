@@ -685,12 +685,16 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 
 // relayCost is what ONE relay cost, on its own (k2z item 3).
 //
-// Its own, and that is the whole design of the number. The two phases are
-// barriers — every relay dials at once and the send starts when the slowest dial
-// has finished — so a duration measured from the start of the publish would give
-// every relay the same figure, and a record whose numbers are all equal names
-// nobody. This is the relay's dial plus the relay's own wait for an OK, with the
-// barrier between them subtracted out.
+// Its own, and that is the whole design of the number. It is the relay's dial
+// plus the relay's own wait for an OK, and nothing of any other relay's.
+//
+// The alternative — timing every relay from the start of the publish — was
+// tried and is wrong, though the reason changed under it. While du9's connect
+// phase was a barrier it gave every relay the SAME figure, and a record whose
+// numbers are all equal names nobody. d1o deleted that barrier, so there is no
+// longer a shared wait to subtract; what remains is that a duration measured
+// from the publish start would fold in this app's own scheduling rather than
+// the relay's behaviour, which is not what the records are for.
 type relayCost struct {
 	// outcome is one of:
 	//
@@ -709,10 +713,18 @@ type relayCost struct {
 	// the label up. d1o publishes per relay into a pre-sized slot instead, so
 	// the slot exists whether or not the library answers, and the zero
 	// PublishResult in it has a NIL error, which Accepted counts as a success.
-	// The label and its errNoAnswer are the fail-closed value of that slot:
-	// still unreachable, but the thing it guards is now "a relay nobody heard
-	// from is reported as having taken the receipt" rather than "an unread
-	// entry".
+	// The label and its errNoAnswer are the fail-closed value of that slot.
+	//
+	// THE SLOT'S OWN CASE IS UNREACHABLE — PublishMany answers every URL it is
+	// handed — BUT THE HAZARD IT NAMES IS NOT, and an earlier version of this
+	// comment said otherwise. BrollyZap-nok: go-nostr's Relay.publish returns
+	// its nil err on connectionContext.Done, so a relay that took the frame and
+	// then had its socket closed yields PublishResult{Err: nil}, which Accepted
+	// counts and internal/zap records as a published receipt. That is exactly
+	// "a relay nobody heard from is reported as having taken the receipt",
+	// reached by a different door, and no_answer is the right label for it —
+	// today it is never applied. Pre-existing under the batched PublishMany;
+	// this branch retained it rather than introducing it.
 	//
 	// The distinctions are the diagnosis. over_budget versus not_connected is
 	// du9.3 and is the one that costs money: the first names the relay this
@@ -767,10 +779,14 @@ type relayCost struct {
 // the association. Keying by relay URL was the old shape: the batched
 // PublishMany yielded results in COMPLETION order, so matching a result to its
 // relay genuinely needed a map. Publishing per relay removed that reason, and
-// the map removed with it — along with the one way this could go wrong, which
-// was looking up by result.Relay (what the library echoed back) rather than by
-// the target this app handed it, and silently logging a zero cost if the two
-// ever differed by a trailing slash.
+// the map removed with it.
+//
+// An earlier version of this comment also claimed the map risked missing on a
+// trailing slash, because the lookup key was result.Relay rather than the
+// target this app handed the goroutine. That was an overclaim: PublishMany sets
+// RelayURL to the URL it was given, so the two strings were identical by
+// construction and the hazard was never reachable. Positional indexing is
+// simpler; it did not fix a bug.
 func (p *Pool) logRelayCosts(elapsed time.Duration, results []PublishResult,
 	costs []relayCost) {
 	if elapsed <= connectBudget && Accepted(results) == len(results) {
@@ -889,8 +905,15 @@ func (p *Pool) publishOne(ctx context.Context, url string,
 	// alternative is the barrier this bead exists to remove, because the library
 	// dials and sends as one unit per call.
 	//
-	// EnsureRelay finds this one open and returns at once, which is what makes
-	// the timing below a measurement of the relay rather than of the dial.
+	// EnsureRelay usually finds this one open and returns at once, which is what
+	// makes the timing below a measurement of the relay rather than of the dial.
+	//
+	// USUALLY, and the residual is worth stating rather than implying away: the
+	// check above and EnsureRelay's own are TWO reads, so a socket that drops
+	// between them is re-dialled by the library under its hardcoded fifteen
+	// seconds off the POOL's context — bounded by neither connectBudget nor the
+	// caller's, and sendAndDial's join waits for it. BrollyZap-1yp removes the
+	// window by publishing on the handle dial already holds.
 	sendStart := time.Now()
 	result := PublishResult{Relay: url, Err: errNoAnswer}
 	cost := relayCost{outcome: "no_answer", took: dialled}
@@ -1061,8 +1084,16 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	// still reached the client, because go-nostr writes it on the connection's
 	// own context before waiting for the OK, but the attempt was recorded as
 	// failed and retried — and every retry paid the five seconds again. A
-	// pairing's relays are subscribed and therefore already open, so they are
-	// now sent to at once, while the dead one is still being dialled.
+	// pairing's relays are USUALLY subscribed and therefore already open, so
+	// they are sent to at once while the dead one is still being dialled.
+	//
+	// Usually, not always, and the exception is the moment this path matters
+	// most: nwc/run.go announces to the WHOLE pairing set when the first
+	// session attaches, so this dials sibling relays that are in neither the
+	// before snapshot, nor configured, nor subscribed yet. That is BrollyZap-
+	// du9.1's window — our Compute store racing that relay's own
+	// Subscribe/EnsureRelay plain Store — and it is a coin flip per two-relay
+	// pairing start rather than the exotic case du9.1 was first filed as.
 	//
 	// The cost records are DISCARDED here: k2z keeps the NWC line, and du9
 	// folded in only its receipt half. They are computed either way, which is
