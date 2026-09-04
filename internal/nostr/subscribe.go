@@ -30,10 +30,10 @@ func (s *Subscription) Relay() string { return s.relayURL }
 // Close ends the subscription and forgets the relay's exemption.
 //
 // It does NOT close the socket. The pool owns relay lifetimes — Publish's
-// teardown and Pool.Close are the two places a relay is closed — and a
-// subscription that closed its own would race a publish that is using the same
-// relay, which is precisely the shape the fork's o34.19 commit exists to make
-// survivable rather than to rely on.
+// teardown, Pool.Close, and Pool.dial discarding a duplicate or a dead entry are
+// where a relay is closed — and a subscription that closed its own would race a
+// publish that is using the same relay, which is precisely the shape the fork's
+// o34.19 commit exists to make survivable rather than to rely on.
 // Nil-tolerant in each of its three parts. A Subscription built by anything
 // other than Subscribe — a consumer's test double is the case that exists — has
 // no relay, no context and no pool, and a Close that panicked on one would make
@@ -69,19 +69,61 @@ func (s *Subscription) Close() {
 // This is also the dial the exemptRelays nil-snapshot path was built for: a
 // subscription dials outside any publish, so there is no snapshot to honour and
 // the operator's list is read fresh.
+//
+// IT DIALS THROUGH Pool.dial, not through the library's EnsureRelay, and du9.1
+// is why. Two ways of writing one map is a torn store: EnsureRelay writes with a
+// plain Store under a fifty-bucket hash lock, Pool.dial writes with an atomic
+// Compute, and neither serialises against the other — so a subscribe and a
+// publish dialling one URL at once left two live sockets and one map entry, and
+// the unmapped socket could never be closed, because every teardown here walks
+// the map. One door, one kind of write, no torn outcome.
+//
+// THE DIAL IS NOW BOUNDED BY THE CALLER'S CONTEXT, at connectBudget rather than
+// the library's hardcoded fifteen seconds off the pool's, and for a long-lived
+// subscription that is a deliberate choice rather than a side effect. Five
+// seconds is right because the retry is what makes a subscription resilient, not
+// the first dial: internal/nwc's resubscribe loop retries in place for ever at a
+// FLAT ReconnectBackoff, so a shorter dial only brings the next attempt forward
+// — there is no exponential penalty for failing sooner — and the WARN it emits
+// is bounded separately by FailureReminderInterval, so the tighter cycle does
+// not turn into a louder log.
+//
+// EXPIRY CONDITION: that argument rests on the backoff being flat. If it becomes
+// exponential, a five-second dial starts costing a doubling it did not before,
+// and this should take a budget of its own rather than connectBudget.
+//
+// AND dial's DUPLICATE-CLOSING IS SAFE HERE, which was the second thing du9.1
+// had to settle before routing a subscription through it. It closes the relay
+// that lost the Compute; nothing can have subscribed on that relay, because dial
+// returns the WINNER and the winner is the only handle this function ever sees —
+// the Subscribe below runs on the line after the dial returns.
+//
+// The other half of that question is the relay it closes when it does NOT lose:
+// a map entry whose socket has dropped, which it replaces. That entry may be one
+// a live Subscription is nominally attached to, and closing it is right rather
+// than merely tolerable — the subscription on a dropped socket is already over,
+// internal/nwc's loop is already re-subscribing, and the close is what releases
+// the dead relay's ping and read goroutines. A CONNECTED entry is never closed:
+// Compute keeps it and discards the newcomer instead.
 func (p *Pool) Subscribe(ctx context.Context, relayURL string,
 	filter gonostr.Filter) (*Subscription, error) {
 	normalised := gonostr.NormalizeURL(strings.TrimSpace(relayURL))
 	if normalised == "" || !gonostr.IsValidRelayURL(normalised) {
 		return nil, fmt.Errorf("nostr: %q is not a usable relay URL", relayURL)
 	}
-	// BEFORE the dial, because the dial is what consults it.
+	// BEFORE the dial, because the dial is what consults it — through
+	// checkDialAddress, which Pool.dial passes to the relay by hand, so this
+	// ordering is what keeps a subscription to the operator's own LAN relay
+	// dialable at all.
 	p.rememberSubscribed(normalised)
 
-	relay, err := p.pool.EnsureRelay(normalised)
+	// NOT WRAPPED. dial's own error already names this relay and says whether
+	// the connect budget expired; a second "nostr: connecting to X:" in front of
+	// it is the message twice.
+	relay, err := p.dial(ctx, normalised)
 	if err != nil {
 		p.forgetSubscribed(normalised)
-		return nil, fmt.Errorf("nostr: connecting to %s: %w", normalised, err)
+		return nil, err
 	}
 	// Its own cancellable context, so Close ends the subscription without
 	// touching the caller's.

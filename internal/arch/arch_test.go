@@ -1750,33 +1750,36 @@ func checkPublishFanOutSites(t *testing.T, files []sourceFile) []problem {
 // by a caller who never typed PublishMany, with every test in this package green.
 // The gap was found by review; the first version of the rule above had it.
 //
-// EnsureRelay has ONE legitimate caller and it is not a publish: Pool.Subscribe
-// holds a relay open for the life of an NWC pairing, where a fifteen-second dial
-// is a different trade and nothing is waiting on an OK. Routing that through
-// Pool.dial too is du9.1's fix shape, and when it lands this rule becomes
-// "nothing calls it at all".
+// NOTHING CALLS IT AT ALL, as of du9.1, and the last caller left for a reason
+// this rule now also carries. Pool.Subscribe used to take its relay from
+// EnsureRelay — a subscription waits on no OK, so nok did not reach it, and a
+// fifteen-second dial for a socket held open for the life of a pairing looked
+// like a different trade. What it could not survive was the STORE: EnsureRelay
+// writes the map with a plain Store under a fifty-bucket hash lock, Pool.dial
+// writes it with an atomic Compute, and neither serialises against the other. A
+// subscribe and a publish dialling one URL at once therefore ended with two live
+// sockets and one map entry, and the unmapped one was a websocket plus its ping
+// and read goroutines that nothing could ever close — every teardown here walks
+// the map. Both doors go through Pool.dial now, so the torn store has no path.
 func checkEnsureRelaySites(t *testing.T, files []sourceFile) []problem {
 	var found []problem
 	for _, file := range files {
 		for i, line := range codeLines(t, file) {
 			if strings.Contains(line, ".EnsureRelay(") {
 				found = append(found, problem{file.rel, i + 1,
-					"calls EnsureRelay; publishing goes through the *Relay Pool.dial holds, " +
-						"and the only caller that may take a relay from the library is " +
-						"Pool.Subscribe (1yp, nok)"})
+					"calls EnsureRelay; every relay this app opens comes from Pool.dial, " +
+						"so a dropped socket cannot be silently re-dialled for fifteen " +
+						"seconds nor read as an acknowledgement, and one URL cannot end " +
+						"up with two live sockets (1yp, nok, du9.1)"})
 			}
 		}
 	}
 	return found
 }
 
-func TestTheOnlyEnsureRelayCallSiteIsTheSubscription(t *testing.T) {
-	real := checkEnsureRelaySites(t, sourceFiles(t, "internal/lnd/lnrpc"))
-	if len(real) != 1 || real[0].file != "internal/nostr/subscribe.go" {
-		t.Errorf("found %d EnsureRelay call sites (%v), want exactly 1 in "+
-			"internal/nostr/subscribe.go — a publish that takes a relay from the library "+
-			"reopens 1yp and nok", len(real), real)
-	}
+func TestNothingCallsEnsureRelay(t *testing.T) {
+	clean(t, checkEnsureRelaySites(t, sourceFiles(t, "internal/lnd/lnrpc")))
+
 	// A publish path that reaches for it directly, which is what the fan-out
 	// rule above does not see.
 	catches(t, checkEnsureRelaySites(t, []sourceFile{planted("internal/nostr", `package nostr
@@ -1784,6 +1787,16 @@ func TestTheOnlyEnsureRelayCallSiteIsTheSubscription(t *testing.T) {
 func send() {
 	relay, _ := p.pool.EnsureRelay(url)
 	_ = relay.Publish(ctx, event)
+}
+`)}), "calls EnsureRelay")
+	// And the subscription that was its one legitimate caller until du9.1. The
+	// plant above would pass a rule written as "no publish may call it"; this one
+	// is what pins the rule to its current form.
+	catches(t, checkEnsureRelaySites(t, []sourceFile{planted("internal/nostr", `package nostr
+
+func watch() {
+	relay, _ := p.pool.EnsureRelay(normalised)
+	_, _ = relay.Subscribe(ctx, filters)
 }
 `)}), "calls EnsureRelay")
 }

@@ -73,8 +73,78 @@ type fleet struct {
 	// while still taking the frame, which is what a relay whose socket dies
 	// mid-publish looks like from here.
 	dropAfterEvent bool
-	servers        []*httptest.Server
+	// holdFirst, once set, parks the fleet's FIRST incoming connection before
+	// the websocket upgrade until it is closed. See holdFirstArrival.
+	holdFirst chan struct{}
+	// connects is the number of connections that have arrived, counted before
+	// the upgrade so a parked one is already visible.
+	connects int
+	servers  []*httptest.Server
 }
+
+// holdFirstArrival parks the fleet's FIRST incoming connection before the
+// websocket upgrade until release is closed, lets every later one straight
+// through, and reports how many have arrived.
+//
+// BEFORE THE UPGRADE, and that is the whole mechanism. fleet.hold delays the OK,
+// which is far too late to catch a dial: by then websocket.Accept has written
+// the 101 and the client's Connect has already returned. Parking at the top of
+// the handler is what holds one dial open across another one, from the far side
+// of the socket, with no sleep anywhere.
+//
+// THE FIRST ONLY, because the test that needs this drives the ordering itself:
+// it starts one dial, waits for it to arrive here, runs the other one to
+// completion while it is parked, and then releases it. A barrier that counted to
+// two could not do that — the second dial would be held by the same gate it is
+// supposed to be racing through.
+//
+// The arrival count is not decoration. A run in which the first dial had not
+// reached this point before the second one started proves nothing at all, and
+// every assertion downstream would pass; the caller waits on it rather than
+// assuming.
+func (f *fleet) holdFirstArrival(release chan struct{}) (arrivals func() int) {
+	f.mu.Lock()
+	f.holdFirst = release
+	f.mu.Unlock()
+	return func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.connects
+	}
+}
+
+// waitAtGate books an arriving connection in, parks it if it is the first and
+// the fleet was told to, and reports whether it should go on to serve.
+//
+// It gives up on the request's own context, which is what a client abandoning a
+// dial closes, and on a bound of its own — because a gate nobody releases must
+// fail its test rather than wedge the package until go test's timeout.
+func (f *fleet) waitAtGate(ctx context.Context) bool {
+	f.mu.Lock()
+	f.connects++
+	release := f.holdFirst
+	first := f.connects == 1
+	f.mu.Unlock()
+	if !first || release == nil {
+		return true
+	}
+	select {
+	case <-release:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-time.After(gateLimit):
+		return false
+	}
+}
+
+// gateLimit is how long a parked connection waits before giving up.
+//
+// EXPIRY CONDITION: it only has to outlast whatever the test does while the
+// connection is parked, plus the connect budget of the dial that is parked. If
+// connectBudget grows past it, raise it — a dial cut short by this instead of by
+// its own deadline would fail for the wrong reason.
+const gateLimit = 30 * time.Second
 
 func newFleet(t *testing.T, n int) *fleet {
 	t.Helper()
@@ -98,6 +168,9 @@ func (f *fleet) urls() []string {
 }
 
 func (f *fleet) serve(w http.ResponseWriter, r *http.Request) {
+	if !f.waitAtGate(r.Context()) {
+		return
+	}
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return

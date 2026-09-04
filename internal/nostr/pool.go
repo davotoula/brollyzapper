@@ -557,9 +557,11 @@ func (p *Pool) mayAuditRefusal() bool {
 // Close drops every connection at shutdown.
 //
 // Each relay is closed explicitly first. go-nostr's SimplePool.Close only
-// cancels the POOL's context, while EnsureRelay builds each relay from
-// context.Background — so closing the pool alone leaves every websocket, its
-// ping goroutine and its read goroutine running for the life of the process.
+// cancels the POOL's context, while every relay in the map was built from
+// context.Background — Pool.dial does it deliberately, so a relay outlives the
+// publish that opened it, and go-nostr's own EnsureRelay did the same. So
+// closing the pool alone leaves every websocket, its ping goroutine and its read
+// goroutine running for the life of the process.
 //
 // This used to be the ONLY place connections were closed, and that was the
 // hazard: a zap request names the relays a receipt is published to, so every
@@ -1017,12 +1019,15 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	// here IS what the event is published on — so a LoadOrStore that returned
 	// the dead entry would be published on directly and fail.
 	//
-	// RESIDUAL, stated rather than implied away: EnsureRelay stores with a plain
-	// Store under its own lock, so a Subscribe that began dialling this URL
-	// before this call and finishes after it can still overwrite this entry and
-	// orphan the socket. It cannot be closed without the library's per-URL lock,
-	// the window is one concurrent subscribe to a relay a publish is dialling at
-	// that instant, and it is filed as BrollyZap-du9.1.
+	// AND IT IS NOW THE ONLY WAY IN (du9.1). While Subscribe took its relay from
+	// EnsureRelay there was a residual this comment had to state: EnsureRelay
+	// stores with a plain Store under its own lock, which does not serialise
+	// against this Compute, so a subscribe that began dialling this URL before
+	// this call and finished after it overwrote the entry and orphaned the
+	// socket — with no way to close it, since every teardown here walks the map.
+	// Subscribe calls this function, so there is no second writer left to tear
+	// the store: whoever loses is closed below, before either caller is handed a
+	// handle.
 	// THE WINNER IS RETURNED, not discarded (1yp). Compute already decides which
 	// handle this URL is going to be published on; handing it back is what lets
 	// publishOne send on the socket it holds rather than asking the library to
@@ -1134,10 +1139,12 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	// Usually, not always, and the exception is the moment this path matters
 	// most: nwc/run.go announces to the WHOLE pairing set when the first
 	// session attaches, so this dials sibling relays that are in neither the
-	// before snapshot, nor configured, nor subscribed yet. That is BrollyZap-
-	// du9.1's window — our Compute store racing that relay's own
-	// Subscribe/EnsureRelay plain Store — and it is a coin flip per two-relay
-	// pairing start rather than the exotic case du9.1 was first filed as.
+	// before snapshot, nor configured, nor subscribed yet. That was du9.1's
+	// window — this Compute store racing that relay's own Subscribe, which took
+	// its relay from EnsureRelay's plain Store — and it was a coin flip per
+	// two-relay pairing start rather than the exotic case du9.1 was first filed
+	// as. Subscribe dials through Pool.dial now, so the concurrent dial this
+	// path still provokes resolves to one socket instead of two.
 	//
 	// The cost records are DISCARDED here: k2z keeps the NWC line, and du9
 	// folded in only its receipt half. They are computed either way, which is

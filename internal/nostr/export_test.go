@@ -55,3 +55,16 @@ var ErrNoAnswer = errNoAnswer
 // documented false negative — a socket dropping just after a genuine OK — is a
 // race nothing can hold open. As a pure function they are four lines.
 func SendOutcome(err error, connected bool) (string, error) { return sendOutcome(err, connected) }
+
+// MappedRelayIsConnected reports whether the pool's map holds a LIVE relay for
+// url, which is the half of du9.1's claim that a socket count cannot make.
+//
+// "Exactly one live relay" and "the live one is the one in the map" are
+// different statements, and the bug this exists to catch satisfies the first
+// while breaking the second: two sockets open, one of them mapped, the other
+// reachable by nothing. Connected() cannot answer it — it reports what is in the
+// map whether or not the socket under it is still up.
+func MappedRelayIsConnected(p *Pool, url string) bool {
+	relay, ok := p.pool.Relays.Load(url)
+	return ok && relay != nil && relay.IsConnected()
+}
