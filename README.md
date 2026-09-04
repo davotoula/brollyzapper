@@ -5,6 +5,25 @@
 Nostr zap receiving (NIP-57) and Nostr Wallet Connect (NIP-47) for an **existing**
 LND node, packaged as an Umbrel app. Safety over features.
 
+## Install on umbrelOS
+
+Until the [official App Store listing](https://github.com/getumbrel/umbrel-apps/pull/6049) is
+merged, install from the community store:
+
+1. In the umbrelOS **App Store**, click the three dots (top right) → **Community App Stores**.
+2. Paste `https://github.com/davotoula/brollyzapper-umbrel-store` and click **Add**.
+3. Open the new store and install **BrollyZapper**.
+4. Open the app from your dashboard and set your domain, address name and relays on the
+   Settings page.
+
+You need the **Lightning Node** app installed and synced — BrollyZapper reads that node's
+certificate and admin macaroon through Umbrel's own app exports and runs no node of its own —
+and a domain that reaches your box over HTTPS for the Lightning address. A fresh install is
+**receive-only**: sending stays off until you complete the authorisation step the app walks you
+through, which bakes a second, separately revocable credential with a spending ceiling you
+choose. Updates arrive through the store like any other app; the same app id is what the
+official listing will carry, so your data and settings are the same app.
+
 The architecture — the guard/server split and the rules it enforces — is described where it is enforced: [`internal/arch/arch_test.go`](internal/arch/arch_test.go) holds the structural rules as tests, and each package's doc comment says what it may and may not touch. (Read the file rather than reaching for `go doc`: `internal/arch` is test-only, so it has no buildable package for `go doc` to open.)
 
 ## Layout
