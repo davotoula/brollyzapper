@@ -3,6 +3,7 @@ package nostr_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -65,8 +66,14 @@ type fleet struct {
 	// hold, once set, makes every relay wait for it to be closed before
 	// answering OK — which is what lets a publish be caught mid-flight, with
 	// its sockets open and nothing yet torn down.
-	hold    chan struct{}
-	servers []*httptest.Server
+	hold chan struct{}
+	// dropAfterEvent, once set, makes every relay CLOSE once it has read an
+	// EVENT, without answering OK. That is nok's shape and it is not the same
+	// as hold: hold delays the OK, this one guarantees there will never be one
+	// while still taking the frame, which is what a relay whose socket dies
+	// mid-publish looks like from here.
+	dropAfterEvent bool
+	servers        []*httptest.Server
 }
 
 func newFleet(t *testing.T, n int) *fleet {
@@ -124,6 +131,11 @@ func (f *fleet) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if f.drops() {
+			// The event is booked and the socket goes. Returning runs the
+			// deferred CloseNow, which is the close this models.
+			return
+		}
 		if err := conn.Write(ctx, websocket.MessageText,
 			[]byte(fmt.Sprintf(`["OK",%q,true,""]`, event.ID))); err != nil {
 			return
@@ -133,6 +145,19 @@ func (f *fleet) serve(w http.ResponseWriter, r *http.Request) {
 
 func (f *fleet) enter() { f.mu.Lock(); f.live++; f.mu.Unlock() }
 func (f *fleet) leave() { f.mu.Lock(); f.live--; f.mu.Unlock() }
+
+// dropAfterEventualOK makes every relay take the event and close without an OK.
+func (f *fleet) dropAfterEventualOK() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropAfterEvent = true
+}
+
+func (f *fleet) drops() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dropAfterEvent
+}
 
 // holdUntil makes every relay in the fleet wait for release before answering.
 func (f *fleet) holdUntil(release chan struct{}) {
@@ -991,5 +1016,58 @@ func TestARelayThatIsNotOpenYetIsAlsoNotHeldUpByADeadOne(t *testing.T) {
 
 	if got := nostr.Accepted(awaitPublish(t, done)); got != 1 {
 		t.Errorf("%d relays accepted, want 1", got)
+	}
+}
+
+// nok: a relay that takes the EVENT and then closes without an OK must be a
+// FAILED result. It was an accepted one.
+//
+// go-nostr's Relay.publish selects on the connection context as well as the
+// send context, and on connectionContext.Done it returns its own err — which is
+// nil unless an OK(false) arrived first. So a relay that read the frame and lost
+// its socket yields PublishResult{Err: nil}: Accepted counts it, internal/zap
+// records a receipt id and drops the pending row, and the NWC respond loop stops
+// retrying. Nobody acknowledged anything.
+//
+// PRE-EXISTING, not introduced by d1o — the batched PublishMany had the same
+// hole. What d1o's per-relay shape and 1yp's held handle add is the ability to
+// ASK: after a nil error, IsConnected() answers whether an OK could have been
+// the reason for it.
+//
+// The in-app trigger is on the bead: the NWC announce publishes to sibling
+// pairing relays that are in neither the before snapshot, nor configured, nor
+// subscribed, and a concurrent zap publish's closeTransient closes exactly those
+// mid-send.
+func TestARelayThatTakesTheEventAndClosesWithoutAnOKIsNotAccepted(t *testing.T) {
+	t.Parallel()
+	relays := newFleet(t, 1)
+	relays.dropAfterEventualOK()
+
+	pool := lifetimePool(t, relays.urls)
+	defer pool.Close()
+
+	results := pool.Publish(t.Context(), signedNote(t))
+
+	// The relay really did take the frame — otherwise this would be testing a
+	// dial failure and would prove nothing about the send.
+	lndtest.WaitFor(t, "the relay to be handed the event", func() bool {
+		_, arrived := relays.counts()
+		return arrived == 1
+	})
+
+	if got := nostr.Accepted(results); got != 0 {
+		t.Errorf("%d relays accepted: %+v — a socket that closed before its OK acknowledged "+
+			"nothing, and internal/zap records a receipt id for anything Accepted counts",
+			got, results)
+	}
+	got := resultFor(results, relays.urls()[0])
+	switch {
+	case got == nil:
+		t.Fatalf("no result for the relay at all: %+v", results)
+	case got.OK():
+		t.Errorf("the relay is reported as having taken the event: %+v", results)
+	case !errors.Is(got.Err, nostr.ErrNoAnswer):
+		t.Errorf("the failure is %v, want one wrapping ErrNoAnswer — the label exists for "+
+			"exactly this and was never applied before", got.Err)
 	}
 }

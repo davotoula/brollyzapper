@@ -1702,6 +1702,55 @@ func watch() {
 `)}), "exactly one such call site")
 }
 
+// 1yp and nok: NOTHING calls go-nostr's publish fan-out any more, and the door
+// stays shut.
+//
+// SimplePool.PublishMany dials-and-sends as one unit per URL, and both of this
+// wave's findings walked through that round trip. It re-checks IsConnected
+// through EnsureRelay and re-dials a dropped socket under a hardcoded fifteen
+// seconds off the POOL's context — bounded by neither connectBudget nor the
+// caller's — under a fifty-bucket hash lock held across the connect. And by
+// answering only with a URL and an error it gave this app no way to ask the
+// question nok turns on: the library returns a NIL error when the connection
+// dies before the OK, so a relay that took the frame and vanished read as
+// accepted, and internal/zap recorded a receipt for it.
+//
+// Pool.dial now hands back the *Relay it stored and publishOne sends on that
+// handle. The rule is here rather than as a comment because the fan-out is
+// still exported, still the obvious thing to reach for, and re-adding it would
+// reopen both findings silently — every test in this package would stay green.
+//
+// The AUTH-REQUIRED RETRY the fan-out offers is not a reason to go back: it is
+// gated on an auth handler, this pool installs none, and the only
+// WithAuthHandler in the tree is the planted violation in the rule above.
+func checkPublishFanOutSites(t *testing.T, files []sourceFile) []problem {
+	var found []problem
+	for _, f := range files {
+		for i, line := range codeLines(t, f) {
+			if strings.Contains(line, ".PublishMany(") {
+				found = append(found, problem{f.rel, i + 1,
+					"calls go-nostr's publish fan-out; publishing goes through the *Relay " +
+						"Pool.dial holds, so a dropped socket cannot be silently re-dialled " +
+						"for fifteen seconds nor read as an acknowledgement (1yp, nok)"})
+			}
+		}
+	}
+	return found
+}
+
+func TestNothingCallsTheLibraryPublishFanOut(t *testing.T) {
+	clean(t, checkPublishFanOutSites(t, sourceFiles(t, "internal/lnd/lnrpc")))
+
+	catches(t, checkPublishFanOutSites(t, []sourceFile{planted("internal/nostr", `package nostr
+
+func send() {
+	for r := range p.pool.PublishMany(ctx, []string{url}, event) {
+		_ = r
+	}
+}
+`)}), "publish fan-out")
+}
+
 // `xmc` Fix B: there is exactly ONE recover() in this tree, and it is the NWC
 // dispatch goroutine's.
 //

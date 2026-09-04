@@ -39,3 +39,10 @@ func CheckDialAddress(p *Pool, relayURL, resolved string) error {
 // is delegated and will move, and a test carrying its own copy of it would pass
 // on the day the budget was raised to thirty.
 const ConnectBudget = connectBudget
+
+// ErrNoAnswer is nok's sentinel, exported for the regression test.
+//
+// Unexported in the package proper: nothing outside internal/nostr distinguishes
+// it yet — internal/zap only asks whether anything was Accepted — and an
+// exported sentinel is a promise to keep it stable.
+var ErrNoAnswer = errNoAnswer
