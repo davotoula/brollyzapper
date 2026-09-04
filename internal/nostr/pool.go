@@ -914,6 +914,25 @@ func (p *Pool) publishOne(ctx context.Context, url string,
 	// is retried. Republishing an event a relay already holds is idempotent —
 	// relays deduplicate by event id — so the cost is one wasted send, against
 	// recording a receipt nobody ever acknowledged.
+	// THE LABEL IS RACY IN BOTH DIRECTIONS, and it is a residual rather than a
+	// bug because only the DEBUG record turns on it — PublishResult.Err is
+	// non-nil in every one of these cases, so Accepted, internal/zap's receipt
+	// recording and the NWC retry loop are unaffected.
+	//
+	// IsConnected LAGS THE EVENT IT IS BEING ASKED ABOUT. A failed write does not
+	// cancel connectionContext; only the READ goroutine does, on its next failed
+	// ReadMessage. So a send that failed because the socket died at that instant
+	// can still see IsConnected true and be labelled refused, and an OK(false)
+	// followed immediately by a drop can be labelled not_connected. The window is
+	// "the socket died concurrently with this write"; a socket that died earlier
+	// is already cancelled and labels correctly.
+	//
+	// READING IsConnected BEFORE THE SEND AS WELL DOES NOT FIX IT — the suggestion
+	// was made in review and does not address the case it was made for, because in
+	// that case the relay WAS connected beforehand. What would fix it is matching
+	// go-nostr's own error text ("msg: " for an OK(false)), and du9.3 already ruled
+	// that out for this file: an error-string match against a library o34.18
+	// intends to replace, to sharpen a diagnostic, is not a trade worth making.
 	switch {
 	case err != nil && !relay.IsConnected():
 		// The socket was already gone, so nothing was sent and it cost nothing.

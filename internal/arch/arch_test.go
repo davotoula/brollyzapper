@@ -1738,6 +1738,55 @@ func checkPublishFanOutSites(t *testing.T, files []sourceFile) []problem {
 	return found
 }
 
+// The companion, and the one that actually holds the door shut.
+//
+// PublishMany IS EnsureRelay plus relay.Publish. Forbidding the fan-out alone
+// leaves the hazard reachable one line lower down: `relay, _ := pool.EnsureRelay(
+// url); relay.Publish(ctx, event)` re-dials a dropped socket under the library's
+// hardcoded fifteen seconds off the POOL's context, holds the fifty-bucket hash
+// lock across that connect, and — without publishOne's IsConnected check — reads
+// a socket that died before its OK as an acknowledgement. Both findings, reopened
+// by a caller who never typed PublishMany, with every test in this package green.
+// The gap was found by review; the first version of the rule above had it.
+//
+// EnsureRelay has ONE legitimate caller and it is not a publish: Pool.Subscribe
+// holds a relay open for the life of an NWC pairing, where a fifteen-second dial
+// is a different trade and nothing is waiting on an OK. Routing that through
+// Pool.dial too is du9.1's fix shape, and when it lands this rule becomes
+// "nothing calls it at all".
+func checkEnsureRelaySites(t *testing.T, files []sourceFile) []problem {
+	var found []problem
+	for _, file := range files {
+		for i, line := range codeLines(t, file) {
+			if strings.Contains(line, ".EnsureRelay(") {
+				found = append(found, problem{file.rel, i + 1,
+					"calls EnsureRelay; publishing goes through the *Relay Pool.dial holds, " +
+						"and the only caller that may take a relay from the library is " +
+						"Pool.Subscribe (1yp, nok)"})
+			}
+		}
+	}
+	return found
+}
+
+func TestTheOnlyEnsureRelayCallSiteIsTheSubscription(t *testing.T) {
+	real := checkEnsureRelaySites(t, sourceFiles(t, "internal/lnd/lnrpc"))
+	if len(real) != 1 || real[0].file != "internal/nostr/subscribe.go" {
+		t.Errorf("found %d EnsureRelay call sites (%v), want exactly 1 in "+
+			"internal/nostr/subscribe.go — a publish that takes a relay from the library "+
+			"reopens 1yp and nok", len(real), real)
+	}
+	// A publish path that reaches for it directly, which is what the fan-out
+	// rule above does not see.
+	catches(t, checkEnsureRelaySites(t, []sourceFile{planted("internal/nostr", `package nostr
+
+func send() {
+	relay, _ := p.pool.EnsureRelay(url)
+	_ = relay.Publish(ctx, event)
+}
+`)}), "calls EnsureRelay")
+}
+
 func TestNothingCallsTheLibraryPublishFanOut(t *testing.T) {
 	clean(t, checkPublishFanOutSites(t, sourceFiles(t, "internal/lnd/lnrpc")))
 
