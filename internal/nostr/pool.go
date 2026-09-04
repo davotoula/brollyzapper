@@ -370,6 +370,17 @@ func NewPool(ctx context.Context, relays func() []string, opts Options) *Pool {
 	// name that answers differently each time. That gap is the TOCTOU
 	// dialableHost used to name as an accepted residual, and this shuts it: the
 	// address on the socket is checked, on the socket's own resolution.
+	//
+	// THE OPTION HERE PROTECTS NOTHING TODAY, and saying so is better than
+	// letting a reader believe it does (du9.1). In the pinned fork,
+	// SimplePool.relayOptions is read at exactly one place — EnsureRelay,
+	// pool.go:193 — and nothing calls EnsureRelay any more; every relay this app
+	// opens is built by Pool.dial, which passes the same check BY HAND. The whole
+	// of vz1.4's protection is that hand-passed option, which is why dial's doc
+	// says so and why dialable_test.go's rebinding test is the behavioural half.
+	// This stays as the second belt: it is what a library path reached in some
+	// future would inherit, and internal/arch's checkDialAddressCheckWiring holds
+	// it. The ctx is likewise now only EnsureRelay's connect deadline; see Close.
 	p.pool = gonostr.NewSimplePool(ctx,
 		gonostr.WithRelayOptions(gonostr.WithDialAddressCheck(p.checkDialAddress)))
 	return p
@@ -562,6 +573,11 @@ func (p *Pool) mayAuditRefusal() bool {
 // publish that opened it, and go-nostr's own EnsureRelay did the same. So
 // closing the pool alone leaves every websocket, its ping goroutine and its read
 // goroutine running for the life of the process.
+//
+// Since du9.1 that context governs NOTHING: in the pinned fork it is read at one
+// place, EnsureRelay's connect deadline, and nothing calls EnsureRelay. The call
+// stays because it is the library's documented teardown and costs one cancel;
+// what has gone is any reason to believe it does the closing.
 //
 // This used to be the ONLY place connections were closed, and that was the
 // hazard: a zap request names the relays a receipt is published to, so every
@@ -869,7 +885,7 @@ func (p *Pool) publishOne(ctx context.Context, url string,
 	began := time.Now()
 
 	relay, ok := p.pool.Relays.Load(url)
-	if !ok || relay == nil || !relay.IsConnected() {
+	if !liveRelay(relay, ok) {
 		var err error
 		if relay, err = p.dial(ctx, url); err != nil {
 			// One failed RESULT, never a failed publish: o34.3's retry reads
@@ -966,8 +982,27 @@ func sendOutcome(err error, connected bool) (string, error) {
 	}
 }
 
-// dial connects one relay under the budget, stores it in the pool, and returns
-// the handle that publishing will use.
+// liveRelay reads one answer from the pool's map: is there a relay here that can
+// be published on right now.
+//
+// ONE STATEMENT OF IT, because the places that ask are the places that must
+// agree — publishOne and dial's own fast path deciding whether to dial at all,
+// dial's Compute deciding which of two relays the map keeps, and the test seam
+// that asserts du9.1's claim about which one survived. It was written out three
+// times before, and a map entry is exactly the kind of thing whose shape changes
+// later: nothing
+// stores nil today, and go-nostr's own EnsureRelay has a branch for a nil entry,
+// so the day something does the three copies would drift one at a time — with
+// the test-only copy still asserting the old rule and going green over it.
+//
+// Not a method, because the pair it takes is what Load and Compute both hand
+// back and neither needs the pool to interpret it.
+func liveRelay(relay *gonostr.Relay, present bool) bool {
+	return present && relay != nil && relay.IsConnected()
+}
+
+// dial returns a live relay for url, connecting one under the budget and storing
+// it if the pool does not already hold one.
 //
 // THE OPTION HAS TO BE PASSED BY HAND. SimplePool.relayOptions is unexported, so
 // a relay built here carries none of the pool's — the dial-time address check
@@ -981,6 +1016,26 @@ func sendOutcome(err error, connected bool) (string, error) {
 // publishes on purpose — and a relay parented on the publish context would have
 // its socket torn down the instant Publish returned.
 func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
+	// A RELAY THE POOL ALREADY HOLDS IS HANDED BACK WITHOUT A DIAL, and this
+	// belongs here rather than only in publishOne (du9.1). go-nostr's EnsureRelay
+	// began this way, and Subscribe used to get the property from it for free:
+	// two pairings on one relay URL, or a pairing whose sibling relay a
+	// PublishToConnection has just opened, would otherwise each open a full
+	// websocket — DNS, TCP, TLS, upgrade — and throw it away inside the Compute
+	// below. That is not merely wasted: every discarded dial runs
+	// checkDialAddress per candidate address, and in the no-snapshot mode a
+	// subscription dials in, that is a settings read off the single sqlite
+	// connection each time, which exemptRelays' own doc names as the thing to
+	// avoid.
+	//
+	// It does not weaken what this bead is about. This path writes NOTHING; the
+	// Compute below is still the only way a relay enters the map, so there is
+	// still exactly one writer shape. A miss here is resolved there, which is
+	// where it was always resolved.
+	if relay, ok := p.pool.Relays.Load(url); liveRelay(relay, ok) {
+		return relay, nil
+	}
+
 	// Derived from the PUBLISH context, so a caller already near its own
 	// deadline shortens this rather than extending past it. That is the
 	// property go-nostr's hardcoded fifteen seconds lacked: it hangs off the
@@ -1040,7 +1095,7 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	var duplicate *gonostr.Relay
 	kept, _ := p.pool.Relays.Compute(url,
 		func(existing *gonostr.Relay, loaded bool) (*gonostr.Relay, bool) {
-			if loaded && existing != nil && existing.IsConnected() {
+			if liveRelay(existing, loaded) {
 				duplicate = relay
 				return existing, false
 			}

@@ -108,6 +108,13 @@ const InFlightPerConnection = 4
 // restarting, which resolves in seconds. An exponential backoff optimises for
 // not hammering a stranger's server — the wrong trade here, where the cost of a
 // long wait is a wallet app that stays broken after the network came back.
+//
+// SOMETHING ELSE LEANS ON IT BEING FLAT (du9.1). internal/nostr's Subscribe
+// dials under connectBudget rather than a budget of its own, and the argument
+// for five seconds is that a shorter dial only brings the next attempt forward,
+// because THIS backoff has no exponential term to compound it. Make it
+// exponential and that argument goes with it: say so there, in Subscribe's doc,
+// which carries the same expiry condition from the other side.
 const ReconnectBackoff = 5 * time.Second
 
 // Method is a NIP-47 method name.

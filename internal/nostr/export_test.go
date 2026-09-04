@@ -65,6 +65,5 @@ func SendOutcome(err error, connected bool) (string, error) { return sendOutcome
 // reachable by nothing. Connected() cannot answer it — it reports what is in the
 // map whether or not the socket under it is still up.
 func MappedRelayIsConnected(p *Pool, url string) bool {
-	relay, ok := p.pool.Relays.Load(url)
-	return ok && relay != nil && relay.IsConnected()
+	return liveRelay(p.pool.Relays.Load(url))
 }

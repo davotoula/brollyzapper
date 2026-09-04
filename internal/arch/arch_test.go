@@ -1789,9 +1789,15 @@ func send() {
 	_ = relay.Publish(ctx, event)
 }
 `)}), "calls EnsureRelay")
-	// And the subscription that was its one legitimate caller until du9.1. The
-	// plant above would pass a rule written as "no publish may call it"; this one
-	// is what pins the rule to its current form.
+	// And the subscription that was its one legitimate caller until du9.1.
+	//
+	// It takes the same branch through the scanner as the plant above — this is a
+	// per-line text match, so the two differ only in identifier names — and it is
+	// here as a RATCHET rather than as coverage. The rule this replaced permitted
+	// exactly this shape, and the argument for permitting it (a subscription
+	// waits on no OK, so nok does not reach it) survives the reason it was
+	// withdrawn (the torn store does). A future author re-narrowing the rule to
+	// "no publish may call it" has to delete a failing plant to do it.
 	catches(t, checkEnsureRelaySites(t, []sourceFile{planted("internal/nostr", `package nostr
 
 func watch() {

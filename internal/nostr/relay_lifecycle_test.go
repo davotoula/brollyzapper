@@ -61,6 +61,14 @@ type fleet struct {
 	mu sync.Mutex
 	// live is the number of connections currently open across every relay.
 	live int
+	// opened is how many have EVER been accepted, and never goes down.
+	//
+	// A different question from live, and the difference is the whole of what a
+	// wasted dial looks like from here: a socket the pool opens and immediately
+	// discards raises live and lowers it again, so by the time anything has
+	// settled the count is back where it started and nothing was observed. This
+	// counter is the one that remembers.
+	opened int
 	// arrived is the number of events the fleet has been handed.
 	arrived int
 	// hold, once set, makes every relay wait for it to be closed before
@@ -73,18 +81,19 @@ type fleet struct {
 	// while still taking the frame, which is what a relay whose socket dies
 	// mid-publish looks like from here.
 	dropAfterEvent bool
-	// holdFirst, once set, parks the fleet's FIRST incoming connection before
-	// the websocket upgrade until it is closed. See holdFirstArrival.
+	// holdFirst, once set, parks the NEXT incoming connection before the
+	// websocket upgrade until it is closed, and is consumed by the one that
+	// parks. See holdFirstArrival.
 	holdFirst chan struct{}
-	// connects is the number of connections that have arrived, counted before
-	// the upgrade so a parked one is already visible.
-	connects int
-	servers  []*httptest.Server
+	// parked is closed by that connection as it parks, which is the signal a
+	// test waits on to know the dial is in flight and has written nothing yet.
+	parked  chan struct{}
+	servers []*httptest.Server
 }
 
-// holdFirstArrival parks the fleet's FIRST incoming connection before the
+// holdFirstArrival parks the fleet's next incoming connection before the
 // websocket upgrade until release is closed, lets every later one straight
-// through, and reports how many have arrived.
+// through, and returns a channel closed the moment that connection parks.
 //
 // BEFORE THE UPGRADE, and that is the whole mechanism. fleet.hold delays the OK,
 // which is far too late to catch a dial: by then websocket.Accept has written
@@ -92,48 +101,50 @@ type fleet struct {
 // the handler is what holds one dial open across another one, from the far side
 // of the socket, with no sleep anywhere.
 //
-// THE FIRST ONLY, because the test that needs this drives the ordering itself:
-// it starts one dial, waits for it to arrive here, runs the other one to
+// ONE CONNECTION ONLY, because the test that needs this drives the ordering
+// itself: it starts one dial, waits for it to park here, runs the other one to
 // completion while it is parked, and then releases it. A barrier that counted to
 // two could not do that — the second dial would be held by the same gate it is
 // supposed to be racing through.
 //
-// The arrival count is not decoration. A run in which the first dial had not
+// The parked channel is not a convenience. A run in which the first dial had not
 // reached this point before the second one started proves nothing at all, and
-// every assertion downstream would pass; the caller waits on it rather than
-// assuming.
-func (f *fleet) holdFirstArrival(release chan struct{}) (arrivals func() int) {
+// every assertion downstream would pass; the caller waits on this rather than
+// assuming, and fails if it never closes.
+func (f *fleet) holdFirstArrival(release chan struct{}) (parked <-chan struct{}) {
 	f.mu.Lock()
-	f.holdFirst = release
-	f.mu.Unlock()
-	return func() int {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return f.connects
-	}
+	defer f.mu.Unlock()
+	f.holdFirst, f.parked = release, make(chan struct{})
+	return f.parked
 }
 
-// waitAtGate books an arriving connection in, parks it if it is the first and
-// the fleet was told to, and reports whether it should go on to serve.
+// waitAtGate parks an arriving connection if it is the one the fleet was told to
+// hold, and reports whether it should go on to serve.
 //
-// It gives up on the request's own context, which is what a client abandoning a
-// dial closes, and on a bound of its own — because a gate nobody releases must
-// fail its test rather than wedge the package until go test's timeout.
+// The gate is CONSUMED under the lock, which is what makes "the first" mean the
+// first rather than needing a counter to derive it, and what lets every later
+// connection past with one uncontended mutex acquire.
+//
+// It gives up on the request's own context — which is what a client abandoning a
+// dial closes — bounded by a deadline of its own, because a gate nobody releases
+// must fail its test rather than wedge the package until go test's timeout.
 func (f *fleet) waitAtGate(ctx context.Context) bool {
 	f.mu.Lock()
-	f.connects++
 	release := f.holdFirst
-	first := f.connects == 1
-	f.mu.Unlock()
-	if !first || release == nil {
+	if release == nil {
+		f.mu.Unlock()
 		return true
 	}
+	f.holdFirst = nil
+	close(f.parked)
+	f.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, gateLimit)
+	defer cancel()
 	select {
 	case <-release:
 		return true
 	case <-ctx.Done():
-		return false
-	case <-time.After(gateLimit):
 		return false
 	}
 }
@@ -217,7 +228,7 @@ func (f *fleet) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *fleet) enter() { f.mu.Lock(); f.live++; f.mu.Unlock() }
+func (f *fleet) enter() { f.mu.Lock(); f.live++; f.opened++; f.mu.Unlock() }
 func (f *fleet) leave() { f.mu.Lock(); f.live--; f.mu.Unlock() }
 
 // closeWithoutOK makes every relay take the event and close, never answering.
@@ -253,6 +264,14 @@ func (f *fleet) counts() (live, arrived int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.live, f.arrived
+}
+
+// socketsOpened is how many connections the fleet has accepted since it was
+// built, including ones that have since closed.
+func (f *fleet) socketsOpened() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.opened
 }
 
 // settle waits for the fleet to stop changing and reports what it stopped at.
