@@ -39,3 +39,19 @@ func CheckDialAddress(p *Pool, relayURL, resolved string) error {
 // is delegated and will move, and a test carrying its own copy of it would pass
 // on the day the budget was raised to thirty.
 const ConnectBudget = connectBudget
+
+// ErrNoAnswer is nok's sentinel, exported for the regression test.
+//
+// Unexported in the package proper: nothing outside internal/nostr distinguishes
+// it yet — internal/zap only asks whether anything was Accepted — and an
+// exported sentinel is a promise to keep it stable.
+var ErrNoAnswer = errNoAnswer
+
+// SendOutcome is the pure classifier behind publishOne, exported so its table
+// can be asserted directly.
+//
+// Two of its four rows have no other test and are awkward to reach through a
+// real relay: `refused` needs a relay that answers OK(false), and the
+// documented false negative — a socket dropping just after a genuine OK — is a
+// race nothing can hold open. As a pure function they are four lines.
+func SendOutcome(err error, connected bool) (string, error) { return sendOutcome(err, connected) }

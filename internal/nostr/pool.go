@@ -168,8 +168,8 @@ const publishTimeout = 30 * time.Second
 // result channel only when every per-relay goroutine has finished — so one relay
 // that is simply down cost every zap receipt a flat 15.0 s, measured five times
 // out of five on the box with relays=6 accepted=4. This app therefore connects
-// first, itself, under this budget, and hands the library only relays that are
-// already open.
+// first, itself, under this budget, and since 1yp publishes on the handle it
+// dialled rather than handing the library a URL to find again.
 //
 // It bounds CONNECTING and nothing else. A relay that has answered the handshake
 // and is slow to send its OK is still waited for, up to publishTimeout — §8's
@@ -205,14 +205,17 @@ const connectBudget = 5 * time.Second
 // telling them apart was the whole of du9.3.
 var errConnectBudget = errors.New("the connect budget ran out")
 
-// errNoAnswer is the result for a relay the library reported nothing for.
+// errNoAnswer is the result for a relay that took the event and never
+// acknowledged it.
 //
-// UNREACHABLE, and that is exactly why it exists. PublishMany sends one result
-// per URL and closes the channel afterwards, so the loop in publishOne always
-// runs — but a zero PublishResult has a nil Err, which reads as ACCEPTED. The
-// one thing this must never do is turn a relay nobody heard from into a
-// delivered receipt.
-var errNoAnswer = errors.New("nostr: the relay reported no answer")
+// IT IS REACHED NOW (nok, 1yp). It spent two beads as the fail-closed value of
+// a slot nothing could leave empty, which is to say unreachable; publishing on
+// the held handle made the case observable and this is the label for it. See
+// publishOne: go-nostr returns a NIL error when the connection dies before the
+// OK, and a nil error is what Accepted counts and what internal/zap records a
+// receipt id for. Asking the handle whether it is still connected is what
+// separates "the relay said yes" from "the relay went away".
+var errNoAnswer = errors.New("nostr: the relay took the event and never acknowledged it")
 
 // PublishResult is one relay's answer.
 //
@@ -665,11 +668,11 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 	// this publish opens must land outside `before` so the teardown above still
 	// closes it, which is why this cannot move above the snapshot.
 	//
-	// The library is handed only relays that are already open, so EnsureRelay
-	// finds each one connected and returns at once. That is what keeps the
-	// invariant the three mechanisms around this call silently depend on — the
-	// `before` snapshot, the `exempt` pointer and the publishing lock all assume
-	// that when Publish returns, nothing it started is still dialling.
+	// Since 1yp nothing is handed to the library at all: each relay is dialled
+	// and then published on the handle that dial returned. That is what keeps
+	// the invariant the three mechanisms around this call silently depend on —
+	// the `before` snapshot, the `exempt` pointer and the publishing lock all
+	// assume that when Publish returns, nothing it started is still dialling.
 	//
 	// AND IT IS NOT A BARRIER (d1o). du9's first version joined every dial
 	// before sending anything, which made every healthy relay wait for the
@@ -701,30 +704,21 @@ type relayCost struct {
 	//	accepted       it took the event
 	//	refused        it connected and said no, or the send timed out
 	//	over_budget    it never finished connecting and ate the whole budget
-	//	not_connected  the dial failed on its own, fast and for free
-	//	no_answer      the library reported nothing for a connected relay,
-	//	               which should be unreachable
+	//	not_connected  no usable socket — the dial failed, or the one we had
+	//	               was gone by the time we wrote — fast and for free
+	//	no_answer      it took the event and never acknowledged it
 	//
-	// no_answer WAS REMOVED AS DEAD BY THE /simplify PASS AND IS BACK, which is
-	// worth explaining rather than looking like a revert. That reading was right
-	// for the shape it was made against: results were APPENDED as PublishMany
-	// reported them, so a relay it never reported simply had no result, and
-	// logRelayCosts, which walked the costs only through results, never looked
-	// the label up. d1o publishes per relay into a pre-sized slot instead, so
-	// the slot exists whether or not the library answers, and the zero
-	// PublishResult in it has a NIL error, which Accepted counts as a success.
-	// The label and its errNoAnswer are the fail-closed value of that slot.
+	// no_answer HAD A THREE-BEAD ARGUMENT ABOUT WHETHER IT WAS DEAD, and the
+	// answer is that the label was always right and the code could not reach it.
+	// The /simplify pass removed it as dead, correctly for the batched shape it
+	// read; d1o restored it as the fail-closed value of a per-relay slot, still
+	// unreachable; nok showed the hazard was real all along and 1yp made it
+	// observable. It is applied on a live path now — see publishOne.
 	//
-	// THE SLOT'S OWN CASE IS UNREACHABLE — PublishMany answers every URL it is
-	// handed — BUT THE HAZARD IT NAMES IS NOT, and an earlier version of this
-	// comment said otherwise. BrollyZap-nok: go-nostr's Relay.publish returns
-	// its nil err on connectionContext.Done, so a relay that took the frame and
-	// then had its socket closed yields PublishResult{Err: nil}, which Accepted
-	// counts and internal/zap records as a published receipt. That is exactly
-	// "a relay nobody heard from is reported as having taken the receipt",
-	// reached by a different door, and no_answer is the right label for it —
-	// today it is never applied. Pre-existing under the batched PublishMany;
-	// this branch retained it rather than introducing it.
+	// not_connected ALSO COVERS A SEND, not only a dial: a write that fails
+	// because the socket was already gone is the same operational fact as a dial
+	// that never got one — no usable socket, and it cost nothing. It is
+	// deliberately NOT refused, which is a working relay declining this event.
 	//
 	// The distinctions are the diagnosis. over_budget versus not_connected is
 	// du9.3 and is the one that costs money: the first names the relay this
@@ -867,68 +861,111 @@ func (p *Pool) sendAndDial(ctx context.Context, targets []string,
 // the relay that cost the time instead of reporting one number several times.
 func (p *Pool) publishOne(ctx context.Context, url string,
 	event gonostr.Event) (PublishResult, relayCost) {
-	var dialled time.Duration
-	if relay, ok := p.pool.Relays.Load(url); !ok || relay == nil || !relay.IsConnected() {
-		began := time.Now()
-		err := p.dial(ctx, url)
-		dialled = time.Since(began)
-		if err != nil {
+	// ONE STOPWATCH. relayCost.took is this relay's own dial plus its own wait
+	// for an OK, and every return below is one of those two moments, so there is
+	// nothing a second clock would separate.
+	began := time.Now()
+
+	relay, ok := p.pool.Relays.Load(url)
+	if !ok || relay == nil || !relay.IsConnected() {
+		var err error
+		if relay, err = p.dial(ctx, url); err != nil {
 			// One failed RESULT, never a failed publish: o34.3's retry reads
 			// these per relay, and a relay that is down is not a reason to
 			// re-send to the ones that already have the event.
 			//
 			// SPLIT (du9.3), because the two cost opposite amounts. A relay that
 			// hung ate the whole budget and is why this publish was slow; one
-			// that failed fast cost nothing and is merely unavailable. Both read
-			// not_connected until then, and the first per-relay records ever
-			// taken off a box had them side by side — nostr.band at 5000 ms and
-			// damus at 241 ms, identically labelled.
+			// that failed fast cost nothing and is merely unavailable.
 			label := "not_connected"
 			if errors.Is(err, errConnectBudget) {
 				label = "over_budget"
 			}
-			return PublishResult{Relay: url, Err: err}, relayCost{outcome: label, took: dialled}
+			return PublishResult{Relay: url, Err: err},
+				relayCost{outcome: label, took: time.Since(began)}
 		}
 	}
 
-	// A BATCH OF ONE, deliberately. Going through PublishMany rather than
-	// relay.Publish keeps whatever the library does around a send — today that
-	// is its auth-required retry, which is inert here because this pool
-	// installs no auth handler, and which starts working for free if one is
-	// ever added.
+	// ON THE HANDLE THIS APP HOLDS (1yp), not through the library's fan-out by
+	// URL. Relay.Publish takes no namedLock and cannot re-dial: whatever socket
+	// this relay has is the one the event goes down, and if there is none the
+	// send fails inside the caller's context instead of spending fifteen
+	// seconds of the pool's finding out.
 	//
-	// It costs goroutines: PublishMany spawns a wrapper plus one per URL and
-	// allocates a channel, so N calls of one are 2N goroutines and N channels
-	// where a single batched call was N+1 and one. For twelve relays that is 36
-	// against 13 — tens of microseconds on Pi-class hardware, against a path
-	// whose own per-relay costs this file records at 195 ms to 5 s. The batched
-	// alternative is the barrier this bead exists to remove, because the library
-	// dials and sends as one unit per call.
-	//
-	// EnsureRelay usually finds this one open and returns at once, which is what
-	// makes the timing below a measurement of the relay rather than of the dial.
-	//
-	// USUALLY, and the residual is worth stating rather than implying away: the
-	// check above and EnsureRelay's own are TWO reads, so a socket that drops
-	// between them is re-dialled by the library under its hardcoded fifteen
-	// seconds off the POOL's context — bounded by neither connectBudget nor the
-	// caller's, and sendAndDial's join waits for it. BrollyZap-1yp removes the
-	// window by publishing on the handle dial already holds.
-	sendStart := time.Now()
-	result := PublishResult{Relay: url, Err: errNoAnswer}
-	cost := relayCost{outcome: "no_answer", took: dialled}
-	for answer := range p.pool.PublishMany(ctx, []string{url}, event) {
-		result = PublishResult{Relay: answer.RelayURL, Err: answer.Error}
-		cost.outcome = "accepted"
-		if answer.Error != nil {
-			cost.outcome = "refused"
-		}
-		cost.took = dialled + time.Since(sendStart)
+	// The auth-required retry the fan-out offered is INERT and is not what was
+	// given up: it is gated on an auth handler, this pool installs none, and the
+	// only WithAuthHandler in the tree is a planted arch violation. Nothing is
+	// lost by not going through it, which is why nobody should add it back to
+	// "keep" that path.
+	outcome, err := sendOutcome(relay.Publish(ctx, event), relay.IsConnected())
+	if errors.Is(err, errNoAnswer) {
+		// Named, like every other failure this file produces: internal/zap
+		// stores results[0].Err.Error() as a pending receipt's last_error, and
+		// "the relay took the event and never acknowledged it" with no relay in
+		// it is a sentence an operator cannot act on.
+		err = fmt.Errorf("nostr: %s: %w", url, err)
 	}
-	return result, cost
+	return PublishResult{Relay: url, Err: err}, relayCost{outcome: outcome, took: time.Since(began)}
 }
 
-// dial connects one relay under the budget and stores it in the pool.
+// sendOutcome classifies what one relay's send did, from the library's error and
+// whether the socket is still up.
+//
+// PURE, and separate from publishOne, because this is where a fork quirk is
+// encoded and the quirk is the whole of nok. Keeping it in one testable function
+// means the fact lives in code rather than only in prose — which is what
+// o34.18's migration will need to find, since the successor library has to be
+// re-checked against every row of this table.
+//
+// THE QUIRK. go-nostr's publish loop selects on the connection context as well
+// as the send context, and on connectionContext.Done it returns its own err —
+// which is NIL unless an OK(false) arrived first. So a relay that read the frame
+// and then lost its socket returns nil, and a nil error is what Accepted counts,
+// what internal/zap records a receipt id for, and what stops the NWC respond
+// loop retrying. Nobody acknowledged anything. Asking whether the handle is
+// still connected is the question the URL could not answer, and it is the whole
+// reason 1yp and nok are one change.
+//
+// THE FALSE NEGATIVE, stated because it is a real cost: a socket that drops in
+// the instant AFTER a genuine OK reads as no_answer, and the receipt is retried.
+// Relays deduplicate by event id and a receipt's id is stable across attempts —
+// created_at is the invoice's settle time, not the handler's clock — so that
+// costs one wasted send, against recording a receipt nobody ever acknowledged.
+//
+// THE LABEL IS RACY IN BOTH DIRECTIONS, and it is a residual rather than a bug
+// because only the DEBUG record turns on it: the error returned here is non-nil
+// in every failing row, so Accepted, the receipt recording and the NWC retry
+// loop are unaffected either way. IsConnected LAGS the event it is asked about —
+// a failed write does not cancel connectionContext, only the READ goroutine does
+// on its next failed ReadMessage — so a send that failed because the socket died
+// at that instant can still be told the relay is connected and come out refused,
+// and an OK(false) followed at once by a drop can come out not_connected. The
+// window is "the socket died concurrently with this write"; one that died
+// earlier is already cancelled and classifies correctly.
+//
+// READING IsConnected BEFORE THE SEND AS WELL DOES NOT FIX IT — the suggestion
+// was made in review and does not address the case it was made for, because in
+// that case the relay WAS connected beforehand. What would fix it is matching
+// go-nostr's own error text ("msg: " for an OK(false)), and du9.3 already ruled
+// that out for this file: an error-string match against a library o34.18 intends
+// to replace, to sharpen a diagnostic, is not a trade worth making.
+func sendOutcome(err error, connected bool) (string, error) {
+	switch {
+	case err != nil && !connected:
+		// The socket was already gone, so nothing was sent and it cost nothing.
+		// NOT refused, which is a working relay declining this event.
+		return "not_connected", err
+	case err != nil:
+		return "refused", err
+	case !connected:
+		return "no_answer", errNoAnswer
+	default:
+		return "accepted", nil
+	}
+}
+
+// dial connects one relay under the budget, stores it in the pool, and returns
+// the handle that publishing will use.
 //
 // THE OPTION HAS TO BE PASSED BY HAND. SimplePool.relayOptions is unexported, so
 // a relay built here carries none of the pool's — the dial-time address check
@@ -941,7 +978,7 @@ func (p *Pool) publishOne(ctx context.Context, url string,
 // relay must outlive this publish — the operator's connections are held between
 // publishes on purpose — and a relay parented on the publish context would have
 // its socket torn down the instant Publish returned.
-func (p *Pool) dial(ctx context.Context, url string) error {
+func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	// Derived from the PUBLISH context, so a caller already near its own
 	// deadline shortens this rather than extending past it. That is the
 	// property go-nostr's hardcoded fifteen seconds lacked: it hangs off the
@@ -958,10 +995,10 @@ func (p *Pool) dial(ctx context.Context, url string) error {
 		// half-open socket the dial left behind.
 		_ = relay.Close()
 		if errors.Is(context.Cause(dialCtx), errConnectBudget) {
-			return fmt.Errorf("nostr: %s: %w after %s: %w",
+			return nil, fmt.Errorf("nostr: %s: %w after %s: %w",
 				url, errConnectBudget, connectBudget, err)
 		}
-		return fmt.Errorf("nostr: connecting to %s: %w", url, err)
+		return nil, fmt.Errorf("nostr: connecting to %s: %w", url, err)
 	}
 
 	// LOAD-OR-STORE, atomically, because namedLock is unexported: an NWC
@@ -973,14 +1010,12 @@ func (p *Pool) dial(ctx context.Context, url string) error {
 	// relay whose socket has dropped is still IN the map, because nothing
 	// removes it, so LoadOrStore would hand that dead entry back and discard the
 	// live relay this call just dialled. Be precise about the cost, because it
-	// is smaller than it first looks: EnsureRelay would then re-dial the URL
-	// itself and succeed, since this call has just proved the relay reachable —
-	// so what LoadOrStore buys is a wasted dial, a second socket to the same
-	// relay for the length of it, and a stale *Relay overwritten rather than
-	// closed. Not the fifteen seconds, which needs the relay to go down in the
-	// gap between the two dials. Compute costs the same line count and leaves
-	// none of it, which is why it is the one used; the fifteen seconds is not
-	// the argument for it.
+	// GOT STRONGER WITH 1yp. While the send went through the library, handing
+	// back a dead entry cost a wasted re-dial and a second socket: EnsureRelay
+	// would have dialled the URL itself and succeeded, since this call has just
+	// proved the relay reachable. Nothing re-dials now — the handle returned
+	// here IS what the event is published on — so a LoadOrStore that returned
+	// the dead entry would be published on directly and fail.
 	//
 	// RESIDUAL, stated rather than implied away: EnsureRelay stores with a plain
 	// Store under its own lock, so a Subscribe that began dialling this URL
@@ -988,8 +1023,17 @@ func (p *Pool) dial(ctx context.Context, url string) error {
 	// orphan the socket. It cannot be closed without the library's per-URL lock,
 	// the window is one concurrent subscribe to a relay a publish is dialling at
 	// that instant, and it is filed as BrollyZap-du9.1.
+	// THE WINNER IS RETURNED, not discarded (1yp). Compute already decides which
+	// handle this URL is going to be published on; handing it back is what lets
+	// publishOne send on the socket it holds rather than asking the library to
+	// find it again by name. That round trip was two findings: EnsureRelay
+	// re-checks IsConnected and re-dials under a hardcoded fifteen seconds off
+	// the POOL's context if the socket dropped in between, and it does so under
+	// a fifty-bucket HASH lock held across that connect, so a send to a live
+	// relay could stall behind an unrelated relay's Subscribe dial.
+	//
 	var duplicate *gonostr.Relay
-	p.pool.Relays.Compute(url,
+	kept, _ := p.pool.Relays.Compute(url,
 		func(existing *gonostr.Relay, loaded bool) (*gonostr.Relay, bool) {
 			if loaded && existing != nil && existing.IsConnected() {
 				duplicate = relay
@@ -1001,7 +1045,7 @@ func (p *Pool) dial(ctx context.Context, url string) error {
 	if duplicate != nil {
 		_ = duplicate.Close()
 	}
-	return nil
+	return kept, nil
 }
 
 // PublishToConnection sends the event to ONE PAIRING'S OWN relays, and is §8's
@@ -1266,6 +1310,13 @@ func (p *Pool) chooseTargets(ctx context.Context, configured, extra []string) tr
 // Both halves of the close matter too: closing the websocket stops its ping and
 // read goroutines, and removing it from the pool's map stops go-nostr handing
 // the dead relay back to the next publish that names the same URL.
+//
+// A CLOSE HERE CAN LAND UNDER A SEND IN FLIGHT, since 1yp publishes on a handle
+// rather than looking a relay up per send, and that is safe by design rather
+// than by luck: publishOne classifies a socket that went away as no_answer or
+// not_connected and never as an OK. It is not hypothetical — it is nok's in-app
+// trigger, the NWC announce publishing to sibling pairing relays that this
+// teardown closes mid-send, and the test names it.
 func (p *Pool) closeTransient(before, configured []string) {
 	// Deleting during Range is safe on xsync.MapOf, which its own docs state,
 	// so this does not need the collect-then-delete second pass it started as.
