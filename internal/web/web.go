@@ -612,7 +612,10 @@ type SettingsView struct {
 	AdvertisedOrigin string
 	AddressName      string
 	LogLevel         string
-	TrustedProxies   string
+	// LogLevelOptions is the list the select ranges over. It comes from the
+	// handler so the four names are stated once (0vk.38).
+	LogLevelOptions []string
+	TrustedProxies  string
 	// The rate-limit pair governs the PUBLIC callback only. The admin group's
 	// limits are constants in internal/api and deliberately have no field
 	// here: a form that let an operator raise their own login brute-force
@@ -702,7 +705,6 @@ func funcs() template.FuncMap {
 		// direction: re-submitting the form without touching it can only tighten
 		// the limit, never loosen it past what the operator set.
 		"satsPlain": func(msat int64) string { return strconv.FormatInt(msat/1000, 10) },
-		"list":      func(items ...string) []string { return items },
 	}
 }
 
