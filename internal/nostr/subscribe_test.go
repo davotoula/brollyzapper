@@ -307,3 +307,152 @@ func TestASubscriptionTeardownRacingAPublishIsRaceFree(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+// du9.1's own claim: a subscribe and a publish dialling ONE URL at the same
+// instant leave exactly one live relay, and it is the one in the pool's map.
+//
+// THE OVERLAP IS FORCED, and this test drives the ordering rather than starting
+// two goroutines and hoping. The fleet parks the subscription's connection
+// before the websocket upgrade, so the subscribe sits INSIDE its dial — past
+// whatever it read from the pool's map, not yet having written to it — for as
+// long as the test likes. The whole publish then runs to completion in that
+// window, and only afterwards is the subscription's dial released to finish and
+// store. That is the losing interleaving, made to happen every run.
+//
+// It has to be made to happen. The first version of this test released both
+// dials together from one barrier and PASSED on the broken code, because which
+// of the two stored last was a footrace of microseconds and it won. A window
+// held open by luck is not a window.
+//
+// IT IS RED ON THE CODE THIS BEAD REPLACES. Subscribe took its relay from
+// SimplePool.EnsureRelay, which checks the map, dials, and then stores with a
+// PLAIN Store under a fifty-bucket hash lock that Pool.dial's Compute does not
+// share. So the sequence above ends with EnsureRelay overwriting the entry the
+// publish's Compute had just put there. The overwritten relay is live, with its
+// ping and read goroutines, and unreachable: every place this app closes a relay
+// walks the pool's map, so nothing can ever see it again. Two live sockets, one
+// mapped, for the life of the process.
+//
+// Both doors store the same way now, so that sequence has no torn outcome left
+// to produce. The released dial finds a connected relay under its own Compute,
+// closes the one it just opened, and returns the winner — which is the handle it
+// subscribes on, so nothing has been subscribed on the loser: dial never hands
+// the loser back.
+func TestASubscribeAndAPublishDiallingOneURLLeaveOneRelay(t *testing.T) {
+	relays := newFleet(t, 1)
+	pool := lifetimePool(t, func() []string { return nil })
+	url := relays.urls()[0]
+	normalised := gonostr.NormalizeURL(url)
+
+	release := make(chan struct{})
+	parked := relays.holdFirstArrival(release)
+
+	var (
+		wg     sync.WaitGroup
+		sub    *nostr.Subscription
+		subErr error
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sub, subErr = pool.Subscribe(t.Context(), url, gonostr.Filter{Kinds: []int{23194}})
+	}()
+
+	// PARKED, which is the precondition for everything below: the subscription
+	// is inside its dial and the pool's map is still empty.
+	select {
+	case <-parked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the subscription's dial never reached the relay, so nothing below " +
+			"is a measurement of anything")
+	}
+	if nostr.MappedRelayIsConnected(pool, normalised) {
+		t.Fatalf("%s is already in the pool's map, so the publish below will not "+
+			"dial and this test observes nothing", normalised)
+	}
+
+	// The shape the bead was re-priced on: nwc/run.go announces to a pairing's
+	// WHOLE set when its first session attaches, so this path dials a sibling
+	// relay at the moment that relay's own session is subscribing to it.
+	results := pool.PublishToConnection(t.Context(), signedNote(t),
+		nostr.PairingRelays([]string{url}))
+	if len(results) != 1 || results[0].Err != nil {
+		t.Errorf("PublishToConnection: %+v, want one accepted result", results)
+	}
+	if !nostr.MappedRelayIsConnected(pool, normalised) {
+		t.Fatalf("the publish left no live relay in the map for %s, so the "+
+			"overwrite this test is about cannot happen", normalised)
+	}
+
+	close(release)
+	wg.Wait()
+	if subErr != nil {
+		t.Fatalf("Subscribe: %v", subErr)
+	}
+	defer sub.Close()
+
+	live, _ := relays.settle(t)
+	if live != 1 {
+		t.Errorf("%d live sockets on %s, want exactly 1 — a second one is a relay "+
+			"nothing can ever close, because every teardown here walks the pool's map",
+			live, url)
+	}
+	if !nostr.MappedRelayIsConnected(pool, normalised) {
+		t.Errorf("the pool's map holds no live relay for %s, so the socket that "+
+			"survived is the orphan rather than the survivor", normalised)
+	}
+}
+
+// And a relay the pool already holds is not dialled again (du9.1's simplify
+// pass, efficiency).
+//
+// go-nostr's EnsureRelay checked the map before it dialled, and Subscribe got
+// that property for free while it went through it. Pool.dial did not have it,
+// because the only caller that could reach it — publishOne — checks the map
+// itself first. Routing Subscribe through dial without moving the check would
+// have made this bead a REGRESSION for the ordinary case: two pairings on one
+// relay URL, or a session subscribing to the sibling relay a PublishToConnection
+// has just opened, would each open a full websocket and throw it away inside the
+// Compute. Not merely wasted sockets — every discarded dial runs
+// checkDialAddress per candidate address, which in a subscription's no-snapshot
+// mode is a settings read off the single sqlite connection.
+//
+// Counted at the RELAY, not asserted from the pool's map. The map holds one
+// entry either way, because the Compute discards the duplicate; the whole
+// question is whether the duplicate was opened at all, and only the far side of
+// the socket knows.
+//
+// And counted as sockets EVER OPENED, not as sockets live. The first version of
+// this test asserted live == 1 after settle and passed with the fast path
+// deleted, which is a test that observed nothing: a discarded duplicate raises
+// the live count and lowers it again, and settle waits for exactly that to
+// finish. Only a counter that never goes down can see a socket that was opened
+// and thrown away.
+func TestSubscribingTwiceToOneRelayOpensOneSocket(t *testing.T) {
+	relays := newFleet(t, 1)
+	pool := lifetimePool(t, func() []string { return nil })
+	url := relays.urls()[0]
+
+	first, err := pool.Subscribe(t.Context(), url, gonostr.Filter{Kinds: []int{23194}})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer first.Close()
+	lndtest.WaitFor(t, "the relay to see the first subscription", func() bool {
+		live, _ := relays.counts()
+		return live == 1
+	})
+
+	second, err := pool.Subscribe(t.Context(), url, gonostr.Filter{Kinds: []int{23195}})
+	if err != nil {
+		t.Fatalf("Subscribe (second): %v", err)
+	}
+	defer second.Close()
+
+	relays.settle(t)
+	if opened := relays.socketsOpened(); opened != 1 {
+		t.Errorf("%d sockets opened by two subscriptions to %s, want 1 — the second "+
+			"dialled a relay the pool already held and threw the result away",
+			opened, url)
+	}
+}

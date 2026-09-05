@@ -370,6 +370,17 @@ func NewPool(ctx context.Context, relays func() []string, opts Options) *Pool {
 	// name that answers differently each time. That gap is the TOCTOU
 	// dialableHost used to name as an accepted residual, and this shuts it: the
 	// address on the socket is checked, on the socket's own resolution.
+	//
+	// THE OPTION HERE PROTECTS NOTHING TODAY, and saying so is better than
+	// letting a reader believe it does (du9.1). In the pinned fork,
+	// SimplePool.relayOptions is read at exactly one place — EnsureRelay,
+	// pool.go:193 — and nothing calls EnsureRelay any more; every relay this app
+	// opens is built by Pool.dial, which passes the same check BY HAND. The whole
+	// of vz1.4's protection is that hand-passed option, which is why dial's doc
+	// says so and why dialable_test.go's rebinding test is the behavioural half.
+	// This stays as the second belt: it is what a library path reached in some
+	// future would inherit, and internal/arch's checkDialAddressCheckWiring holds
+	// it. The ctx is likewise now only EnsureRelay's connect deadline; see Close.
 	p.pool = gonostr.NewSimplePool(ctx,
 		gonostr.WithRelayOptions(gonostr.WithDialAddressCheck(p.checkDialAddress)))
 	return p
@@ -557,9 +568,16 @@ func (p *Pool) mayAuditRefusal() bool {
 // Close drops every connection at shutdown.
 //
 // Each relay is closed explicitly first. go-nostr's SimplePool.Close only
-// cancels the POOL's context, while EnsureRelay builds each relay from
-// context.Background — so closing the pool alone leaves every websocket, its
-// ping goroutine and its read goroutine running for the life of the process.
+// cancels the POOL's context, while every relay in the map was built from
+// context.Background — Pool.dial does it deliberately, so a relay outlives the
+// publish that opened it, and go-nostr's own EnsureRelay did the same. So
+// closing the pool alone leaves every websocket, its ping goroutine and its read
+// goroutine running for the life of the process.
+//
+// Since du9.1 that context governs NOTHING: in the pinned fork it is read at one
+// place, EnsureRelay's connect deadline, and nothing calls EnsureRelay. The call
+// stays because it is the library's documented teardown and costs one cancel;
+// what has gone is any reason to believe it does the closing.
 //
 // This used to be the ONLY place connections were closed, and that was the
 // hazard: a zap request names the relays a receipt is published to, so every
@@ -867,7 +885,7 @@ func (p *Pool) publishOne(ctx context.Context, url string,
 	began := time.Now()
 
 	relay, ok := p.pool.Relays.Load(url)
-	if !ok || relay == nil || !relay.IsConnected() {
+	if !liveRelay(relay, ok) {
 		var err error
 		if relay, err = p.dial(ctx, url); err != nil {
 			// One failed RESULT, never a failed publish: o34.3's retry reads
@@ -964,8 +982,27 @@ func sendOutcome(err error, connected bool) (string, error) {
 	}
 }
 
-// dial connects one relay under the budget, stores it in the pool, and returns
-// the handle that publishing will use.
+// liveRelay reads one answer from the pool's map: is there a relay here that can
+// be published on right now.
+//
+// ONE STATEMENT OF IT, because the places that ask are the places that must
+// agree — publishOne and dial's own fast path deciding whether to dial at all,
+// dial's Compute deciding which of two relays the map keeps, and the test seam
+// that asserts du9.1's claim about which one survived. It was written out three
+// times before, and a map entry is exactly the kind of thing whose shape changes
+// later: nothing
+// stores nil today, and go-nostr's own EnsureRelay has a branch for a nil entry,
+// so the day something does the three copies would drift one at a time — with
+// the test-only copy still asserting the old rule and going green over it.
+//
+// Not a method, because the pair it takes is what Load and Compute both hand
+// back and neither needs the pool to interpret it.
+func liveRelay(relay *gonostr.Relay, present bool) bool {
+	return present && relay != nil && relay.IsConnected()
+}
+
+// dial returns a live relay for url, connecting one under the budget and storing
+// it if the pool does not already hold one.
 //
 // THE OPTION HAS TO BE PASSED BY HAND. SimplePool.relayOptions is unexported, so
 // a relay built here carries none of the pool's — the dial-time address check
@@ -979,6 +1016,26 @@ func sendOutcome(err error, connected bool) (string, error) {
 // publishes on purpose — and a relay parented on the publish context would have
 // its socket torn down the instant Publish returned.
 func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
+	// A RELAY THE POOL ALREADY HOLDS IS HANDED BACK WITHOUT A DIAL, and this
+	// belongs here rather than only in publishOne (du9.1). go-nostr's EnsureRelay
+	// began this way, and Subscribe used to get the property from it for free:
+	// two pairings on one relay URL, or a pairing whose sibling relay a
+	// PublishToConnection has just opened, would otherwise each open a full
+	// websocket — DNS, TCP, TLS, upgrade — and throw it away inside the Compute
+	// below. That is not merely wasted: every discarded dial runs
+	// checkDialAddress per candidate address, and in the no-snapshot mode a
+	// subscription dials in, that is a settings read off the single sqlite
+	// connection each time, which exemptRelays' own doc names as the thing to
+	// avoid.
+	//
+	// It does not weaken what this bead is about. This path writes NOTHING; the
+	// Compute below is still the only way a relay enters the map, so there is
+	// still exactly one writer shape. A miss here is resolved there, which is
+	// where it was always resolved.
+	if relay, ok := p.pool.Relays.Load(url); liveRelay(relay, ok) {
+		return relay, nil
+	}
+
 	// Derived from the PUBLISH context, so a caller already near its own
 	// deadline shortens this rather than extending past it. That is the
 	// property go-nostr's hardcoded fifteen seconds lacked: it hangs off the
@@ -1017,12 +1074,15 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	// here IS what the event is published on — so a LoadOrStore that returned
 	// the dead entry would be published on directly and fail.
 	//
-	// RESIDUAL, stated rather than implied away: EnsureRelay stores with a plain
-	// Store under its own lock, so a Subscribe that began dialling this URL
-	// before this call and finishes after it can still overwrite this entry and
-	// orphan the socket. It cannot be closed without the library's per-URL lock,
-	// the window is one concurrent subscribe to a relay a publish is dialling at
-	// that instant, and it is filed as BrollyZap-du9.1.
+	// AND IT IS NOW THE ONLY WAY IN (du9.1). While Subscribe took its relay from
+	// EnsureRelay there was a residual this comment had to state: EnsureRelay
+	// stores with a plain Store under its own lock, which does not serialise
+	// against this Compute, so a subscribe that began dialling this URL before
+	// this call and finished after it overwrote the entry and orphaned the
+	// socket — with no way to close it, since every teardown here walks the map.
+	// Subscribe calls this function, so there is no second writer left to tear
+	// the store: whoever loses is closed below, before either caller is handed a
+	// handle.
 	// THE WINNER IS RETURNED, not discarded (1yp). Compute already decides which
 	// handle this URL is going to be published on; handing it back is what lets
 	// publishOne send on the socket it holds rather than asking the library to
@@ -1035,7 +1095,7 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	var duplicate *gonostr.Relay
 	kept, _ := p.pool.Relays.Compute(url,
 		func(existing *gonostr.Relay, loaded bool) (*gonostr.Relay, bool) {
-			if loaded && existing != nil && existing.IsConnected() {
+			if liveRelay(existing, loaded) {
 				duplicate = relay
 				return existing, false
 			}
@@ -1134,10 +1194,12 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	// Usually, not always, and the exception is the moment this path matters
 	// most: nwc/run.go announces to the WHOLE pairing set when the first
 	// session attaches, so this dials sibling relays that are in neither the
-	// before snapshot, nor configured, nor subscribed yet. That is BrollyZap-
-	// du9.1's window — our Compute store racing that relay's own
-	// Subscribe/EnsureRelay plain Store — and it is a coin flip per two-relay
-	// pairing start rather than the exotic case du9.1 was first filed as.
+	// before snapshot, nor configured, nor subscribed yet. That was du9.1's
+	// window — this Compute store racing that relay's own Subscribe, which took
+	// its relay from EnsureRelay's plain Store — and it was a coin flip per
+	// two-relay pairing start rather than the exotic case du9.1 was first filed
+	// as. Subscribe dials through Pool.dial now, so the concurrent dial this
+	// path still provokes resolves to one socket instead of two.
 	//
 	// The cost records are DISCARDED here: k2z keeps the NWC line, and du9
 	// folded in only its receipt half. They are computed either way, which is
