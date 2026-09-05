@@ -1317,7 +1317,7 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 	return found
 }
 
-func TestNoLogValueBodyCallsReveal(t *testing.T) {
+func TestNoLogValueBodyNamesReveal(t *testing.T) {
 	clean(t, checkLogValueBodiesNeverReveal(t, sourceFiles(t)))
 	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
 
