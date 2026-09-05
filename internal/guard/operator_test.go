@@ -473,18 +473,19 @@ func containsString(all []string, want string) bool { return slices.Contains(all
 // the operator to "change the 24-hour limit first": the control they had just
 // typed into. What has to move is the other one.
 //
-// PAID FOR ON THE BOX, 2026-09-02, from the guard's own audit trail. An operator
-// holding a 250-sat per-payment cap tried to set a 100-sat 24-hour ceiling, was
-// refused with the backwards remedy, tried 10,000, and settled at 1,000 — ten
-// times looser than they wanted, on the control whose whole purpose is bounding
-// loss. A message that obstructs TIGHTENING is backwards for a security control:
-// §6's asymmetry makes the safe direction the free one, and this message was
-// charging for it.
+// What it cost on the box is in checkCapPair's own doc comment, which is where
+// that argument belongs; it is not repeated here.
 //
 // BOTH DIRECTIONS IN ONE TABLE, because the defect is that they were the SAME
-// string. A test asserting one direction passes against the bug, and so does one
-// that only matches a substring the two share — which is why each case also
-// refuses the other's remedy.
+// string. A test asserting one direction passes against the bug.
+//
+// EACH CASE ALSO REFUSES THE OTHER'S REMEDY, and the reason is narrower than it
+// looks. It is not needed to catch the old string or the swapped one — `want`
+// carries the whole remedy clause, so both of those already fail it. What it
+// catches is a message that offers BOTH remedies at once, which reads like a
+// kindness and is not: an operator lowering the 24-hour limit cannot act on
+// "raise the 24-hour limit", so offering it there puts back the misdirection
+// this bead exists to remove.
 func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -518,10 +519,11 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 				t.Fatal("the cap pair was left inconsistent; the per-payment limit can now " +
 					"never be reached, and the page states a number that means nothing")
 			}
-			if got := err.Error(); !strings.Contains(got, tc.want) {
+			got := err.Error()
+			if !strings.Contains(got, tc.want) {
 				t.Errorf("the refusal reads\n  %s\nwant it to contain\n  %s", got, tc.want)
 			}
-			if got := err.Error(); strings.Contains(got, tc.notWant) {
+			if strings.Contains(got, tc.notWant) {
 				t.Errorf("the refusal reads\n  %s\nand names %q — the control the operator is "+
 					"already editing, which is the whole of 8vj", got, tc.notWant)
 			}
