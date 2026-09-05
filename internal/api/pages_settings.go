@@ -33,13 +33,29 @@ import (
 // "what is a valid value for this?" is asked at the moment the key is added
 // rather than discovered later by a reader that cannot render the row.
 // TestEveryValidatedFieldCanSayWhyItRefused holds the other half: a validator
-// with no flash marker is copy the operator would never see.
+// with no flash marker is a refusal the operator would never see, and a marker
+// with no validator is copy nothing can reach.
 //
 // NOT EVERY KEY, deliberately (the 3 Sep ruling). Each key's validity is its own
 // question and some already have answers elsewhere — relays have ParseRelays,
 // the caps belong to the guard — so a nil validate means "stored as posted",
 // which is what every other key does today and what 497's tolerant readers
 // still expect.
+//
+// TRUSTED_PROXIES WAS ALREADY VALIDATED and has been folded in rather than left
+// beside this. It had its own hand-written pre-check immediately above
+// saveSettings' loop, doing exactly what this does: parse, warn without echoing
+// the value, redirect, refuse the whole save. Leaving it would have made the
+// sentence above FALSE for one key, put two precedents in one function for the
+// next person to copy from, and kept it outside the marker invariant below.
+// Folding it in is not "validating another key" — the ruling's line — it is the
+// same validation, in the one place this file now looks for it.
+//
+// TWO THINGS A NEW ENTRY MUST KNOW, both learned the hard way here. The refused
+// marker has to be a lowercase [a-z_-] token, because that is what the flash
+// scan matches. And the pre-pass returns on the FIRST refusal, so an operator
+// who posts two bad fields fixes one and is refused again for the other — fine
+// today with two validators, worth revisiting at five.
 type settingField struct {
 	key string
 	// validate refuses a value before anything is written. Nil means the value
@@ -56,7 +72,7 @@ type settingField struct {
 var settingsForm = []settingField{
 	{key: SettingDomain},
 	{key: SettingAddressName},
-	{key: SettingTrustedProxies},
+	{key: SettingTrustedProxies, validate: validTrustedProxies, refused: "refused"},
 	{key: SettingLogLevel, validate: validLogLevel, refused: "bad_log_level"},
 	{key: SettingPublicRateLimitMinute},
 	{key: SettingPublicRateLimitHour},
@@ -74,9 +90,12 @@ var settingsForm = []settingField{
 // stops new bad rows; that copes with the ones already there.
 //
 // UnmarshalText is the test rather than membership of logLevelOptions, and the
-// difference is deliberate. It accepts "INFO", " warn " and the offset form
-// "info+2" — none of which the select can produce, all of which a reader renders
+// difference is deliberate. It accepts "INFO" and the offset form "info+2" —
+// neither of which the select can produce, both of which a reader renders
 // correctly by rounding — so refusing them would be refusing values that work.
+// (" warn " passes too, but by the CALLER's TrimSpace rather than by
+// UnmarshalText, which does not trim. Review corrected this sentence, which had
+// credited the parser with tolerance it does not have.)
 // What it rejects is outright nonsense.
 //
 // AN EMPTY VALUE IS NOT REFUSED, and that boundary was drawn by a failing test
@@ -95,11 +114,43 @@ func validLogLevel(value string) error {
 	if value == "" {
 		return nil
 	}
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(value)); err != nil {
+	if _, err := parseLevel(value); err != nil {
 		return fmt.Errorf("%q is not a log level", value)
 	}
 	return nil
+}
+
+// validTrustedProxies refuses a CIDR list that does not parse.
+//
+// This value gates which forwarded-for headers are believed (§7), and a
+// silently-ignored one would leave the operator thinking they had changed a
+// security boundary. It predates settingField and used to run as its own block
+// at the top of saveSettings; the behaviour is unchanged — same parser, same
+// all-or-nothing refusal, same flash — only its home moved.
+func validTrustedProxies(value string) error {
+	_, err := config.ParsePrefixList(value)
+	return err
+}
+
+// parseLevel reads a stored or posted log level, trimming first.
+//
+// ONE STATEMENT OF WHAT THIS APP ACCEPTS, and it is the same discipline ruling 2
+// applied to the four NAMES. The writer's promise is that it refuses exactly
+// what the reader cannot render; with UnmarshalText spelled out at three call
+// sites — the validator, logLevelChoice and applyLogLevel — that promise was a
+// coincidence of three agreeing copies rather than a property. The drift had
+// already begun: two of them trimmed and the third relied on its caller having
+// done so, which is why the doc above once credited the parser with trimming.
+//
+// Found by review, and worth more than the four lines it saves: if this ever
+// grows a rule — a level this app declines even though slog parses it — there is
+// now one place to put it and the two layers cannot disagree about it.
+func parseLevel(raw string) (slog.Level, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(strings.TrimSpace(raw))); err != nil {
+		return 0, err
+	}
+	return level, nil
 }
 
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
@@ -156,8 +207,8 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 // exactly as the empty row did. Fixing only the empty case would leave 497
 // one input away.
 func (s *Server) logLevelChoice(stored string) string {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(strings.TrimSpace(stored))); err != nil {
+	level, err := parseLevel(stored)
+	if err != nil {
 		// Includes the empty row, which is what a fresh install has.
 		level = s.levelInForce()
 	}
@@ -214,18 +265,34 @@ func logLevelNames() []string {
 // named level can lower an offset level by a step on the next Save; landing on
 // debug would raise it, which is the direction that matters.
 //
-// THE LAST OPTION AT OR BELOW the level, which is that rounding expressed
-// against the table rather than as a parallel switch. A level below the first
-// option — nothing in slog produces one, but UnmarshalText will accept it —
-// falls to the first, matching what the switch did with `level < LevelInfo`.
+// THE HIGHEST OPTION AT OR BELOW the level, which is that rounding expressed
+// against the table rather than as a parallel switch. A level below every option
+// — nothing in slog produces one, but UnmarshalText will accept it — falls to
+// the lowest, matching what the switch did with `level < LevelInfo`.
+//
+// THE HIGHEST, NOT THE LAST, and the difference is a bug review caught before it
+// shipped. Taking the last match makes this depend on the table being sorted,
+// which is an invariant a comment cannot enforce: append a lower level at the
+// END — `{"trace", slog.LevelDebug - 4}`, the natural way to add one — and an
+// INFO process renders "trace", so the operator's next Save turns logging up.
+// That is 497's failure class exactly, arriving silently through a plausible
+// edit. Comparing levels instead of positions makes the order irrelevant here,
+// as it was in the switch this replaced; the table's order still matters, but
+// only for the sequence the template displays, which is what
+// TestTheLogLevelOptionsAscend holds.
 func levelOption(level slog.Level) string {
-	option := logLevelOptions[0].Name
+	best := logLevelOptions[0]
 	for _, candidate := range logLevelOptions {
-		if candidate.Level <= level {
-			option = candidate.Name
+		if candidate.Level < best.Level {
+			best = candidate // the lowest, for the below-everything case
 		}
 	}
-	return option
+	for _, candidate := range logLevelOptions {
+		if candidate.Level <= level && candidate.Level >= best.Level {
+			best = candidate
+		}
+	}
+	return best.Name
 }
 
 // saveDomain normalises what the operator pasted and returns the bare
@@ -287,16 +354,6 @@ func (s *Server) saveDomain(ctx context.Context, pasted string) string {
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Reject a bad CIDR list before storing it: this value gates which
-	// forwarded-for headers are believed (§7), and a silently-ignored one would
-	// leave the operator thinking they had changed a security boundary.
-	proxies := strings.TrimSpace(r.PostFormValue(SettingTrustedProxies))
-	if _, err := config.ParsePrefixList(proxies); err != nil {
-		s.Log.Warn("rejected a trusted-proxies value", "error", err.Error())
-		http.Redirect(w, r, "/settings?flash=refused", http.StatusSeeOther)
-		return
-	}
-
 	// VALIDATED BEFORE ANYTHING IS WRITTEN, so a refusal leaves the stored
 	// settings exactly as they were (0vk.38). Checking inside the write loop
 	// would refuse the bad key half way through and leave the keys before it
@@ -318,6 +375,14 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 
 	for _, field := range settingsForm {
 		value := strings.TrimSpace(r.PostFormValue(field.key))
+		// STILL A BRANCH, and deliberately not a `normalise` hook beside
+		// `validate`. saveDomain needs the *Server and the ctx — it reads the
+		// stored domain and may flip SettingDomainInsecure — so it does not fit
+		// the `func(string) error` shape the field carries, and inventing a
+		// second hook signature for one user would be abstraction ahead of a
+		// second case. Review flagged this as the place the struct is visibly
+		// half-finished; it is, and the second key that wants normalising is
+		// what should decide the shape, not this one.
 		if field.key == SettingDomain {
 			value = s.saveDomain(ctx, value)
 		}
@@ -376,9 +441,18 @@ func (s *Server) applyLogLevel(r *http.Request, raw string) {
 	if s.Level == nil || strings.TrimSpace(raw) == "" {
 		return
 	}
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(strings.TrimSpace(raw))); err != nil {
-		s.Log.Warn("ignoring an unreadable log level", "value", raw)
+	level, err := parseLevel(raw)
+	if err != nil {
+		// UNREACHABLE FROM saveSettings since 0vk.38 — its only caller refuses
+		// exactly this in the pre-pass, before anything is written or applied.
+		// Kept because "the caller checked" is the assumption that makes the
+		// next caller a bug, and it costs two lines.
+		//
+		// THE VALUE IS NOT LOGGED. It used to be, and that made this file carry
+		// a counterexample to the §12 rule its own refusal path states three
+		// screens above: operator input echoed into a log does not get an
+		// exception for being malformed. Found by review.
+		s.Log.Warn("ignoring an unreadable log level")
 		return
 	}
 	s.Level.Set(level)

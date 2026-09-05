@@ -262,8 +262,14 @@ func TestTheSettingsPageOffersTheLevelsTheHandlerExports(t *testing.T) {
 	// ANTI-VACUITY: logLevelNames() emptied would make the comparison above pass
 	// against a select with no options at all, which is the browser-submits-debug
 	// bug wearing a different hat.
-	if len(offered) != 4 {
-		t.Errorf("the page offers %d levels, want 4", len(offered))
+	//
+	// EMPTINESS, NOT A COUNT. This asserted `!= 4` first, which is the retired
+	// pin in miniature: adding a fifth level deliberately would fail with "the
+	// page offers 5 levels, want 4", pointing at a number instead of at the
+	// decision. Whether four is the right set is a question for the ruling that
+	// chose them, not for a vacuity guard. Found by review.
+	if len(offered) == 0 {
+		t.Error("the page offers no levels at all, so the comparison above asserted nothing")
 	}
 }
 
