@@ -102,7 +102,7 @@ vuln:
 # deliberately different, because "come back later" and "the gate is not testing
 # what ships" are not the same news.
 toolchain-floor:
-	sh scripts/toolchain-floor.sh
+	python3 scripts/toolchain_floor.py
 
 proto-tools:
 	go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
