@@ -63,8 +63,17 @@ DOCKERFILES = ("Dockerfile.server", "Dockerfile.guard")
 # DIGEST, never by tag: a tag is a mutable pointer, so a check reading the tag
 # would assert against a moving target and stop meaning anything the first time
 # upstream republished it.
-PIN = re.compile(r"^FROM .*golang:[^@\s]*@(sha256:[0-9a-f]{64})", re.M)
-TOOLCHAIN = re.compile(r"^toolchain go([0-9][0-9.]*)$", re.M)
+# The lookbehind matters: `.*golang:` alone also matches an image NAMED
+# something ending in "golang", e.g. `notgolang:tag@sha256:...`. That would send
+# a foreign digest to the library/golang repo, 404, and land in the exit-2 path —
+# not a wrong answer, but a confusing one for a reason the regex could just
+# exclude.
+PIN = re.compile(r"^FROM .*(?<![\w.\-])golang:[^@\s]*@(sha256:[0-9a-f]{64})", re.M)
+# Prereleases included: `toolchain go1.28rc1` is valid go.mod syntax that Go
+# accepts, and the official images publish rc tags, so a stricter digits-only
+# pattern would report a well-formed file as having no toolchain line at all —
+# a wrong message about a real configuration. Found by planting an rc version.
+TOOLCHAIN = re.compile(r"^toolchain go([0-9][0-9.]*(?:[a-z]+[0-9]*)?)$", re.M)
 
 
 class CannotCheck(Exception):
@@ -159,10 +168,7 @@ def check():
 
         ships = shipped_go(pins[0], cache, state)
         if ships != floor:
-            above = "ABOVE the image — the gate would test a newer Go than ships, and\n" \
-                    "  govulncheck cannot see past that"
-            below = "BELOW the image — the gate would test an older Go than ships"
-            direction = below if _older(floor, ships) else above
+            direction = _direction(floor, ships)
             raise Mismatch(
                 "go.mod's toolchain floor and %s's base image disagree.\n"
                 "  go.mod  toolchain go%s\n"
@@ -174,14 +180,38 @@ def check():
 
     # ANTI-VACUITY. A loop that ran zero times reports success, and this check is
     # exactly the shape where that would go unnoticed for a long time.
+    #
+    # UNREACHABLE TODAY, and kept deliberately: every way the loop body can skip
+    # the increment currently raises instead, so this cannot fire as the code
+    # stands. It is here for the refactor that adds a `continue` on some soft
+    # failure — the moment a loop like this stops being all-or-nothing is the
+    # moment it can silently check nothing. Found by review, which is the reason
+    # it says so rather than looking like live protection.
     if scanned != len(DOCKERFILES):
         raise CannotCheck("checked %d Dockerfiles, expected %d" % (scanned, len(DOCKERFILES)))
     return floor, len(cache)
 
 
-def _older(a, b):
-    key = lambda v: [int(p) for p in v.split(".")]  # noqa: E731
-    return key(a) < key(b)
+def _direction(floor, ships):
+    """Say which way the floor is wrong, or decline to say.
+
+    BEST EFFORT, DELIBERATELY. Ordering two Go versions is only well defined
+    while both are plain numeric releases; `1.28rc1` against `1.28` has an answer
+    Go's own module semantics define but this check has no business restating.
+    So when the pair cannot be ordered confidently the message drops the label
+    and still reports the mismatch with both numbers — the refusal is the point,
+    the direction is the explanation. Inventing prerelease ordering here to keep
+    a sentence tidy would be a second, quieter place for version semantics to
+    live.
+    """
+    parts = [v.split(".") for v in (floor, ships)]
+    if all(p.isdigit() for version in parts for p in version):
+        if [int(p) for p in parts[0]] < [int(p) for p in parts[1]]:
+            return "BELOW the image — the gate would test an older Go than ships"
+        return ("ABOVE the image — the gate would test a newer Go than ships, and\n"
+                "  govulncheck cannot see past that")
+    return ("not comparable as plain releases, so this does not say which way —\n"
+            "  but the gate and the images are not running the same Go")
 
 
 if __name__ == "__main__":
@@ -197,4 +227,21 @@ if __name__ == "__main__":
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as err:
         print("toolchain-floor: COULD NOT CHECK — registry unreachable: %s" % err,
               file=sys.stderr)
+        sys.exit(2)
+    except Exception as err:  # noqa: BLE001 — deliberate, see below
+        # ANYTHING ELSE IS ALSO A COULD-NOT-CHECK, and this clause is load-bearing
+        # rather than defensive habit. Without it an unexpected exception escapes
+        # as a bare traceback on Python's default exit status — which is 1, the
+        # code Mismatch uses. A crash would then be indistinguishable from "the
+        # gate is not testing what ships", which is the one confusion this whole
+        # file is built to prevent.
+        #
+        # The realistic path, found by review: Docker Hub's anonymous endpoint is
+        # fronted by Cloudflare and answers a rate limit with an HTML page, so
+        # json.load raises JSONDecodeError — a ValueError subclass, and therefore
+        # NOT caught by the network tuple above. Rate limiting is this check's own
+        # stated expiry condition, so that is the failure it was most likely to
+        # meet and least able to report.
+        print("toolchain-floor: COULD NOT CHECK — %s: %s"
+              % (type(err).__name__, err), file=sys.stderr)
         sys.exit(2)

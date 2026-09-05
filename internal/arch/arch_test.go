@@ -682,12 +682,24 @@ func TestTheLanguageVersionTracksTheToolchain(t *testing.T) {
 	// quietly back to where it was before 0vk.39, with nothing to say so.
 	catches(t, checkLanguageVersionTracksToolchain(
 		[]byte("module m\n\ngo 1.25.0\n\ntoolchain go1.27.1\n")), "different minors")
-	// And the other direction, which would pass a rule written as "the go
-	// directive is not behind": both stated, still disagreeing.
+	// The other direction. It takes the SAME branch as the case above — there is
+	// no direction-dependent code here to distinguish — so it is a ratchet, not
+	// coverage: it stops the rule being narrowed later to "the go directive must
+	// not lag", which would let a language version RUN AHEAD of the toolchain and
+	// refuse the very base image that ships. Review made me say what it is rather
+	// than let it read as a second branch.
 	catches(t, checkLanguageVersionTracksToolchain(
 		[]byte("module m\n\ngo 1.28.0\n\ntoolchain go1.27.1\n")), "different minors")
+
+	// The remaining branches, which had no plants at all until review counted
+	// them — in a file whose own rule is that a check which has only ever passed
+	// has been written, not tested.
 	catches(t, checkLanguageVersionTracksToolchain(
 		[]byte("module m\n\ngo 1.27.0\n")), "no `toolchain` line")
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ntoolchain go1.27.1\n")), "no `go` directive")
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ngo !!! not a version\n")), "does not parse")
 }
 
 func checkGoNostrReplace(src []byte) []problem {
