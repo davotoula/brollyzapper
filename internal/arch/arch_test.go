@@ -1234,6 +1234,94 @@ type pairing struct {
 `)}), "implements no LogValue")
 }
 
+// §12, and total by construction: a LogValue body may not call Reveal().
+//
+// LogValue is the last thing between a secret and the log line, and it is
+// hand-written — that is exactly what 0vk.33 found, when
+// slog.String("admin_password", s.AdminPassword.Reveal()) inside
+// config.Server.LogValue passed the whole gate. The redaction tests now catch
+// that shape in two places; this catches it at build time, for every type at
+// once, without anyone remembering to add a subject to a table.
+//
+// NO EXEMPTION LIST, and that is the point. Three bodies used to call Reveal()
+// legitimately — all three were X.Reveal() != "", which is exactly !X.IsZero()
+// (internal/secret/secret.go) — so 0vk.37 rewrote them and the rule became a
+// flat syntactic ban. A version that tried to allow Reveal() in a COMPARISON
+// while forbidding it in a value would be dataflow wearing a syntax check's
+// clothes: it would pass v := x.Reveal(); slog.String(k, v) unchallenged.
+//
+// WHAT IT DOES NOT DO. It is a syntax check over LogValue bodies and nothing
+// more. It does not see a secret revealed into a variable elsewhere and passed
+// into a LogValue, nor a string assembled outside one — that is dataflow, and
+// covering it is the redaction tests' job (internal/logging's table, and the
+// per-type rendering tests). Read it as "the obvious leak cannot be written
+// here", not as "no secret can reach a log line".
+//
+// It also covers LogValue and no other rendering seam. String() and GoString()
+// are the same shape and the same "never legitimate", and 0vk.43 carries that
+// widening; MarshalJSON is deliberately excluded, because serialising a secret
+// is also how one is legitimately PERSISTED (internal/store/nwc.go writes two)
+// and a name that can need an exemption would cost this rule its totality.
+func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
+	fset := token.NewFileSet()
+	var found []problem
+	for _, f := range files {
+		parsed, err := parser.ParseFile(fset, f.path, f.src, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		for _, d := range parsed.Decls {
+			// Matched on the method name and a receiver, not on a file list:
+			// the rule has to hold for a type that does not exist yet.
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "LogValue" || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
+				continue
+			}
+			recv := strings.TrimPrefix(typeString(fn.Recv.List[0].Type), "*")
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Reveal" {
+					return true
+				}
+				found = append(found, problem{f.rel, fset.Position(call.Pos()).Line, fmt.Sprintf(
+					"%s.LogValue calls Reveal(); §12 says a LogValue body renders FACTS about a "+
+						"secret and never the secret itself — use IsZero to report whether one is set",
+					recv)})
+				return true
+			})
+		}
+	}
+	slices.SortFunc(found, func(a, b problem) int { return strings.Compare(a.String(), b.String()) })
+	return found
+}
+
+func TestNoLogValueBodyCallsReveal(t *testing.T) {
+	clean(t, checkLogValueBodiesNeverReveal(t, sourceFiles(t)))
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Bool("admin_password_set", !s.AdminPassword.IsZero()),
+		slog.String("admin_password", s.AdminPassword.Reveal()),
+	)
+}
+`)}), "Server.LogValue calls Reveal()")
+	// The local-variable shape, which is the one a rule that tried to allow
+	// Reveal() in a comparison would have had to let through. A flat ban does
+	// not: it never looks at what the value is used for.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	v := s.AdminPassword.Reveal()
+	return slog.GroupValue(slog.String("admin_password", v))
+}
+`)}), "Server.LogValue calls Reveal()")
+}
+
 // checkSecretBearingStructsRedact finds structs with a secret.String field and
 // asserts the same package declares LogValue on that type.
 //
