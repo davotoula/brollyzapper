@@ -1244,24 +1244,32 @@ type pairing struct {
 // once, without anyone remembering to add a subject to a table.
 //
 // NO EXEMPTION LIST, and that is the point. Three bodies used to call Reveal()
-// legitimately — all three were X.Reveal() != "", which is exactly !X.IsZero()
-// (internal/secret/secret.go) — so 0vk.37 rewrote them and the rule became a
-// flat syntactic ban. A version that tried to allow Reveal() in a COMPARISON
-// while forbidding it in a value would be dataflow wearing a syntax check's
-// clothes: it would pass v := x.Reveal(); slog.String(k, v) unchallenged.
+// legitimately, and all three were X.Reveal() != "" — which is exactly
+// !X.IsZero() (internal/secret/secret.go), the spelling store.Txn.LogValue was
+// already using. They were stragglers from a settled idiom, not a real need, so
+// 0vk.37 rewrote them and the rule became a flat syntactic ban. A version that
+// tried to allow Reveal() in a COMPARISON while forbidding it in a value would
+// be dataflow wearing a syntax check's clothes: it would pass
+// v := x.Reveal(); slog.String(k, v) unchallenged.
 //
-// WHAT IT DOES NOT DO. It is a syntax check over LogValue bodies and nothing
-// more. It does not see a secret revealed into a variable elsewhere and passed
-// into a LogValue, nor a string assembled outside one — that is dataflow, and
-// covering it is the redaction tests' job (internal/logging's table, and the
-// per-type rendering tests). Read it as "the obvious leak cannot be written
-// here", not as "no secret can reach a log line".
+// WHAT IT DOES NOT DO — and note this is a DIFFERENT gap from the one above.
+// The rejected design would have missed a reveal INSIDE the body; the flat ban
+// catches those, local variable included. What it misses is a reveal that never
+// appears in the body at all: a value revealed by another function and passed
+// in, or assembled outside and handed over. That is dataflow, and covering it is
+// the redaction tests' job (internal/logging's table, and the per-type rendering
+// tests). Read it as "the obvious leak cannot be written here", not as "no
+// secret can reach a log line".
 //
 // It also covers LogValue and no other rendering seam. String() and GoString()
 // are the same shape and the same "never legitimate", and 0vk.43 carries that
-// widening; MarshalJSON is deliberately excluded, because serialising a secret
-// is also how one is legitimately PERSISTED (internal/store/nwc.go writes two)
-// and a name that can need an exemption would cost this rule its totality.
+// widening. MarshalJSON is deliberately excluded, and on a HEDGE rather than on
+// an example: no type here reveals through one today — secret.String's own
+// MarshalJSON returns Redacted and is the tree's only one — so the ban would be
+// green. But LogValue exists for logging alone, which §12 forbids secrets from
+// reaching absolutely, while marshalling is also how a value is exported or
+// backed up, where revealing can be correct. A name that could ever need an
+// exemption would cost this rule the totality that is the whole point of it.
 func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
 	fset := token.NewFileSet()
 	var found []problem
@@ -1295,7 +1303,10 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 			})
 		}
 	}
-	slices.SortFunc(found, func(a, b problem) int { return strings.Compare(a.String(), b.String()) })
+	// Unsorted on purpose. The siblings that sort range over a map; this walks
+	// files lexically, decls in source order and bodies in pre-order, so found
+	// is already in the order a reader wants — and sorting on problem.String()
+	// would order line 100 ahead of line 9.
 	return found
 }
 
@@ -1310,9 +1321,8 @@ func (s Server) LogValue() slog.Value {
 	)
 }
 `)}), "Server.LogValue calls Reveal()")
-	// The local-variable shape, which is the one a rule that tried to allow
-	// Reveal() in a comparison would have had to let through. A flat ban does
-	// not: it never looks at what the value is used for.
+	// The local-variable shape: in the body, so caught. This is the plant that
+	// pins the first half of the limit above — see "WHAT IT DOES NOT DO".
 	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
 
 func (s Server) LogValue() slog.Value {
