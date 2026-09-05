@@ -1234,7 +1234,7 @@ type pairing struct {
 `)}), "implements no LogValue")
 }
 
-// §12, and total by construction: a LogValue body may not call Reveal().
+// §12, and total by construction: a LogValue body may not name Reveal.
 //
 // LogValue is the last thing between a secret and the log line, and it is
 // hand-written — that is exactly what 0vk.33 found, when
@@ -1253,13 +1253,18 @@ type pairing struct {
 // v := x.Reveal(); slog.String(k, v) unchallenged.
 //
 // WHAT IT DOES NOT DO — and note this is a DIFFERENT gap from the one above.
-// The rejected design would have missed a reveal INSIDE the body; the flat ban
-// catches those, local variable included. What it misses is a reveal that never
-// appears in the body at all: a value revealed by another function and passed
-// in, or assembled outside and handed over. That is dataflow, and covering it is
-// the redaction tests' job (internal/logging's table, and the per-type rendering
-// tests). Read it as "the obvious leak cannot be written here", not as "no
-// secret can reach a log line".
+// The rejected design would have missed a reveal INSIDE the body; this catches
+// every one of those, because it matches the SELECTOR rather than the call: a
+// local, a closure, a defer, a goroutine, a method value, a parenthesised call.
+// What it misses is a reveal that never appears in the body at all — a value
+// revealed by another function and passed in, or assembled outside and handed
+// over. That is dataflow, and covering it is the redaction tests' job
+// (internal/logging's table, and the per-type rendering tests). Read it as "the
+// obvious leak cannot be written here", not as "no secret can reach a log line".
+//
+// It also does not read _test.go files, because readSourceFiles does not: a
+// LogValue on a test-only fixture type is unscanned. No such type exists today
+// and the redaction tests would still be the thing that caught it.
 //
 // It also covers LogValue and no other rendering seam. String() and GoString()
 // are the same shape and the same "never legitimate", and 0vk.43 carries that
@@ -1286,17 +1291,19 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 				continue
 			}
 			recv := strings.TrimPrefix(typeString(fn.Recv.List[0].Type), "*")
+			// The SELECTOR, not the call. Matching *ast.CallExpr{Fun: SelectorExpr}
+			// reads like the obvious thing and leaves two holes the go-review pass
+			// found by planting them: a method value (f := x.Reveal; f()) is a bare
+			// selector inside no call at all, and (x.Reveal)() wraps the selector in
+			// an *ast.ParenExpr so the type assertion on Fun fails. Naming Reveal
+			// anywhere in the body is the thing to forbid, and it is also less code.
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
+				sel, ok := n.(*ast.SelectorExpr)
 				if !ok || sel.Sel.Name != "Reveal" {
 					return true
 				}
-				found = append(found, problem{f.rel, fset.Position(call.Pos()).Line, fmt.Sprintf(
-					"%s.LogValue calls Reveal(); §12 says a LogValue body renders FACTS about a "+
+				found = append(found, problem{f.rel, fset.Position(sel.Pos()).Line, fmt.Sprintf(
+					"%s.LogValue names Reveal; §12 says a LogValue body renders FACTS about a "+
 						"secret and never the secret itself — use IsZero to report whether one is set",
 					recv)})
 				return true
@@ -1320,7 +1327,7 @@ func (s Server) LogValue() slog.Value {
 		slog.String("admin_password", s.AdminPassword.Reveal()),
 	)
 }
-`)}), "Server.LogValue calls Reveal()")
+`)}), "Server.LogValue names Reveal")
 	// The local-variable shape: in the body, so caught. This is the plant that
 	// pins the first half of the limit above — see "WHAT IT DOES NOT DO".
 	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
@@ -1329,7 +1336,24 @@ func (s Server) LogValue() slog.Value {
 	v := s.AdminPassword.Reveal()
 	return slog.GroupValue(slog.String("admin_password", v))
 }
-`)}), "Server.LogValue calls Reveal()")
+`)}), "Server.LogValue names Reveal")
+	// The method value, which is a bare selector inside no call at all, and the
+	// parenthesised call, whose Fun is an *ast.ParenExpr. Both slipped through the
+	// first version of this rule, which matched the CallExpr; the go-review pass
+	// found them by planting them, so they are plants now.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	f := s.AdminPassword.Reveal
+	return slog.GroupValue(slog.String("admin_password", f()))
+}
+`)}), "Server.LogValue names Reveal")
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("admin_password", (s.AdminPassword.Reveal)()))
+}
+`)}), "Server.LogValue names Reveal")
 }
 
 // checkSecretBearingStructsRedact finds structs with a secret.String field and
