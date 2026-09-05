@@ -22,8 +22,11 @@ FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:cf6fca6641884b8433441b2
 # during 0vk.35 — `toolchain go1.28.0` planted in go.mod, `--no-cache` build on a
 # base shipping go1.27.1, build succeeded silently. So a floor above this image
 # means the gate tests a newer Go than ships here and nothing says so, which is
-# the direction govulncheck cannot see past. BrollyZap-0vk.39 makes it an
-# assertion; until then the two move together by hand, and go.mod says how.
+# the direction govulncheck cannot see past. `make toolchain-floor` is now the
+# assertion (0vk.39): it reads THIS digest, asks the registry which Go the image
+# ships, and fails if go.mod's toolchain line disagrees — in either direction, in
+# the local gate and in CI. So the pin and the floor still move together by hand,
+# but no longer only by hand: change one without the other and the gate says so.
 ENV GOTOOLCHAIN=local
 ARG TARGETOS
 ARG TARGETARCH
