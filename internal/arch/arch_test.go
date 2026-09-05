@@ -610,13 +610,6 @@ const (
 	goNostrGoModHash = "h1:4avYoc9mDGZ9wHsvCOhHH9vPzKucCfuYBtJUSpHTfNk="
 )
 
-// go.mod carries exactly one replace, and it is the fork at the pinned commit.
-//
-// A replace silently swaps what the compiler sees, so it is the line in go.mod a
-// reader most needs to be able to trust. Parsed with modfile rather than scanned:
-// this package already deleted a hand-rolled scanner for the same reason (see
-// workflow_test.go), and a rule that mis-parses does not error, it passes
-// vacuously.
 // 0vk.39: the `go` directive's minor tracks the `toolchain` line's.
 //
 // WHY THE LANGUAGE VERSION IS LOAD-BEARING HERE, which is not obvious. Under
@@ -702,6 +695,13 @@ func TestTheLanguageVersionTracksTheToolchain(t *testing.T) {
 		[]byte("module m\n\ngo !!! not a version\n")), "does not parse")
 }
 
+// go.mod carries exactly one replace, and it is the fork at the pinned commit.
+//
+// A replace silently swaps what the compiler sees, so it is the line in go.mod a
+// reader most needs to be able to trust. Parsed with modfile rather than scanned:
+// this package already deleted a hand-rolled scanner for the same reason (see
+// workflow_test.go), and a rule that mis-parses does not error, it passes
+// vacuously.
 func checkGoNostrReplace(src []byte) []problem {
 	parsed, err := modfile.Parse("go.mod", src, nil)
 	if err != nil {
