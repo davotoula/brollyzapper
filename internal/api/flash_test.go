@@ -59,10 +59,45 @@ func TestEveryFlashMarkerHasAMessageAndEveryMessageAMarker(t *testing.T) {
 				"renders no message at all", strings.Join(files, ", "), name)
 		}
 	}
+	// The settings form's refusal markers, which the scan cannot see because
+	// saveSettings redirects with "?flash="+field.refused (0vk.38).
+	//
+	// THE NOTE BELOW SAYS TO SPELL THE TARGET OUT INSTEAD, and this is a
+	// deliberate departure from it, so here is the reason. That advice was
+	// written against a marker built from an ARBITRARY variable, which nothing
+	// can enumerate. settingsForm is a typed list, so this rule can read the
+	// markers straight out of the structure that produces them — which is a
+	// stronger guarantee than the regex gives, not a weaker one, because it
+	// cannot drift from the redirect the way a literal in a second place can.
+	// Spelling it out would mean a per-key switch at the redirect site, which is
+	// the shape 0vk.38's brief asked the validator design to avoid.
+	for _, field := range settingsForm {
+		if field.refused != "" {
+			found[field.refused] = append(found[field.refused], "settingsForm")
+		}
+	}
+
+	// And the companion: a field that can refuse must be able to SAY it refused.
+	// A validator with no marker redirects to "/settings?flash=" — no message,
+	// and the page silently says nothing happened, which is the exact failure
+	// this whole rule exists to prevent.
+	for _, field := range settingsForm {
+		if field.validate != nil && field.refused == "" {
+			t.Errorf("settingsForm's %q validates but names no flash marker, so a refusal "+
+				"would redirect with an empty one and the page would say nothing", field.key)
+		}
+		if field.validate == nil && field.refused != "" {
+			t.Errorf("settingsForm's %q names the flash marker %q but validates nothing, so "+
+				"that copy can never be reached", field.key, field.refused)
+		}
+	}
+
 	// The other direction. A marker assembled by concatenation — "?flash="+x —
 	// is invisible to the scan above, so a message reported here is either dead
 	// or reached by a redirect this rule cannot see; both want fixing, and the
-	// second is fixed by spelling the whole target out at the redirect.
+	// second is fixed by spelling the whole target out at the redirect, or — when
+	// the markers live in a list something can range over — by adding that list
+	// to the scan as settingsForm is added above.
 	unreachable := make([]string, 0)
 	for name := range flashMessages {
 		if found[name] == nil {

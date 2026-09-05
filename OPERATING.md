@@ -113,6 +113,11 @@ more of the ceiling than it needs, so fewer payments fit in the window.
 **Default:** `info`. **This setting overrides the `LOG_LEVEL` environment variable** — the
 stored value is applied after the environment on boot, so if the two disagree, this one wins.
 
+**It sets the server's level only.** The guard is a separate container with its own logging, and
+it reads its level from its own `LOG_LEVEL` environment variable — nothing on this page changes
+it. If you are turning `debug` on to diagnose something the guard does — baking or revoking a
+spend macaroon, or a refused operator change — set `LOG_LEVEL` on the guard container too.
+
 `debug` is worth turning on when diagnosing delivery: the relay filter and the double-encoding
 rescue both log there. It is safe to leave on briefly and noisy to leave on forever; nothing
 secret is logged at any level.

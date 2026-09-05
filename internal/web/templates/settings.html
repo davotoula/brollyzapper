@@ -29,7 +29,7 @@
   <label>Log level
     <select name="log_level">
       {{$current := .Settings.LogLevel}}
-      {{range $level := list "debug" "info" "warn" "error"}}
+      {{range $level := .Settings.LogLevelOptions}}
       <option value="{{$level}}" {{if eq $level $current}}selected{{end}}>{{$level}}</option>
       {{end}}
     </select></label>

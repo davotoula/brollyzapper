@@ -232,14 +232,121 @@ func TestAnUnrenderableStoredLevelDoesNotFallBackToDebug(t *testing.T) {
 //
 // Adding a level is not forbidden; it is required to be a decision. Whoever
 // adds one to the template lands here and has to teach levelOption about it.
-func TestTheLogLevelOptionsAreExactlyTheOnesTheHandlerCanChoose(t *testing.T) {
+// RETIRED by 0vk.38, and this note is what replaces it.
+//
+// TestTheLogLevelOptionsAreExactlyTheOnesTheHandlerCanChoose compared two lists:
+// settings.html's `list "debug" "info" "warn" "error"` and the four strings
+// levelOption could return. A pin like that is what you write when you cannot
+// remove a duplicate — it cannot stop the two drifting, only report it after the
+// fact, and it was the best available while the template held its own copy.
+//
+// There is one list now (logLevelOptions in pages_settings.go); the template
+// ranges over what the handler exports. A pin on a single statement compares it
+// with itself and passes whatever it says, which is a test that cannot fail —
+// so keeping it would have been worse than deleting it, not merely redundant.
+//
+// WHAT STILL COVERS THIS: TestTheSettingsPageOffersTheLevelsTheHandlerExports
+// below asserts the rendered select against logLevelOptions itself, which is a
+// different claim — that the template really reaches the list, rather than that
+// two lists agree. If the range were replaced by a hardcoded list again, that is
+// what goes red.
+func TestTheSettingsPageOffersTheLevelsTheHandlerExports(t *testing.T) {
 	h := newHarness(t)
 	page := h.get(t, "/settings", h.login(t)).Body.String()
 	offered, _ := logLevelSelect(t, page)
-	want := []string{"debug", "info", "warn", "error"}
-	if !slices.Equal(offered, want) {
-		t.Errorf("settings.html offers %v, want %v — levelOption in pages_settings.go can "+
-			"only ever return the second list, and an option outside it selects nothing, "+
-			"which makes the browser submit the first one", offered, want)
+	if want := api.LogLevelNamesForTest(); !slices.Equal(offered, want) {
+		t.Errorf("settings.html offers %v, want %v — the select must range over the "+
+			"handler's list, and an option outside it selects nothing, which makes the "+
+			"browser submit the first one", offered, want)
+	}
+	// ANTI-VACUITY: logLevelNames() emptied would make the comparison above pass
+	// against a select with no options at all, which is the browser-submits-debug
+	// bug wearing a different hat.
+	if len(offered) != 4 {
+		t.Errorf("the page offers %d levels, want 4", len(offered))
+	}
+}
+
+// 0vk.38 ruling 1: the write refuses a log level no reader could render, and
+// 497's tolerant reader stays underneath it.
+//
+// BOTH LAYERS, asserted separately, because the ruling is that both exist. The
+// write stops NEW bad rows; the reader copes with the ones already on disk —
+// written by an older binary, by hand, or restored from a backup — and a reader
+// that assumed the writer had checked would put 497 straight back.
+//
+// The plant is on the bead and in the report: remove the validation and this
+// goes red while the reader test below stays GREEN. That pair is what "defence
+// in depth" has to mean to be worth the words.
+func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login(t)
+	got := h.postForm(t, "/settings", cookie, url.Values{
+		"domain": {"kept.example"}, "log_level": {"verbose"},
+	})
+
+	if got.Code != http.StatusSeeOther ||
+		!strings.Contains(got.Header().Get("Location"), "bad_log_level") {
+		t.Errorf("saving log_level=verbose = %d %q, want the refusal flash",
+			got.Code, got.Header().Get("Location"))
+	}
+	if stored, ok, _ := h.store.Setting(t.Context(), api.SettingLogLevel); ok && stored == "verbose" {
+		t.Error("the unrenderable level was stored anyway")
+	}
+	// ALL OR NOTHING, like the trusted-proxies refusal beside it: a save that
+	// wrote the keys before the bad one would leave a partial state the page has
+	// no way to describe.
+	if stored, ok, _ := h.store.Setting(t.Context(), api.SettingDomain); ok && stored == "kept.example" {
+		t.Error("the rest of the form was applied despite the refusal")
+	}
+}
+
+// An ABSENT field is not a refusal. Several callers post the settings form
+// without log_level at all, and so does any partial submission; refusing that
+// would reject a save for a field the operator never touched. It is also not
+// what the ruling asks for — an empty row is the fresh-install case 497 handles
+// on purpose. This is the boundary a failing test drew, so it is pinned.
+func TestASettingsSaveWithNoLogLevelFieldIsNotRefused(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login(t)
+	got := h.postForm(t, "/settings", cookie, url.Values{"domain": {"kept.example"}})
+
+	if location := got.Header().Get("Location"); strings.Contains(location, "bad_log_level") {
+		t.Errorf("a form with no log_level field was refused (%q); an absent field is not "+
+			"an unrenderable value", location)
+	}
+	if stored, ok, _ := h.store.Setting(t.Context(), api.SettingDomain); !ok || stored != "kept.example" {
+		t.Errorf("domain = %q ok=%v, want the save to have gone through", stored, ok)
+	}
+}
+
+// And the reader still copes, which is the half the write must not replace.
+//
+// THE PAIRING IS THE CLAIM, and it is what makes this different from
+// TestAnUnrenderableStoredLevelDoesNotFallBackToDebug above: that one covers the
+// reader on its own, this one uses the EXACT value the write now refuses, so the
+// two tests together say "refused at the door, still handled once inside". Remove
+// the validation and the refusal test goes red while this stays green; break the
+// reader and this goes red on its own.
+//
+// IT ASSERTS THE LEVEL IN FORCE, not merely that the answer is one of the four,
+// and that precision was bought by a plant. The first version checked membership,
+// which the broken reader satisfied: with nothing selected the browser submits
+// the FIRST option, "debug", and debug is in the list. The test agreed with 497
+// itself. Naming the expected level is what makes it able to fail.
+func TestATolerantReaderStillRendersARowTheWriteWouldRefuse(t *testing.T) {
+	h := newHarness(t)
+	h.level.Set(slog.LevelWarn) // distinctive, and not the first option
+	// Before the login, for the settings-cache reason spelt out in
+	// TestAStoredLevelStillWinsAndRoundTrips.
+	if err := h.store.SetSetting(t.Context(), api.SettingLogLevel, "verbose"); err != nil {
+		t.Fatal(err)
+	}
+	page := h.get(t, "/settings", h.login(t)).Body.String()
+
+	if got := whatTheBrowserWouldSubmit(t, page); got != "warn" {
+		t.Errorf("with the unrenderable row %q stored and the process at warn, the form "+
+			"submits %q, want \"warn\" — the reader must fall back to the level in force, "+
+			"and a form submitting \"debug\" here is 497", "verbose", got)
 	}
 }
