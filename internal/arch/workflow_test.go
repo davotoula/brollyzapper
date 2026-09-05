@@ -61,6 +61,9 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 	for target, must := range map[string]string{
 		"vuln":  "govulncheck ./...",
 		"cross": "GOOS=",
+		// 0vk.39. Its own wave's check was the one gate command with nothing
+		// asserting it was still wired up — found by the simplify pass.
+		"toolchain-floor": "scripts/toolchain_floor.py",
 	} {
 		recipe := expandTarget(t, target)
 		if !strings.Contains(recipe, must) {
@@ -89,7 +92,7 @@ func checkGateScript(all, raw string) []problem {
 	for _, command := range []string{
 		"gofmt -l .", "go build ./...", "go vet ./...", "go test ./...",
 		"go test -race ./...", "make cross", "go mod tidy -diff", "make vuln",
-		"make fuzz",
+		"make fuzz", "make toolchain-floor",
 	} {
 		if !strings.Contains(all, command) {
 			found = append(found, problem{"ci.yml", 0, fmt.Sprintf(

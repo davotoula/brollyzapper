@@ -610,6 +610,91 @@ const (
 	goNostrGoModHash = "h1:4avYoc9mDGZ9wHsvCOhHH9vPzKucCfuYBtJUSpHTfNk="
 )
 
+// 0vk.39: the `go` directive's minor tracks the `toolchain` line's.
+//
+// WHY THE LANGUAGE VERSION IS LOAD-BEARING HERE, which is not obvious. Under
+// GOTOOLCHAIN=local — which both Dockerfiles set, so the image's own Go compiles
+// and the digest pin actually determines the compiler — a `toolchain` line is
+// INERT. Only the `go` directive can refuse a Go older than it asks for.
+// Measured: `go 1.27.0` on a base shipping go1.26.8 fails with "go.mod requires
+// go >= 1.27.0 (running go 1.26.8; GOTOOLCHAIN=local)", while `go 1.25.0` on the
+// same base builds silently.
+//
+// That refusal is the ONLY guard on the publish path. publish.yml builds and
+// pushes the images without running the gate at all — no `needs:`, no make
+// target from it, not even a setup-go — so `make toolchain-floor` never sees a
+// release. The `go` directive does, because it is enforced inside the build.
+//
+// HERE RATHER THAN IN THAT SCRIPT, deliberately. This is a pure go.mod-internal
+// invariant needing no network, and the script needs the registry. Left there it
+// would evaporate during a Docker Hub outage — exit 2, could-not-check — taking
+// the publish path's only guard with it. A guard that is absent exactly when the
+// network is having a bad day is not one. The script keeps the half that
+// genuinely needs the wire: floor == the Go the digest ships.
+//
+// MINOR, not patch: the `go` directive names a language version and has no
+// business tracking a patch release. The toolchain line pins the patch.
+func checkLanguageVersionTracksToolchain(src []byte) []problem {
+	parsed, err := modfile.Parse("go.mod", src, nil)
+	if err != nil {
+		return []problem{{"go.mod", 0, "does not parse: " + err.Error()}}
+	}
+	if parsed.Go == nil {
+		return []problem{{"go.mod", 0, "has no `go` directive"}}
+	}
+	if parsed.Toolchain == nil {
+		return []problem{{"go.mod", 0, "has no `toolchain` line, so the floor is unstated"}}
+	}
+	lang := goMinor(parsed.Go.Version)
+	tool := goMinor(strings.TrimPrefix(parsed.Toolchain.Name, "go"))
+	if lang != tool {
+		return []problem{{"go.mod", 0, fmt.Sprintf(
+			"`go %s` and `toolchain %s` name different minors (%s vs %s); under "+
+				"GOTOOLCHAIN=local only the `go` directive can refuse a base image older "+
+				"than the language version, and it is the only guard on the publish path",
+			parsed.Go.Version, parsed.Toolchain.Name, lang, tool)}}
+	}
+	return nil
+}
+
+// goMinor takes major.minor off a Go version, tolerating a bare "1.27".
+func goMinor(version string) string {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return version
+	}
+	return parts[0] + "." + parts[1]
+}
+
+func TestTheLanguageVersionTracksTheToolchain(t *testing.T) {
+	clean(t, checkLanguageVersionTracksToolchain(goModSource(t)))
+
+	// The decay case, and the reason this is a rule rather than a comment: the
+	// next base-image bump moves the toolchain line — scripts/toolchain_floor.py
+	// forces that — and leaving the language version behind puts the build
+	// quietly back to where it was before 0vk.39, with nothing to say so.
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ngo 1.25.0\n\ntoolchain go1.27.1\n")), "different minors")
+	// The other direction. It takes the SAME branch as the case above — there is
+	// no direction-dependent code here to distinguish — so it is a ratchet, not
+	// coverage: it stops the rule being narrowed later to "the go directive must
+	// not lag", which would let a language version RUN AHEAD of the toolchain and
+	// refuse the very base image that ships. Review made me say what it is rather
+	// than let it read as a second branch.
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ngo 1.28.0\n\ntoolchain go1.27.1\n")), "different minors")
+
+	// The remaining branches, which had no plants at all until review counted
+	// them — in a file whose own rule is that a check which has only ever passed
+	// has been written, not tested.
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ngo 1.27.0\n")), "no `toolchain` line")
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ntoolchain go1.27.1\n")), "no `go` directive")
+	catches(t, checkLanguageVersionTracksToolchain(
+		[]byte("module m\n\ngo !!! not a version\n")), "does not parse")
+}
+
 // go.mod carries exactly one replace, and it is the fork at the pinned commit.
 //
 // A replace silently swaps what the compiler sees, so it is the line in go.mod a

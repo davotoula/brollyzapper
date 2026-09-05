@@ -1,6 +1,6 @@
 module github.com/davotoula/brollyzapper
 
-go 1.25.0
+go 1.27.0
 
 // The floor for the BUILD toolchain, separate from the language version above.
 //

@@ -17,7 +17,7 @@ REGISTRY                  ?= ghcr.io/davotoula
 
 GOBIN ?= $(shell go env GOPATH)/bin
 
-.PHONY: all build test vet check cross vuln fuzz proto proto-tools docker release clean
+.PHONY: all build test vet check cross vuln fuzz toolchain-floor proto proto-tools docker release clean
 
 all: check
 
@@ -85,6 +85,24 @@ vuln:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	$(GOBIN)/govulncheck ./...
+
+# toolchain-floor asserts go.mod's `toolchain` equals the Go the digest-pinned
+# base images actually ship (0vk.39).
+#
+# IT IS PART OF THE GATE, and it runs in the LOCAL gate as well as CI, which is
+# the thing worth knowing before you reach for it. The obvious implementation —
+# `docker run <digest> go version` — would have confined it to ci.yml, because
+# the local gate is daemon-free by design and `make docker` is separate for
+# exactly that reason. Reading the image CONFIG from the registry over HTTPS
+# needs no daemon, so there is ONE check in two places rather than a CI that is
+# quietly stronger than what a contributor can run.
+#
+# It does need the NETWORK, as `vuln` above already does. A registry it cannot
+# reach exits 2 and says COULD NOT CHECK; a real mismatch exits 1. Those are
+# deliberately different, because "come back later" and "the gate is not testing
+# what ships" are not the same news.
+toolchain-floor:
+	python3 scripts/toolchain_floor.py
 
 proto-tools:
 	go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)

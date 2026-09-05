@@ -107,6 +107,21 @@ jobs:
       - name: fuzz
         run: make fuzz
 
+      # govulncheck above is only worth its verdict if the gate is running the
+      # Go the images ship: it cannot see past the toolchain it runs under, so a
+      # floor ABOVE the image gives a clean report while the published binaries
+      # carry the older Go's advisories (0vk.39).
+      #
+      # In the GATE job, not the images job below, and that is the decision worth
+      # recording. The images job has a Docker daemon and the obvious
+      # implementation wanted one — but reading the image config from the
+      # registry needs none, so this is the SAME check `make toolchain-floor`
+      # runs locally rather than a CI-only check a contributor cannot reproduce.
+      # It sits beside govulncheck because it is what makes govulncheck mean
+      # something.
+      - name: go.mod's toolchain floor matches the pinned base images
+        run: make toolchain-floor
+
   images:
     name: image (${{ matrix.arch }})
     runs-on: ubuntu-latest
