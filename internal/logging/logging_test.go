@@ -21,6 +21,7 @@ import (
 	"github.com/davotoula/brollyzapper/internal/config"
 	"github.com/davotoula/brollyzapper/internal/logging"
 	"github.com/davotoula/brollyzapper/internal/nostr"
+	"github.com/davotoula/brollyzapper/internal/nwc"
 	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 	"github.com/davotoula/brollyzapper/internal/web"
@@ -59,7 +60,13 @@ type subject struct {
 	secrets map[string]func() string // field name -> reads that secret out of value
 }
 
-func TestNoSecretBearingTypeEverReachesTheLog(t *testing.T) {
+// redactionSubjects builds the table, so that both the rule that renders every
+// entry and the rule that checks the table is COMPLETE
+// (TestEverySecretBearingTypeIsCoveredByOneOfTheTwoConventions) read the same
+// one. Two copies of it would be the second statement this file already
+// documents the cost of twice.
+func redactionSubjects(t *testing.T) map[string]subject {
+	t.Helper()
 	// Distinct per field, so a failure names WHICH secret escaped rather than
 	// only which type.
 	const (
@@ -103,6 +110,7 @@ func TestNoSecretBearingTypeEverReachesTheLog(t *testing.T) {
 	zap := store.SettledZap{PaymentHash: strings.Repeat("b", 64), Preimage: secret.New(sentinel + "-preimage")}
 	setup := web.SetupView{GeneratedPassword: secret.New(sentinel + "-generated")}
 	auth := api.AuthOptions{AppPassword: secret.New(sentinel + "-app"), SessionSecret: secret.New(sentinel + "-session")}
+	pay := nwc.PayResult{Settled: true, FeeMsat: 21, Preimage: secret.New(sentinel + "-pay-preimage")}
 
 	// Hand-kept, and it is the arch rule TestEverySecretBearingStructRedactsItself
 	// that stops it narrowing silently: that rule fails when a struct gains a
@@ -110,12 +118,18 @@ func TestNoSecretBearingTypeEverReachesTheLog(t *testing.T) {
 	// here. Both exist because they catch different halves — the rule proves the
 	// method is DECLARED, this proves what it declares does not leak.
 	//
-	// "Stops it narrowing" is weaker than it reads, and BrollyZap-0vk.36 is the
-	// exit: the arch rule fires on a type with NO LogValue, never on a type
-	// absent from this map, so a secret-bearing type that does declare one can
-	// go missing here and nothing says so. nwc.PayResult and api.Auth are
-	// missing today.
-	subjects := map[string]subject{
+	// "Stops it narrowing" is weaker than it reads, so it no longer has to:
+	// TestEverySecretBearingTypeIsCoveredByOneOfTheTwoConventions reads the
+	// secret-bearing types out of the source and fails when one is neither here
+	// nor covered by a rendered-record test beside it (BrollyZap-0vk.36). That
+	// rule is what makes this map complete rather than merely long — nwc.PayResult
+	// and api.Auth were both absent, and both arch rules passed.
+	//
+	// AN ENTRY IS NOT THE ONLY ANSWER and must not become the reflex. A type
+	// whose secret has no accessor cannot be read back from this package, which
+	// is an external test package; that type belongs in an INTERNAL test beside
+	// itself, carrying a //redaction:covers marker. api.Auth went that way.
+	return map[string]subject{
 		"secret.String": {plain, map[string]func() string{"value": plain.Reveal}},
 		"config.Server": {serverCfg, map[string]func() string{
 			"AdminPassword": serverCfg.AdminPassword.Reveal,
@@ -134,7 +148,12 @@ func TestNoSecretBearingTypeEverReachesTheLog(t *testing.T) {
 			"AppPassword":   auth.AppPassword.Reveal,
 			"SessionSecret": auth.SessionSecret.Reveal,
 		}},
+		"nwc.PayResult": {pay, map[string]func() string{"Preimage": pay.Preimage.Reveal}},
 	}
+}
+
+func TestNoSecretBearingTypeEverReachesTheLog(t *testing.T) {
+	subjects := redactionSubjects(t)
 	levels := []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError}
 
 	for name, s := range subjects {
