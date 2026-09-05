@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,9 +42,12 @@ import (
 // to be deleted.
 func TestEverySecretBearingTypeIsCoveredByOneOfTheTwoConventions(t *testing.T) {
 	files := moduleGoFiles(t)
-	bearers := secretBearingTypes(t, files)
+	bearers, aliases := secretBearingTypes(t, files)
 	if len(bearers) == 0 {
 		t.Fatal("found no secret-bearing types in the module; this rule is reading the wrong thing")
+	}
+	for _, p := range aliases {
+		t.Error(p)
 	}
 	markers, misplaced := redactionMarkers(t, files)
 	for _, p := range misplaced {
@@ -177,21 +181,39 @@ const markerPrefix = "//redaction:covers "
 // believe they agree while quietly not agreeing is how the next blind spot gets
 // made:
 //
-//   - NO SKIP LIST. arch skips internal/secret, internal/lnd/lnrpc and lndtest.
-//     A directory a rule refuses to look in is a place a type can sit unrendered,
-//     and internal/secret is where secret.String itself lives.
+//   - NO SKIP LIST. checkSecretBearingStructsRedact skips internal/secret (its
+//     sibling checkSecretBearingFields skips internal/lnd/lnrpc and lndtest as
+//     well). A directory a rule refuses to look in is a place a type can sit
+//     unrendered, and internal/secret is where secret.String itself lives.
+//
 //   - ast.Inspect, not top-level declarations. arch reads file.Decls, so a struct
 //     declared INSIDE a function is invisible to it. A local struct holding a
 //     secret is exactly as loggable as a package-level one. The remedy if this
 //     fires on one is to hoist the type, not to narrow the walk.
-//   - Pointer and slice fields count. arch compares through typeString, which
-//     renders `*secret.String` and `[]secret.String`; the first version of this
-//     walk hand-matched a bare SelectorExpr and saw neither, so a type holding
-//     `Preimage *secret.String` would have been required to declare a LogValue
-//     and then never checked on what it emitted.
-func secretBearingTypes(t *testing.T, files []moduleFile) []secretBearer {
+//
+//   - HOW THE FIELD IS SPELLED does not matter. arch compares the field's
+//     rendered type against the literal string "secret.String", so four ordinary
+//     spellings evade it — and evade its LogValue requirement too, which is the
+//     more serious half. All four were planted on 2026-09-05 and left BOTH rules
+//     green with no LogValue anywhere:
+//
+//     Token map[string]secret.String   arch's typeString renders no map
+//     Token sec.String                 `import sec ".../internal/secret"`
+//     Token String                     `import . ".../internal/secret"`
+//     type Token = secret.String       an alias, then a Token field
+//
+//     So this walk resolves the import rather than assuming the identifier
+//     `secret` (secretNames), unwraps pointers, slices, arrays and maps
+//     (holdsASecret), and refuses aliases and redefinitions outright rather than
+//     chasing them through the package (aliasesASecret) — a rule can forbid a
+//     shape more cheaply and more reliably than it can resolve one.
+//
+//     internal/arch still has all four holes; this rule does not close them
+//     there, and BrollyZap-0vk.46 tracks that.
+func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []string) {
 	t.Helper()
 	var found []secretBearer
+	var aliases []string
 	fset := token.NewFileSet()
 	for _, f := range files {
 		if strings.HasSuffix(f.rel, "_test.go") {
@@ -204,9 +226,19 @@ func secretBearingTypes(t *testing.T, files []moduleFile) []secretBearer {
 		if err != nil {
 			t.Fatalf("parsing %s: %v", f.rel, err)
 		}
+		names := secretNames(file)
 		ast.Inspect(file, func(n ast.Node) bool {
 			ts, ok := n.(*ast.TypeSpec)
 			if !ok {
+				return true
+			}
+			at := fset.Position(ts.Pos())
+			if aliasesASecret(ts, names) {
+				aliases = append(aliases, fmt.Sprintf("%s:%d declares %s as another name for "+
+					"secret.String. Spell the type out: this rule and internal/arch both match "+
+					"the field's SOURCE, so a field typed %s is invisible to the requirement "+
+					"that its struct redact itself and to the requirement that something "+
+					"render it", f.rel, at.Line, ts.Name.Name, ts.Name.Name))
 				return true
 			}
 			st, ok := ts.Type.(*ast.StructType)
@@ -219,42 +251,99 @@ func secretBearingTypes(t *testing.T, files []moduleFile) []secretBearer {
 			// results, which would have put a made-up file and line in the failure
 			// message. Measured: it said secret.go:0.
 			name := file.Name.Name + "." + ts.Name.Name
-			if name != "secret.String" && !holdsASecret(st) {
+			if name != "secret.String" && !holdsASecret(st, names) {
 				return true
 			}
 			found = append(found, secretBearer{
 				name: name,
 				dir:  f.dir,
 				file: f.rel,
-				line: fset.Position(ts.Pos()).Line,
+				line: at.Line,
 			})
 			return true
 		})
 	}
 	slices.SortFunc(found, func(a, b secretBearer) int { return strings.Compare(a.name, b.name) })
-	return found
+	return found, aliases
 }
 
-// holdsASecret reports whether any of st's fields is a secret.String, however
-// it is wrapped. See the third bullet on secretBearingTypes for why the wrapping
-// matters.
-func holdsASecret(st *ast.StructType) bool {
-	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
-		expr := field.Type
-		for {
-			switch t := expr.(type) {
-			case *ast.StarExpr:
-				expr = t.X
-			case *ast.ArrayType:
-				expr = t.Elt
-			case *ast.SelectorExpr:
-				pkg, ok := t.X.(*ast.Ident)
-				return ok && pkg.Name == "secret" && t.Sel.Name == "String"
-			default:
-				return false
-			}
+// secretNames returns the identifiers that mean secret.String in this file: the
+// name internal/secret is imported under, "." when it is dot-imported, and the
+// bare "String" inside package secret itself.
+//
+// RESOLVED AND NOT ASSUMED. internal/arch matches the rendered type against the
+// literal "secret.String", so `import sec ".../internal/secret"` defeats it. That
+// nothing in the tree does this today is not a guarantee — it is one line-length
+// decision away, and the failure is silent in both directions.
+func secretNames(file *ast.File) map[string]bool {
+	names := map[string]bool{}
+	if file.Name.Name == "secret" {
+		names["."] = true // a bare String, inside the package that declares it
+	}
+	for _, spec := range file.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || !strings.HasSuffix(path, "/internal/secret") {
+			continue
 		}
+		switch {
+		case spec.Name == nil:
+			names["secret"] = true
+		case spec.Name.Name == "_":
+			// Imported for side effects; nothing in this file names the type.
+		default:
+			names[spec.Name.Name] = true // an alias, or "." for a dot-import
+		}
+	}
+	return names
+}
+
+// aliasesASecret reports whether ts gives secret.String a second name, by alias
+// (`type T = secret.String`) or by redefinition (`type T secret.String`).
+//
+// FORBIDDEN RATHER THAN RESOLVED. Following the second name to the fields typed
+// with it means resolving types across a package, which is go/types and a much
+// larger rule. Refusing the shape costs four lines and cannot be got wrong.
+// Redefinition is included because it is the worse of the two: a defined type
+// over secret.String does NOT inherit String, GoString, LogValue or MarshalJSON,
+// so it is a secret that has lost every one of its redactions.
+func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
+	if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+		return false
+	}
+	return isSecretString(ts.Type, names)
+}
+
+// holdsASecret reports whether any of st's fields is a secret.String, however it
+// is spelled and however it is wrapped. See the third bullet on
+// secretBearingTypes for the four spellings that used to get through.
+func holdsASecret(st *ast.StructType, names map[string]bool) bool {
+	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
+		return isSecretString(field.Type, names)
 	})
+}
+
+// isSecretString reports whether expr denotes a secret.String, through any number
+// of pointers, slices, arrays and maps. Map KEYS are unwrapped as well as values:
+// a secret is no less exposed for being on the left of the colon, and the cost of
+// checking is one recursive call.
+func isSecretString(expr ast.Expr, names map[string]bool) bool {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return isSecretString(t.X, names)
+	case *ast.ArrayType:
+		return isSecretString(t.Elt, names)
+	case *ast.MapType:
+		return isSecretString(t.Key, names) || isSecretString(t.Value, names)
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		return ok && names[pkg.Name] && t.Sel.Name == "String"
+	case *ast.Ident:
+		// A bare String: either the package was dot-imported, or this file IS
+		// package secret.
+		return names["."] && t.Name == "String"
+	default:
+		return false
+	}
 }
 
 // redactionMarkers reads every per-type coverage claim out of the module's

@@ -21,6 +21,8 @@ func TestTheCompletenessRuleDetectsItsOwnViolations(t *testing.T) {
 	// The three shapes a bearer's field can take, plus the primitive itself.
 	const bearers = `package web
 
+import "github.com/davotoula/brollyzapper/internal/secret"
+
 type SetupView struct {
 	Name  string
 	Token secret.String
@@ -34,18 +36,26 @@ type Many struct {
 	Tokens []secret.String
 }
 
+type Keyed struct {
+	Tokens map[string]secret.String
+}
+
+type KeyedBySecret struct {
+	Seen map[secret.String]bool
+}
+
 type Plain struct {
 	Name string
 }
 `
-	found := secretBearingTypes(t, []moduleFile{planted("internal/web", "internal/web/web.go", bearers)})
+	found, _ := secretBearingTypes(t, []moduleFile{planted("internal/web", "internal/web/web.go", bearers)})
 	names := make([]string, len(found))
 	for i, b := range found {
 		names[i] = b.name
 	}
-	if got := strings.Join(names, ","); got != "web.Held,web.Many,web.SetupView" {
-		t.Errorf("the walk found %q; it must see a secret.String behind a pointer and behind "+
-			"a slice, and must not invent a bearer out of web.Plain", got)
+	if got := strings.Join(names, ","); got != "web.Held,web.Keyed,web.KeyedBySecret,web.Many,web.SetupView" {
+		t.Errorf("the walk found %q; it must see a secret.String behind a pointer, a slice, "+
+			"a map value and a map key, and must not invent a bearer out of web.Plain", got)
 	}
 	if len(found) > 0 && found[0].line == 0 {
 		t.Error("a bearer was reported at line 0, which is the fabricated position the " +
@@ -53,17 +63,93 @@ type Plain struct {
 	}
 
 	// secret.String is matched by name, being the one bearer with no such field.
-	primitive := secretBearingTypes(t, []moduleFile{planted("internal/secret",
+	primitive, _ := secretBearingTypes(t, []moduleFile{planted("internal/secret",
 		"internal/secret/secret.go", "package secret\n\ntype String struct {\n\tv string\n}\n")})
 	if len(primitive) != 1 || primitive[0].name != "secret.String" {
 		t.Errorf("the walk did not find secret.String itself: %v", primitive)
 	}
 
 	// A test file is not source: a fixture in a _test.go is not a bearer.
-	if in := secretBearingTypes(t, []moduleFile{planted("internal/web",
+	if in, _ := secretBearingTypes(t, []moduleFile{planted("internal/web",
 		"internal/web/web_test.go", bearers)}); len(in) != 0 {
 		t.Errorf("the walk read a _test.go file and found %v; test fixtures are not the "+
 			"module's types", in)
+	}
+
+	// The four spellings that left BOTH this rule and internal/arch green on
+	// 2026-09-05, each with no LogValue anywhere. Every one of them is an
+	// ordinary thing to write.
+	for _, c := range []struct{ name, src, want string }{{
+		name: "the package imported under an alias",
+		src: "package store\n\nimport sec \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tToken sec.String\n}\n",
+		want: "store.Pairing",
+	}, {
+		name: "the package dot-imported",
+		src: "package store\n\nimport . \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tToken String\n}\n",
+		want: "store.Pairing",
+	}, {
+		name: "a map value",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tTokens map[string]secret.String\n}\n",
+		want: "store.Pairing",
+	}, {
+		name: "a bare String outside package secret is not one",
+		src:  "package store\n\ntype Pairing struct {\n\tToken String\n}\n",
+		want: "",
+	}, {
+		name: "the package imported for side effects only",
+		src: "package store\n\nimport _ \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tToken String\n}\n",
+		want: "",
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			got, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",
+				"internal/store/nwc.go", c.src)})
+			names := make([]string, len(got))
+			for i, b := range got {
+				names[i] = b.name
+			}
+			if strings.Join(names, ",") != c.want {
+				t.Errorf("the walk found %v, want %q", names, c.want)
+			}
+		})
+	}
+
+	// A second name for secret.String is refused rather than followed. See
+	// aliasesASecret for why forbidding beats resolving.
+	for _, c := range []struct{ name, src, want string }{{
+		name: "an alias for secret.String",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Token = secret.String\n",
+		want: "declares Token as another name for secret.String",
+	}, {
+		name: "a redefinition of secret.String",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Token secret.String\n",
+		want: "declares Token as another name for secret.String",
+	}, {
+		name: "an alias for something else",
+		src:  "package store\n\ntype Token = string\n",
+		want: "",
+	}, {
+		name: "a struct is not an alias",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Token struct {\n\tv secret.String\n}\n",
+		want: "",
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			_, aliases := secretBearingTypes(t, []moduleFile{planted("internal/store",
+				"internal/store/nwc.go", c.src)})
+			got := strings.Join(aliases, "\n")
+			switch {
+			case c.want == "" && got != "":
+				t.Errorf("reported an alias where there is none:\n%s", got)
+			case c.want != "" && !strings.Contains(got, c.want):
+				t.Errorf("did not report %q; it said %q", c.want, got)
+			}
+		})
 	}
 
 	txn := secretBearer{name: "store.Txn", dir: "internal/store", file: "internal/store/invoices.go", line: 486}
