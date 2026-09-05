@@ -463,3 +463,70 @@ func sendPaymentOf(t *testing.T, msat int64) lnd.Interception {
 
 // containsString is contains for the outcome strings the trail carries.
 func containsString(all []string, want string) bool { return slices.Contains(all, want) }
+
+// 8vj: the refusal must name the control the operator is NOT editing.
+//
+// The invariant is right and the refusal is right — a per-payment limit above
+// the 24-hour window can never be reached, and a number on the page that means
+// nothing is worse than a refusal that says why. The REMEDY was correct in one
+// direction only. Lowering the window below the standing per-payment cap told
+// the operator to "change the 24-hour limit first": the control they had just
+// typed into. What has to move is the other one.
+//
+// What it cost on the box is in checkCapPair's own doc comment, which is where
+// that argument belongs; it is not repeated here.
+//
+// BOTH DIRECTIONS IN ONE TABLE, because the defect is that they were the SAME
+// string. A test asserting one direction passes against the bug.
+//
+// EACH CASE ALSO REFUSES THE OTHER'S REMEDY, and the reason is narrower than it
+// looks. It is not needed to catch the old string or the swapped one — `want`
+// carries the whole remedy clause, so both of those already fail it. What it
+// catches is a message that offers BOTH remedies at once, which reads like a
+// kindness and is not: an operator lowering the 24-hour limit cannot act on
+// "raise the 24-hour limit", so offering it there puts back the misdirection
+// this bead exists to remove.
+func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  guard.Change
+		want    string
+		notWant string
+	}{{
+		// TIGHTENING, and the case from the box. It needs no code, and it is
+		// refused anyway — correctly — so the message is the operator's only
+		// signal about what to do next.
+		name:    "lowering the 24-hour window below the standing per-payment cap",
+		change:  guard.Change{Control: guard.ControlSpendCap, Msat: 40_000},
+		want:    "a per-payment limit of 50 sats is above the 24-hour limit of 40 sats, so it could never be reached; lower the per-payment limit first",
+		notWant: "24-hour limit first",
+	}, {
+		// LOOSENING, and the direction the old message was written for. It is
+		// refused by the cap-pair check BEFORE the authorisation check, which is
+		// why an empty code reaches this error rather than errAuthorisationRequired.
+		name:    "raising the per-payment cap above the standing 24-hour window",
+		change:  guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
+		want:    "a per-payment limit of 150 sats is above the 24-hour limit of 100 sats, so it could never be reached; raise the 24-hour limit first",
+		notWant: "per-payment limit first",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := lndtest.Start(t)
+			d := guardDirs(t, node)
+			g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+
+			err := g.ApplyChange(t.Context(), tc.change, "")
+			if err == nil {
+				t.Fatal("the cap pair was left inconsistent; the per-payment limit can now " +
+					"never be reached, and the page states a number that means nothing")
+			}
+			got := err.Error()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("the refusal reads\n  %s\nwant it to contain\n  %s", got, tc.want)
+			}
+			if strings.Contains(got, tc.notWant) {
+				t.Errorf("the refusal reads\n  %s\nand names %q — the control the operator is "+
+					"already editing, which is the whole of 8vj", got, tc.notWant)
+			}
+		})
+	}
+}

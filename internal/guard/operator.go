@@ -358,13 +358,40 @@ func (g *Guard) ApplyChange(ctx context.Context, change Change, code string) err
 // operator changes one cap at a time. Lowering the window cap below the payment
 // cap would leave a per-payment limit that can never be reached — a number on
 // the page that means nothing, which is worse than a refusal that says why.
+//
+// THE REMEDY NAMES THE CONTROL THE OPERATOR IS NOT EDITING (8vj). It used to say
+// "change the 24-hour limit first" in both directions, which is right only when
+// the operator is RAISING the per-payment cap. An operator lowering the window
+// was told to change the control they had just typed into.
+//
+// That is not a wording nit, and the box priced it on 2026-09-02: an operator
+// holding a 250-sat per-payment cap tried to set a 100-sat 24-hour ceiling, was
+// refused with the backwards remedy, tried 10,000, and settled at 1,000 — ten
+// times looser than they wanted, on the control whose whole purpose is bounding
+// loss. §6 makes tightening the free direction precisely so the safe move is the
+// cheap one; a message that obstructs tightening charges for it.
+//
+// It does NOT say which way costs a ceremony, though the two differ: lowering
+// the per-payment limit is a tightening and takes one click, while raising the
+// 24-hour limit is a loosening and needs the unforgeable channel. Left out
+// because this string is read by someone who has just been refused mid-task,
+// whose next act is the remedy rather than a choice between two of them — and
+// the page carries the ceremony's own explanation where there is room for it.
 func (g *Guard) checkCapPair(state State, change Change) error {
 	window, payment := state.MaxSpendMsat, state.MaxPaymentMsat
+	// Chosen HERE, in the switch that already knows which control the operator is
+	// editing, rather than in a second conditional beside the message that could
+	// drift from it. It also means a third cap control cannot reach the refusal
+	// without choosing its remedy in the same breath, and the default below is
+	// what keeps this string from ever being empty.
+	var remedy string
 	switch change.Control {
 	case ControlSpendCap:
 		window = change.Msat
+		remedy = "lower the per-payment limit first"
 	case ControlPaymentCap:
 		payment = change.Msat
+		remedy = "raise the 24-hour limit first"
 	default:
 		return nil
 	}
@@ -374,8 +401,8 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 		// number in msat there is three orders of magnitude away from the one in
 		// the box they just typed into. Found by review.
 		return fmt.Errorf("guard: a per-payment limit of %s is above the 24-hour limit of %s, "+
-			"so it could never be reached; change the 24-hour limit first",
-			msatSentence(payment), msatSentence(window))
+			"so it could never be reached; %s",
+			msatSentence(payment), msatSentence(window), remedy)
 	}
 	return nil
 }
