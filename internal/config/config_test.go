@@ -424,6 +424,8 @@ func TestAnUnreadableAllowSendingIsRefusedRatherThanTakenAsFalse(t *testing.T) {
 // this test was written. §12 wants the settings struct logged AND redacted, so
 // both are checked: no secret bytes, and the facts an operator debugging a boot
 // problem needs still present, admin_password_set among them.
+//
+//redaction:covers config.Server
 func TestServerLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 	t.Parallel()
 

@@ -38,6 +38,8 @@ func TestASettledPaymentCarriesItsPreimage(t *testing.T) {
 
 // §11 and §12: a preimage never reaches a log, and the type is what makes that
 // structural rather than a rule people remember.
+//
+//redaction:covers lnd.PaymentResult
 func TestAPaymentResultRedactsItsPreimage(t *testing.T) {
 	var buf bytes.Buffer
 	log := logging.New(&buf, logging.NewLevelVar(slog.LevelDebug))

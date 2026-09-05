@@ -17,6 +17,8 @@ import (
 // theoretical: the obvious way to make "did this row keep its proof" answerable
 // on the Wallet page is to put the preimage on the view, and the obvious way to
 // debug that is to log the row.
+//
+//redaction:covers store.Txn
 func TestATxnNeverLogsItsPreimage(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
