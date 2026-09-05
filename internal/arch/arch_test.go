@@ -1319,6 +1319,128 @@ type pairing struct {
 `)}), "implements no LogValue")
 }
 
+// §12, and total by construction: a LogValue body may not name Reveal.
+//
+// LogValue is the last thing between a secret and the log line, and it is
+// hand-written — that is exactly what 0vk.33 found, when
+// slog.String("admin_password", s.AdminPassword.Reveal()) inside
+// config.Server.LogValue passed the whole gate. The redaction tests now catch
+// that shape in two places; this catches it at build time, for every type at
+// once, without anyone remembering to add a subject to a table.
+//
+// NO EXEMPTION LIST, and that is the point. Three bodies used to call Reveal()
+// legitimately, and all three were X.Reveal() != "" — which is exactly
+// !X.IsZero() (internal/secret/secret.go), the spelling store.Txn.LogValue was
+// already using. They were stragglers from a settled idiom, not a real need, so
+// 0vk.37 rewrote them and the rule became a flat syntactic ban. A version that
+// tried to allow Reveal() in a COMPARISON while forbidding it in a value would
+// be dataflow wearing a syntax check's clothes: it would pass
+// v := x.Reveal(); slog.String(k, v) unchallenged.
+//
+// WHAT IT DOES NOT DO — and note this is a DIFFERENT gap from the one above.
+// The rejected design would have missed a reveal INSIDE the body; this catches
+// every one of those, because it matches the SELECTOR rather than the call: a
+// local, a closure, a defer, a goroutine, a method value, a parenthesised call.
+// What it misses is a reveal that never appears in the body at all — a value
+// revealed by another function and passed in, or assembled outside and handed
+// over. That is dataflow, and covering it is the redaction tests' job
+// (internal/logging's table, and the per-type rendering tests). Read it as "the
+// obvious leak cannot be written here", not as "no secret can reach a log line".
+//
+// It also does not read _test.go files, because readSourceFiles does not: a
+// LogValue on a test-only fixture type is unscanned. No such type exists today
+// and the redaction tests would still be the thing that caught it.
+//
+// It also covers LogValue and no other rendering seam. String() and GoString()
+// are the same shape and the same "never legitimate", and 0vk.43 carries that
+// widening. MarshalJSON is deliberately excluded, and on a HEDGE rather than on
+// an example: no type here reveals through one today — secret.String's own
+// MarshalJSON returns Redacted and is the tree's only one — so the ban would be
+// green. But LogValue exists for logging alone, which §12 forbids secrets from
+// reaching absolutely, while marshalling is also how a value is exported or
+// backed up, where revealing can be correct. A name that could ever need an
+// exemption would cost this rule the totality that is the whole point of it.
+func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
+	fset := token.NewFileSet()
+	var found []problem
+	for _, f := range files {
+		parsed, err := parser.ParseFile(fset, f.path, f.src, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		for _, d := range parsed.Decls {
+			// Matched on the method name and a receiver, not on a file list:
+			// the rule has to hold for a type that does not exist yet.
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "LogValue" || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
+				continue
+			}
+			recv := strings.TrimPrefix(typeString(fn.Recv.List[0].Type), "*")
+			// The SELECTOR, not the call. Matching *ast.CallExpr{Fun: SelectorExpr}
+			// reads like the obvious thing and leaves two holes the go-review pass
+			// found by planting them: a method value (f := x.Reveal; f()) is a bare
+			// selector inside no call at all, and (x.Reveal)() wraps the selector in
+			// an *ast.ParenExpr so the type assertion on Fun fails. Naming Reveal
+			// anywhere in the body is the thing to forbid, and it is also less code.
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Reveal" {
+					return true
+				}
+				found = append(found, problem{f.rel, fset.Position(sel.Pos()).Line, fmt.Sprintf(
+					"%s.LogValue names Reveal; §12 says a LogValue body renders FACTS about a "+
+						"secret and never the secret itself — use IsZero to report whether one is set",
+					recv)})
+				return true
+			})
+		}
+	}
+	// Unsorted on purpose. The siblings that sort range over a map; this walks
+	// files lexically, decls in source order and bodies in pre-order, so found
+	// is already in the order a reader wants — and sorting on problem.String()
+	// would order line 100 ahead of line 9.
+	return found
+}
+
+func TestNoLogValueBodyNamesReveal(t *testing.T) {
+	clean(t, checkLogValueBodiesNeverReveal(t, sourceFiles(t)))
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Bool("admin_password_set", !s.AdminPassword.IsZero()),
+		slog.String("admin_password", s.AdminPassword.Reveal()),
+	)
+}
+`)}), "Server.LogValue names Reveal")
+	// The local-variable shape: in the body, so caught. This is the plant that
+	// pins the first half of the limit above — see "WHAT IT DOES NOT DO".
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	v := s.AdminPassword.Reveal()
+	return slog.GroupValue(slog.String("admin_password", v))
+}
+`)}), "Server.LogValue names Reveal")
+	// The method value, which is a bare selector inside no call at all, and the
+	// parenthesised call, whose Fun is an *ast.ParenExpr. Both slipped through the
+	// first version of this rule, which matched the CallExpr; the go-review pass
+	// found them by planting them, so they are plants now.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	f := s.AdminPassword.Reveal
+	return slog.GroupValue(slog.String("admin_password", f()))
+}
+`)}), "Server.LogValue names Reveal")
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("admin_password", (s.AdminPassword.Reveal)()))
+}
+`)}), "Server.LogValue names Reveal")
+}
+
 // checkSecretBearingStructsRedact finds structs with a secret.String field and
 // asserts the same package declares LogValue on that type.
 //

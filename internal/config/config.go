@@ -100,8 +100,8 @@ func (s Server) LogValue() slog.Value {
 		slog.String("guard_socket", s.GuardSocket),
 		slog.String("listen_addr", s.ListenAddr),
 		slog.Int("trusted_proxies", len(s.TrustedProxies)),
-		slog.Bool("admin_password_set", s.AdminPassword.Reveal() != ""),
-		slog.Bool("session_secret_set", s.SessionSecret.Reveal() != ""),
+		slog.Bool("admin_password_set", !s.AdminPassword.IsZero()),
+		slog.Bool("session_secret_set", !s.SessionSecret.IsZero()),
 		slog.String("log_level", s.LogLevel.String()),
 	)
 }

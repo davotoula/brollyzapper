@@ -82,7 +82,7 @@ type AuthOptions struct {
 // are secret.String and would redact themselves; this is about the struct, which
 // otherwise prints as a Go value with two Redacted holes and invites the habit.
 func (o AuthOptions) LogValue() slog.Value {
-	return slog.GroupValue(slog.Bool("umbrel_managed", o.AppPassword.Reveal() != ""))
+	return slog.GroupValue(slog.Bool("umbrel_managed", !o.AppPassword.IsZero()))
 }
 
 // Auth owns the admin credential and the session cookie.
