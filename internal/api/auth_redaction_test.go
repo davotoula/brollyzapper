@@ -40,7 +40,7 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	// No AppPassword and an empty store, which is what makes Auth invent a
 	// password and keep it: generatedPassword is populated on exactly this path
 	// (auth.go bootstrapPassword), and it is the second secret under test.
-	auth, err := NewAuth(context.Background(), &fakeSettings{}, AuthOptions{
+	auth, err := NewAuth(t.Context(), &fakeSettings{}, AuthOptions{
 		SessionSecret: secret.New(sessionSecret),
 	})
 	if err != nil {
@@ -61,8 +61,13 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	// ONE call, where the neighbouring per-type tests make two. slog turns a
+	// string key followed by a non-Attr value into exactly slog.Any(key, value),
+	// so `log.Info("auth", "auth", auth)` and `log.Info("auth", slog.Any(...))`
+	// produce byte-identical records — measured 2026-09-05. The pair reads as two
+	// paths being covered and is one; writing it here would have taught the next
+	// person to copy it.
 	log.Info("auth", "auth", auth)
-	log.Info("auth", slog.Any("auth", auth))
 	record := buf.String()
 
 	for _, s := range []struct{ name, value string }{
