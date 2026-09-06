@@ -1497,15 +1497,37 @@ func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
 // LogValue on a test-only fixture type is unscanned. No such type exists today
 // and the redaction tests would still be the thing that caught it.
 //
-// It also covers LogValue and no other rendering seam. String() and GoString()
-// are the same shape and the same "never legitimate", and 0vk.43 carries that
-// widening. MarshalJSON is deliberately excluded, and on a HEDGE rather than on
-// an example: no type here reveals through one today — secret.String's own
-// MarshalJSON returns Redacted and is the tree's only one — so the ban would be
-// green. But LogValue exists for logging alone, which §12 forbids secrets from
-// reaching absolutely, while marshalling is also how a value is exported or
-// backed up, where revealing can be correct. A name that could ever need an
-// exemption would cost this rule the totality that is the whole point of it.
+// IT COVERS THREE RENDERING SEAMS and no others: LogValue, String and GoString
+// (0vk.43 added the last two). They are one shape and one argument. All three are
+// pure rendering, all three are what %v, %s and %#v reach, and secret.String
+// implements every one of them precisely so a secret cannot print itself
+// (internal/secret/secret.go). Naming Reveal inside any of them is never
+// legitimate, for any type, ever — which is the property that makes this rule
+// worth having and the property any widening has to preserve.
+//
+// Measured before widening: a String() returning p.Token.Reveal(), on a type with
+// a perfectly good redacting LogValue, passed this rule. So did a GoString().
+//
+// MarshalJSON, MarshalText AND Format ARE DELIBERATELY EXCLUDED, on a HEDGE
+// rather than on an example. No type here reveals through one today —
+// secret.String's own MarshalJSON returns Redacted and is the tree's only one
+// outside internal/lnd/lnrpc — so the ban would be green on day one, and an
+// earlier version of this argument cited internal/store/nwc.go as a
+// counterexample, which was WRONG: that code binds Reveal() as a raw SQL
+// argument, not through encoding/json. The real reason is an asymmetry of
+// purpose. LogValue, String and GoString exist for rendering alone, which §12
+// forbids secrets from reaching absolutely. Marshalling is also how a value is
+// exported, persisted or backed up, where revealing is sometimes exactly right —
+// so it is the first name in this rule that could ever need an exemption, and an
+// exemption list is what this rule exists not to have. A total ban on three names
+// is worth more than a table on six.
+//
+// That exclusion is a TESTED property rather than a comment:
+// TestAMarshalMethodMayNameReveal plants one and requires it to pass.
+// renderingSeams are the method names this rule scans. The argument for these
+// three and against the marshalling ones is above the rule.
+var renderingSeams = map[string]bool{"LogValue": true, "String": true, "GoString": true}
+
 func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
 	fset := token.NewFileSet()
 	var found []problem
@@ -1518,7 +1540,7 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 			// Matched on the method name and a receiver, not on a file list:
 			// the rule has to hold for a type that does not exist yet.
 			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Name.Name != "LogValue" || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
+			if !ok || !renderingSeams[fn.Name.Name] || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
 				continue
 			}
 			recv := strings.TrimPrefix(typeString(fn.Recv.List[0].Type), "*")
@@ -1534,9 +1556,9 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 					return true
 				}
 				found = append(found, problem{f.rel, fset.Position(sel.Pos()).Line, fmt.Sprintf(
-					"%s.LogValue names Reveal; §12 says a LogValue body renders FACTS about a "+
+					"%s.%s names Reveal; §12 says a rendering method renders FACTS about a "+
 						"secret and never the secret itself — use IsZero to report whether one is set",
-					recv)})
+					recv, fn.Name.Name)})
 				return true
 			})
 		}
@@ -1809,6 +1831,24 @@ func typeString(expr ast.Expr) string {
 		return "*" + typeString(t.X)
 	case *ast.ArrayType:
 		return "[]" + typeString(t.Elt)
+	case *ast.IndexExpr:
+		// A generic type with one parameter — Holder[T]. The BASE NAME, without
+		// the parameter, because that is the name a TypeSpec declares and the
+		// name every caller keys on.
+		//
+		// NOT COSMETIC, which is what 0vk.43's adjacent note assumed. It says
+		// "detection is unaffected; only the message is garbled" — true where
+		// typeString feeds a message, false in checkSecretBearingStructsRedact,
+		// which matches a LogValue's receiver against the type name to decide
+		// whether the type redacts itself. Without these two cases the receiver
+		// rendered as "*ast.IndexExpr", matched no type, and a generic struct
+		// with a perfectly good LogValue was reported as having none — a false
+		// positive against the contributor who did the right thing. Measured by
+		// planting exactly that type (0vk.46/0vk.43 branch).
+		return typeString(t.X)
+	case *ast.IndexListExpr:
+		// Two or more parameters — Pair[K, V]. Same reasoning.
+		return typeString(t.X)
 	default:
 		return fmt.Sprintf("%T", expr)
 	}
@@ -4466,4 +4506,104 @@ func broker(path string) *guard.SocketClient {
 	return guard.NewSocketClient(path, nil)
 }
 `)}), "reachable only through the socket")
+}
+
+// 0vk.43: the same ban, on the two seams that are the same shape.
+//
+// ONE PLANT PER NAME rather than a loop over the three, because a loop would
+// share one body and the thing worth pinning is that each NAME is reached. The
+// bodies differ so each message can be read for the method it names.
+func TestNoStringOrGoStringBodyNamesReveal(t *testing.T) {
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) String() string {
+	return "server " + s.AdminPassword.Reveal()
+}
+`)}), "Server.String names Reveal")
+
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) GoString() string {
+	return "config.Server{" + s.AdminPassword.Reveal() + "}"
+}
+`)}), "Server.GoString names Reveal")
+
+	// A String() on a type that ALREADY redacts through LogValue is the shape
+	// this bead was measured on, and it passed before the widening because the
+	// rule looked only at the LogValue. A redaction on one seam says nothing
+	// about another: %s reaches String, and String here hands over the secret.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	return slog.Bool("admin_password_set", !s.AdminPassword.IsZero())
+}
+
+func (s Server) String() string { return s.AdminPassword.Reveal() }
+`)}), "Server.String names Reveal")
+}
+
+// The exclusion is a TESTED property, not a sentence in a comment.
+//
+// Marshalling is the one rendering-adjacent seam where revealing can be correct —
+// it is also how a value is exported, persisted or backed up — so it is the first
+// name this rule could ever need an exemption for, and an exemption list is what
+// the rule exists not to have. If someone widens renderingSeams to a marshaller
+// later, this is what tells them they have changed the rule's character rather
+// than merely added a name.
+func TestAMarshalMethodMayNameReveal(t *testing.T) {
+	for _, method := range []string{"MarshalJSON", "MarshalText", "Format"} {
+		t.Run(method, func(t *testing.T) {
+			clean(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config",
+				`package config
+
+func (s Server) `+method+`() ([]byte, error) {
+	return []byte(s.AdminPassword.Reveal()), nil
+}
+`)}))
+		})
+	}
+}
+
+// A generic type's LogValue is credited to it, and its absence is still reported.
+//
+// THIS WAS A FALSE POSITIVE, and the bead that handed over the decision said it
+// could not be: 0vk.43's adjacent note reads "detection is unaffected; only the
+// message is garbled". That is true where typeString feeds a message and false
+// here, because this rule matches a LogValue's RECEIVER against the type name to
+// decide whether the type redacts itself. A generic receiver rendered as
+// "*ast.IndexExpr", matched nothing, and the type was reported as having no
+// LogValue while looking straight at one — which is the worst kind of arch
+// failure, the one that punishes the contributor who did the right thing.
+//
+// Both directions, because the fix is a rendering change and a rendering change
+// that returned a constant would satisfy either half alone.
+func TestAGenericTypesLogValueIsCredited(t *testing.T) {
+	const bearer = `package store
+
+import (
+	"log/slog"
+
+	"github.com/davotoula/brollyzapper/internal/secret"
+)
+
+type holder[T any] struct {
+	Name  T
+	Token secret.String
+}
+`
+	clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store",
+		bearer+"\nfunc (h holder[T]) LogValue() slog.Value { return slog.StringValue(\"redacted\") }\n")}))
+
+	catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", bearer)}),
+		"implements no LogValue")
+
+	// And the message names the type rather than an AST node type.
+	got := checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/store", `package store
+
+func (h holder[T]) LogValue() slog.Value { return slog.StringValue(h.Token.Reveal()) }
+`)})
+	if len(got) != 1 || !strings.Contains(got[0].String(), "holder.LogValue names Reveal") {
+		t.Errorf("the message reads %v, want it to name holder.LogValue — a receiver rendered "+
+			"as an AST node type tells the reader nothing about which type to fix", got)
+	}
 }
