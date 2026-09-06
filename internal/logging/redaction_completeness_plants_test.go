@@ -107,6 +107,19 @@ type Plain struct {
 		// Ported from internal/arch, where the go-review pass on 0vk.46 planted it
 		// and watched a secret-bearing struct with no LogValue pass clean. The
 		// parens are not a container; they are spelling, and gofmt keeps them.
+		// PARENS AROUND THE DECLARATION, a different site from parens around a
+		// FIELD type below: g5n taught the PREDICATE that field parens are spelling,
+		// 0vk.52 teaches this WALK the same about a declaration.
+		name: "a parenthesised struct declaration",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing (struct {\n\tName  string\n\tToken secret.String\n})\n",
+		want: "store.Pairing",
+	}, {
+		name: "a doubly parenthesised struct declaration",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing ((struct {\n\tToken secret.String\n}))\n",
+		want: "store.Pairing",
+	}, {
 		name: "a parenthesised type, which is spelling and not a container",
 		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
 			"type Pairing struct {\n\tToken (secret.String)\n}\n",
@@ -532,6 +545,13 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		// collecting here as well would report the node twice. Nought is the whole
 		// assertion.
 		{"a bare anonymous struct, which the walk descends itself", inner(), 0},
+		// AND A PARENTHESISED BARE STRUCT IS A BARE STRUCT (0vk.52). Before that
+		// bead the walk could not descend it — ts.Type was a ParenExpr — and this
+		// guard did not exit early either, an accidental asymmetry that happened to
+		// collect once. Now the walk descends it, so the guard must exit or the
+		// node is reported TWICE. Nought is the whole assertion, same as above.
+		{"a parenthesised bare struct", &ast.ParenExpr{X: inner()}, 0},
+		{"a doubly parenthesised bare struct", &ast.ParenExpr{X: &ast.ParenExpr{X: inner()}}, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			unknown := &unknownNodes{}
