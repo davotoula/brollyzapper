@@ -242,6 +242,33 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 		return fmt.Errorf("guard: %s does not need an authorisation; it is not a loosening",
 			change.Control)
 	}
+	// THE CAP PAIR IS CHECKED HERE TOO, and the placement is the whole of pou.
+	//
+	// ApplyChange checks it as well and keeps doing so; this is not a move. But
+	// ApplyChange is the END of the ceremony, so a request to raise the
+	// per-payment cap above the 24-hour limit used to issue a code, write the
+	// file, audit the request — and only then be refused when the operator came
+	// back and typed the code. A whole ceremony spent on a change that could
+	// never be applied, and the operator learns the ordering rule at the most
+	// expensive possible moment. 6zd names that order on the page and in
+	// OPERATING.md; this is the half that stops the walk.
+	//
+	// BEFORE THE CODE EXISTS, deliberately, and this line's position is load-
+	// bearing rather than tidy: no code is generated, no file is written, no
+	// state is updated, and nothing is audited. It sits beside the `loosens`
+	// refusal above and behaves exactly as that one does, which is what keeps a
+	// refusal from spending the ceremony's audit budget — auditAuthorisation
+	// draws on authoriseBudget on every call, and a bound that a REFUSED request
+	// can consume is a bound an attacker can exhaust without ever holding a code.
+	//
+	// ApplyChange's copy is not redundant. The state can change between the
+	// request and the redemption — the operator lowers the 24-hour limit while a
+	// grant for a per-payment raise is outstanding — and that pair is only
+	// inconsistent at apply time. This one refuses early; that one refuses late;
+	// neither covers the other's case.
+	if err := g.checkCapPair(state, change); err != nil {
+		return err
+	}
 	now := g.rotation.clock()
 	code, err := newCode()
 	if err != nil {
