@@ -177,39 +177,61 @@ const markerPrefix = "//redaction:covers "
 // WHERE IT AGREES WITH internal/arch's checkSecretBearingStructsRedact, and where
 // it does not. Both walk the module's non-test source for `secret.String` fields,
 // and neither is transitive — a struct holding a store.NWCConnection is not a
-// bearer to either. Three deliberate differences, listed because two rules that
-// believe they agree while quietly not agreeing is how the next blind spot gets
-// made:
+// bearer to either. The list below is kept because two rules that believe they
+// agree while quietly not agreeing is how the next blind spot gets made; 0vk.46
+// closed the three differences that were holes, and what is left is either
+// deliberate or narrower than it was:
 //
-//   - NO SKIP LIST. checkSecretBearingStructsRedact skips internal/secret (its
-//     sibling checkSecretBearingFields skips internal/lnd/lnrpc and lndtest as
-//     well). A directory a rule refuses to look in is a place a type can sit
-//     unrendered, and internal/secret is where secret.String itself lives.
+//   - HOW THE FIELD IS SPELLED no longer separates them. Until 0vk.46,
+//     checkSecretBearingStructsRedact compared the field's rendered type against
+//     the literal "secret.String", and SIX ordinary spellings evaded it — and
+//     evaded its LogValue requirement too, which is the more serious half. All
+//     six were planted and left it green with no LogValue anywhere:
 //
-//   - ast.Inspect, not top-level declarations. arch reads file.Decls, so a struct
-//     declared INSIDE a function is invisible to it. A local struct holding a
-//     secret is exactly as loggable as a package-level one. The remedy if this
-//     fires on one is to hoist the type, not to narrow the walk.
-//
-//   - HOW THE FIELD IS SPELLED does not matter. arch compares the field's
-//     rendered type against the literal string "secret.String", so four ordinary
-//     spellings evade it — and evade its LogValue requirement too, which is the
-//     more serious half. All four were planted on 2026-09-05 and left BOTH rules
-//     green with no LogValue anywhere:
-//
-//     Token map[string]secret.String   arch's typeString renders no map
 //     Token sec.String                 `import sec ".../internal/secret"`
 //     Token String                     `import . ".../internal/secret"`
+//     Token map[string]secret.String   its typeString rendered no map
 //     type Token = secret.String       an alias, then a Token field
+//     Token *secret.String             rendered "*secret.String"
+//     Tokens []secret.String           rendered "[]secret.String"
 //
-//     So this walk resolves the import rather than assuming the identifier
-//     `secret` (secretNames), unwraps pointers, slices, arrays and maps
-//     (holdsASecret), and refuses aliases and redefinitions outright rather than
-//     chasing them through the package (aliasesASecret) — a rule can forbid a
-//     shape more cheaply and more reliably than it can resolve one.
+//     0vk.46 ported this walk's predicate over — resolve the import rather than
+//     assume the identifier `secret` (secretNames), unwrap pointers, slices,
+//     arrays and maps including KEYS (holdsASecret), and refuse aliases and
+//     redefinitions outright rather than chase them (aliasesASecret). Both rules
+//     now agree on every one of those shapes, and both keep permanent plants for
+//     them — with ONE difference, recorded here rather than tolerated quietly:
+//     internal/arch also unwraps a PARENTHESISED type, because `Token
+//     (secret.String)` is legal Go and is a secret.String with no container at
+//     all. A go-review plant showed it evading both rules. This walk does not
+//     have that case yet; the follow-up bead carries it, and until then arch is
+//     the stricter of the two by exactly one spelling.
+//     Neither treats `chan secret.String` as a bearer, and that is deliberate on
+//     both sides: a channel field renders as an address under slog.Any and %v, so
+//     it cannot spill its contents into a log line the way a slice or map can.
 //
-//     internal/arch still has all four holes; this rule does not close them
-//     there, and BrollyZap-0vk.46 tracks that.
+//     The code is duplicated rather than shared, because this file is
+//     `package logging_test` and a test file cannot be imported; if a third rule
+//     ever wants the predicate, that is the moment to give it a real home.
+//
+//   - THE SKIP LIST IS SHORTER. checkSecretBearingStructsRedact skipped
+//     internal/secret and no longer does (0vk.46 checked that it protected
+//     nothing: the package declares one type whose field is a plain string). Its
+//     sibling checkSecretBearingFields still skips internal/lnd/lnrpc and
+//     lndtest. A directory a rule refuses to look in is a place a type can sit
+//     unrendered, so this walk still has no skip list at all.
+//
+//   - BOTH NOW SEE LOCAL TYPES, by the same method. arch read file.Decls until
+//     0vk.46; it now walks the whole file and subtracts the package-level
+//     declarations, so a struct inside a plain function, inside a method, inside
+//     a package-level func literal, and a function-local ALIAS are all seen. An
+//     earlier version of this branch walked only function BODIES, and review
+//     measured that it still missed the last two.
+//
+//     arch reports such a type with a DIFFERENT message from this one's advice,
+//     because the remedy differs: Go does not allow a method on a type declared
+//     in a function body, so there the fix is to hoist the type rather than to
+//     give it a LogValue.
 func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []string) {
 	t.Helper()
 	var found []secretBearer

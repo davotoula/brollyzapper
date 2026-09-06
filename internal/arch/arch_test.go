@@ -1309,14 +1309,232 @@ type creds struct {
 // A rule and not a review note because the trigger is adding a field, which is
 // the least conspicuous edit there is.
 func TestEverySecretBearingStructRedactsItself(t *testing.T) {
-	clean(t, checkSecretBearingStructsRedact(t, sourceFiles(t, "internal/secret")))
+	// NO SKIP ARGUMENT any more, and internal/secret is now scanned like every
+	// other package (0vk.46). The skip protected nothing: internal/secret
+	// declares one type, `String struct{ v string }`, whose field is a plain
+	// string. Dropping it was checked by running this clean half over the whole
+	// tree, not by reading the package — and a skip is an exemption, which this
+	// file names as a failure shape in its own right.
+	clean(t, checkSecretBearingStructsRedact(t, sourceFiles(t)))
+
+	// THE PLANT NOW IMPORTS THE PACKAGE, and it did not before. Under the old
+	// rule the type was matched as the literal text "secret.String", so a file
+	// that never imported internal/secret still tripped it; this rule resolves
+	// the import, so an unimported `secret.String` is correctly nothing at all.
+	// The old plant broke the moment the rule became honest, which is the best
+	// evidence available that it did.
 	catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
 
 type pairing struct {
 	Name   string
 	Secret secret.String
 }
 `)}), "implements no LogValue")
+
+	// THE SPELLINGS THAT USED TO EVADE THIS RULE, one subtest each so a regression
+	// names which came back. Five of the six measured at 6760ea1 are here; the
+	// sixth is the type ALIAS, which is not a bearer at all but a shape this rule
+	// refuses, so it has its own case and its own message below. The map KEY is a
+	// seventh, added because the value case does not cover it.
+	//
+	// Each left the rule green with no LogValue anywhere; the plain field above
+	// was the control that proved the measurement reached the rule at all.
+	for _, plant := range []struct{ name, src string }{
+		{"an aliased import", `package store
+
+import sec "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token sec.String
+}
+`},
+		{"a dot import", `package store
+
+import . "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token String
+}
+`},
+		{"a map value", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens map[string]secret.String
+}
+`},
+		{"a pointer", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token *secret.String
+}
+`},
+		{"a slice", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens []secret.String
+}
+`},
+		{"a parenthesised type, which is spelling and not a container", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token (secret.String)
+}
+`},
+		{"a map KEY, which the value case does not cover", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens map[secret.String]string
+}
+`},
+	} {
+		t.Run(plant.name, func(t *testing.T) {
+			catches(t, checkSecretBearingStructsRedact(t,
+				[]sourceFile{planted("internal/store", plant.src)}), "implements no LogValue")
+		})
+	}
+
+	// AND THE NAMED GAP, asserted as a gap so it cannot become one by accident.
+	// A channel of secrets is NOT a bearer: it renders as an address under
+	// slog.Any and under %v, so unlike a slice or a map it cannot spill its
+	// contents into a log line. If that ever stops being true, this is the test
+	// that has to change, and it will say so.
+	t.Run("a channel of secrets is deliberately not a bearer", func(t *testing.T) {
+		clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens chan secret.String
+}
+`)}))
+	})
+
+	// The alias — the sixth of the six, and the one that is refused rather than
+	// reported as a bearer.
+	t.Run("a type alias", func(t *testing.T) {
+		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type Token = secret.String
+
+type pairing struct {
+	Name string
+	Tok  Token
+}
+`)}), "gives secret.String a second name")
+	})
+
+	// And a REDEFINITION, which is the worse of the two: it inherits none of
+	// String, GoString, LogValue or MarshalJSON.
+	t.Run("a redefinition", func(t *testing.T) {
+		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type Token secret.String
+`)}), "gives secret.String a second name")
+	})
+
+	// EVERY NESTING, not just a plain function body. The first version of this
+	// walked *ast.FuncDecl bodies, and review measured that it still missed a
+	// struct inside a package-level func literal and a function-local alias.
+	// Walking the whole file and subtracting the package-level declarations is
+	// both smaller and wider — it catches nestings nobody has thought of.
+	for _, plant := range []struct{ name, src, want string }{
+		{"a struct inside a package-level func literal", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+var save = func() {
+	type row struct{ Token secret.String }
+	_ = row{}
+}
+`, "cannot have a LogValue at all"},
+		{"a struct inside a method body", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type S struct{}
+
+func (S) save() {
+	type row struct{ Token secret.String }
+	_ = row{}
+}
+`, "cannot have a LogValue at all"},
+		{"an alias declared inside a function", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+func save() {
+	type Token = secret.String
+	var t Token
+	_ = t
+}
+`, "gives secret.String a second name inside a function"},
+	} {
+		t.Run(plant.name, func(t *testing.T) {
+			catches(t, checkSecretBearingStructsRedact(t,
+				[]sourceFile{planted("internal/store", plant.src)}), plant.want)
+		})
+	}
+
+	// A struct inside a plain function, which file.Decls could not see at all.
+	t.Run("a struct declared inside a function", func(t *testing.T) {
+		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+func save() {
+	type row struct {
+		Name  string
+		Token secret.String
+	}
+	_ = row{}
+}
+`)}), "cannot have a LogValue at all")
+	})
+
+	// AND THE OTHER DIRECTION, which is what stops this rule becoming a rule that
+	// only ever fires: each spelling with a LogValue present must PASS. Without
+	// this, a predicate that reported every struct would satisfy every case above.
+	t.Run("a LogValue satisfies the rule in any spelling", func(t *testing.T) {
+		clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import (
+	"log/slog"
+
+	sec "github.com/davotoula/brollyzapper/internal/secret"
+)
+
+type pairing struct {
+	Name   string
+	Tokens map[string]*sec.String
+}
+
+func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
+`)}))
+	})
 }
 
 // §12, and total by construction: a LogValue body may not name Reveal.
@@ -1351,15 +1569,54 @@ type pairing struct {
 // LogValue on a test-only fixture type is unscanned. No such type exists today
 // and the redaction tests would still be the thing that caught it.
 //
-// It also covers LogValue and no other rendering seam. String() and GoString()
-// are the same shape and the same "never legitimate", and 0vk.43 carries that
-// widening. MarshalJSON is deliberately excluded, and on a HEDGE rather than on
-// an example: no type here reveals through one today — secret.String's own
-// MarshalJSON returns Redacted and is the tree's only one — so the ban would be
-// green. But LogValue exists for logging alone, which §12 forbids secrets from
-// reaching absolutely, while marshalling is also how a value is exported or
-// backed up, where revealing can be correct. A name that could ever need an
-// exemption would cost this rule the totality that is the whole point of it.
+// IT COVERS FOUR RENDERING SEAMS and no others: LogValue, String, GoString and
+// Error (0vk.43 added the last three). They are one shape and one argument. All
+// four are pure rendering, all four are what %v, %s and %#v reach — %v takes an
+// error's Error() ahead of Stringer — and secret.String implements the rendering
+// ones precisely so a secret cannot print itself (internal/secret/secret.go).
+// Naming Reveal inside any of them is never legitimate, for any type, ever, which
+// is the property that makes this rule worth having and the property any widening
+// has to preserve.
+//
+// It matches the NAME, not the receiver's type: a Reveal on something unrelated
+// to secret.String inside a String() would be reported too. That is deliberate
+// and cheap today — secret.String.Reveal is the only Reveal in the non-generated
+// tree — and it is the same trade as matching the selector rather than the call.
+//
+// Measured before widening: a String() returning p.Token.Reveal(), on a type with
+// a perfectly good redacting LogValue, passed this rule. So did a GoString().
+//
+// MarshalJSON, MarshalText AND Format ARE DELIBERATELY EXCLUDED, on a HEDGE
+// rather than on an example. No type here reveals through one today —
+// secret.String's own MarshalJSON returns Redacted and is the tree's only one
+// outside internal/lnd/lnrpc — so the ban would be green on day one, and an
+// earlier version of this argument cited internal/store/nwc.go as a
+// counterexample, which was WRONG: that code binds Reveal() as a raw SQL
+// argument, not through encoding/json. The real reason is an asymmetry of
+// purpose. LogValue, String and GoString exist for rendering alone, which §12
+// forbids secrets from reaching absolutely. Marshalling is also how a value is
+// exported, persisted or backed up, where revealing is sometimes exactly right —
+// so it is the first name in this rule that could ever need an exemption, and an
+// exemption list is what this rule exists not to have. A total ban on three names
+// is worth more than a table on six.
+//
+// That exclusion is a TESTED property rather than a comment:
+// TestAMarshalMethodMayNameReveal plants one and requires it to pass.
+// renderingSeams are the method names this rule scans.
+//
+// Error IS ONE OF THEM, added on the rule's own stated criterion rather than on
+// the brief, which did not consider it: %v reaches an error's Error() ahead of
+// Stringer, so it is pure rendering by exactly the test that admitted String and
+// GoString — and a secret in an error message is precisely what §12 forbids.
+// Measured green: the two Error methods in the tree (config.VarError,
+// lnurl.Rejection) return plain fields.
+//
+// FORMAT IS NOT, and that is a ruling this branch implements rather than agrees
+// with. See TestAFormatMethodMayNameReveal for the gap, stated and tested.
+var renderingSeams = map[string]bool{
+	"LogValue": true, "String": true, "GoString": true, "Error": true,
+}
+
 func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
 	fset := token.NewFileSet()
 	var found []problem
@@ -1372,7 +1629,7 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 			// Matched on the method name and a receiver, not on a file list:
 			// the rule has to hold for a type that does not exist yet.
 			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Name.Name != "LogValue" || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
+			if !ok || !renderingSeams[fn.Name.Name] || fn.Recv == nil || len(fn.Recv.List) != 1 || fn.Body == nil {
 				continue
 			}
 			recv := strings.TrimPrefix(typeString(fn.Recv.List[0].Type), "*")
@@ -1388,9 +1645,9 @@ func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem 
 					return true
 				}
 				found = append(found, problem{f.rel, fset.Position(sel.Pos()).Line, fmt.Sprintf(
-					"%s.LogValue names Reveal; §12 says a LogValue body renders FACTS about a "+
+					"%s.%s names Reveal; §12 says a rendering method renders FACTS about a "+
 						"secret and never the secret itself — use IsZero to report whether one is set",
-					recv)})
+					recv, fn.Name.Name)})
 				return true
 			})
 		}
@@ -1441,7 +1698,234 @@ func (s Server) LogValue() slog.Value {
 `)}), "Server.LogValue names Reveal")
 }
 
-// checkSecretBearingStructsRedact finds structs with a secret.String field and
+// 0vk.43: the same ban, on the seams that are the same shape.
+//
+// PLACED HERE, beside the rule, because every other rule in this file pairs its
+// checkX with its TestX and review caught these three sitting three thousand
+// lines away at the end of the file — where they had been appended only because
+// anchoring an insertion inside a raw string literal had gone wrong twice.
+//
+// ONE PLANT PER NAME rather than a loop, because a loop would share one body and
+// the thing worth pinning is that each NAME is reached; the bodies differ so each
+// message can be read for the method it names. The exclusion test below DOES
+// loop, and that is the difference: there every case asserts the same nothing.
+func TestNoStringGoStringOrErrorBodyNamesReveal(t *testing.T) {
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) String() string {
+	return "server " + s.AdminPassword.Reveal()
+}
+`)}), "Server.String names Reveal")
+
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) GoString() string {
+	return "config.Server{" + s.AdminPassword.Reveal() + "}"
+}
+`)}), "Server.GoString names Reveal")
+
+	// Error, which %v reaches ahead of Stringer. A secret in an error message is
+	// what §12 forbids, and this seam was not in the brief at all.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (e *VarError) Error() string {
+	return e.Var + ": " + e.Password.Reveal()
+}
+`)}), "VarError.Error names Reveal")
+
+	// A String() on a type that ALREADY redacts through LogValue is the shape
+	// this bead was measured on: it passed before the widening, because the rule
+	// looked only at the LogValue. A redaction on one seam says nothing about
+	// another, and %s reaches String.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+func (s Server) LogValue() slog.Value {
+	return slog.Bool("admin_password_set", !s.AdminPassword.IsZero())
+}
+
+func (s Server) String() string { return s.AdminPassword.Reveal() }
+`)}), "Server.String names Reveal")
+}
+
+// The marshalling exclusion is a TESTED property, not a sentence in a comment.
+//
+// Marshalling is the one rendering-adjacent seam where revealing can be correct —
+// it is also how a value is exported, persisted or backed up — so it is the first
+// name this rule could ever need an exemption for, and an exemption list is what
+// the rule exists not to have. If someone widens renderingSeams to a marshaller
+// later, this is what tells them they have changed the rule's character rather
+// than merely added a name.
+func TestAMarshalMethodMayNameReveal(t *testing.T) {
+	for _, method := range []string{"MarshalJSON", "MarshalText"} {
+		t.Run(method, func(t *testing.T) {
+			clean(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config",
+				`package config
+
+func (s Server) `+method+`() ([]byte, error) {
+	return []byte(s.AdminPassword.Reveal()), nil
+}
+`)}))
+		})
+	}
+}
+
+// AND FORMAT IS A KNOWN GAP, recorded rather than hidden (BrollyZap-4on, filed on the
+// 0vk.43 branch).
+//
+// 0vk.43's ruling excludes MarshalJSON, MarshalText and Format together, on the
+// argument that marshalling is also how a value is legitimately exported. That
+// argument does not reach Format. fmt.Formatter is not a marshaller: it takes
+// precedence over Stringer, GoStringer AND error, so it is the most purely
+// rendering seam of the lot — the widening's own criterion admits it, and the
+// exclusion's reason does not cover it.
+//
+// The ruling is implemented as written, because a ruling is not this branch's to
+// overturn. What is NOT acceptable is pinning it with a plant that isn't the
+// thing: an earlier version of this test used `Format() ([]byte, error)`, which
+// is no fmt.Formatter at all, so it asserted the exclusion for a method the seam
+// does not have. This plant has the real signature, so the gap it documents is
+// the real one.
+func TestAFormatMethodMayNameReveal(t *testing.T) {
+	clean(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+import "fmt"
+
+func (s Server) Format(f fmt.State, verb rune) {
+	fmt.Fprint(f, s.AdminPassword.Reveal())
+}
+`)}))
+}
+
+// secretNames, isSecretString, aliasesASecret and holdsASecret are ports
+// of internal/logging's redaction_completeness_test.go, which 0vk.36 wrote and
+// which is the model this rule was measured against.
+//
+// DUPLICATED, NOT SHARED, and chosen rather than forced — an earlier version of
+// this comment claimed forced, and review showed the claim was wrong twice over.
+// The tree already ships two test-support packages (internal/lnd/lndtest,
+// internal/lnurl/lnurltest), so that route has precedent; and this package is
+// `package arch`, so a plain internal/arch/secretast.go would be importable from
+// `package logging_test` today and links into no binary, since nothing under cmd
+// imports internal/arch.
+//
+// The real costs are these. Such a file would be the first non-test source in a
+// package whose own doc says it contains test files only — and every arch rule
+// that walks the module would then scan it. And internal/logging's test would
+// gain a dependency on internal/arch, which is a layering this repo has kept the
+// other way round. Two copies of forty lines, each with permanent plants, is the
+// cheaper trade at two consumers. AT THREE IT IS NOT: that is the moment to make
+// the package, and this paragraph is the argument ready-made.
+//
+// NOTHING DETECTS DRIFT between the copies but the names, so the names are kept
+// identical on purpose (secretNames, isSecretString, aliasesASecret,
+// holdsASecret): `grep -rn 'func isSecretString'` finds both. The one difference
+// is deliberate — holdsASecret here guards a nil Fields, which the model does not
+// bother with because the parser always sets it.
+//
+// THE TWO MUST AGREE ON WHAT A BEARER IS. After this bead they do, on every
+// shape: alias and dot imports, pointers, slices, arrays, maps (keys as well as
+// values), and a refusal to follow an alias or redefinition. The differences
+// that remain are written down on secretBearingTypes' own comment in
+// internal/logging, which this bead updates.
+
+// secretNames returns the identifiers that denote internal/secret in this
+// file: whatever it was imported as, "." for a dot-import, and "." again inside
+// package secret itself, where the type is spelled bare.
+func secretNames(file *ast.File, dir string) map[string]bool {
+	names := map[string]bool{}
+	// BY DIRECTORY, not by the package clause text. `file.Name.Name == "secret"`
+	// alone would treat a bare String in any future package that happened to be
+	// called secret as this one's type. Harmless today — only internal/secret
+	// declares it — and free to scope properly while the caller already has the
+	// directory in hand. Found by review.
+	if dir == "internal/secret" {
+		names["."] = true // a bare String, inside the package that declares it
+	}
+	for _, spec := range file.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || !strings.HasSuffix(path, "/internal/secret") {
+			continue
+		}
+		switch {
+		case spec.Name == nil:
+			names["secret"] = true
+		case spec.Name.Name == "_":
+			// Imported for side effects; nothing in this file names the type.
+		default:
+			names[spec.Name.Name] = true // an alias, or "." for a dot-import
+		}
+	}
+	return names
+}
+
+// isSecretString reports whether expr denotes a secret.String, through any number
+// of pointers, slices, arrays, maps and parentheses. Map KEYS are unwrapped as
+// well as values: a secret is no less exposed for being on the left of the colon.
+//
+// A NAMED GAP, chosen rather than missed: `chan secret.String` is NOT a bearer
+// here. The go-review pass planted it and it passes, and that is the intended
+// answer — a channel field renders as an address under slog.Any and under %v, so
+// unlike a slice or a map it cannot spill its contents into a log line. The other
+// container cases are here because they DO print their elements. If a rendering
+// path is ever added that walks a channel, this is the line to revisit.
+//
+// The ParenExpr case is a DIFFERENCE FROM THE MODEL in internal/logging, which
+// does not have it yet — see the differences list on secretBearingTypes there,
+// and BrollyZap-g5n is filed to close it. Two copies that must agree now disagree by one
+// case, which is exactly the drift this pair's comments warn about; it is
+// recorded rather than quietly tolerated.
+func isSecretString(expr ast.Expr, names map[string]bool) bool {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return isSecretString(t.X, names)
+	case *ast.ArrayType:
+		return isSecretString(t.Elt, names)
+	case *ast.MapType:
+		return isSecretString(t.Key, names) || isSecretString(t.Value, names)
+	case *ast.ParenExpr:
+		// `Token (secret.String)` is legal Go and IS a secret.String — the parens
+		// are not a container, they are spelling. Found by the go-review pass,
+		// which planted it and watched a secret-bearing struct with no LogValue
+		// pass clean. That is the seventh spelling of the six this bead was filed
+		// to close, and it evaded the fix as well as the bug.
+		return isSecretString(t.X, names)
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		return ok && names[pkg.Name] && t.Sel.Name == "String"
+	case *ast.Ident:
+		return names["."] && t.Name == "String"
+	default:
+		return false
+	}
+}
+
+// aliasesASecret reports whether ts gives secret.String a second name, by alias
+// (`type T = secret.String`) or by redefinition (`type T secret.String`).
+func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
+	if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+		return false
+	}
+	return isSecretString(ts.Type, names)
+}
+
+// holdsASecret reports whether any of st's fields is a secret.String, however it
+// is spelled and however it is wrapped.
+func holdsASecret(st *ast.StructType, names map[string]bool) bool {
+	if st.Fields == nil {
+		return false
+	}
+	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
+		return isSecretString(field.Type, names)
+	})
+}
+
+// checkSecretBearingStructsRedact reports three things, not one (0vk.46): a
+// package-level struct holding a secret with no LogValue in its package; a type
+// that gives secret.String a second name, which is refused rather than followed;
+// and a secret-bearing type declared inside a function, which cannot carry a
+// LogValue at all and has to be hoisted.
+//
+// It finds structs with a secret.String field and
 // asserts the same package declares LogValue on that type.
 //
 // Package-scoped rather than file-scoped: Go allows the method anywhere in the
@@ -1455,12 +1939,26 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 	bearers := map[string]map[string]decl{} // dir -> type -> where
 	redacts := map[string]map[string]bool{} // dir -> type
 
+	var found []problem
 	fset := token.NewFileSet()
 	for _, f := range files {
-		file, err := parser.ParseFile(fset, f.path, f.src, 0)
+		// SkipObjectResolution, as the model carries: this rule reads syntax and
+		// never asks what an identifier resolves to, and the resolution is
+		// measurable (~5% of the arch package when swept across its ParseFile
+		// sites).
+		file, err := parser.ParseFile(fset, f.path, f.src, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", f.rel, err)
 		}
+		// NO EARLY-OUT ON len(names) == 0, however tempting — it would skip 95 of
+		// 114 files and buys nothing (parsing dominates; measured at no runtime
+		// change). It is also a latent false positive: the LogValue collection
+		// below runs in this same loop, so skipping a file that does not itself
+		// import internal/secret would drop a LogValue declared in a sibling
+		// methods.go and report a compliant type as unredacted — the exact shape
+		// this branch removed for generic receivers.
+		names := secretNames(file, f.dir)
+		topLevel := map[*ast.TypeSpec]bool{}
 		for _, d := range file.Decls {
 			switch d := d.(type) {
 			case *ast.GenDecl:
@@ -1469,14 +1967,27 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 					if !ok {
 						continue
 					}
+					topLevel[ts] = true
+					// An alias or redefinition is REFUSED rather than followed,
+					// exactly as internal/logging's rule refuses it: following the
+					// second name to the fields typed with it is go/types and a
+					// much larger rule. Redefinition is the worse of the two — a
+					// defined type over secret.String inherits none of String,
+					// GoString, LogValue or MarshalJSON, so it is a secret that
+					// has lost every one of its redactions.
+					if aliasesASecret(ts, names) {
+						found = append(found, problem{f.rel, fset.Position(ts.Pos()).Line,
+							fmt.Sprintf("%s gives secret.String a second name; a field typed "+
+								"%s is invisible to this rule, and a redefinition (no `=`) "+
+								"also drops LogValue, String, GoString and MarshalJSON",
+								ts.Name.Name, ts.Name.Name)})
+						continue
+					}
 					st, ok := ts.Type.(*ast.StructType)
 					if !ok {
 						continue
 					}
-					for _, field := range st.Fields.List {
-						if typeString(field.Type) != "secret.String" {
-							continue
-						}
+					if holdsASecret(st, names) {
 						if bearers[f.dir] == nil {
 							bearers[f.dir] = map[string]decl{}
 						}
@@ -1494,9 +2005,47 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 				redacts[f.dir][name] = true
 			}
 		}
+
+		// ANYTHING NOT DECLARED AT PACKAGE LEVEL, found by walking the whole file
+		// and subtracting what the loop above already saw.
+		//
+		// A local type is as loggable as a package-level one, and until this bead
+		// the rule read file.Decls only, so none was visible. Walking for the
+		// COMPLEMENT rather than walking function bodies is both smaller and
+		// wider: review measured that a body-only walk still missed a struct
+		// inside a package-level func literal (`var save = func() { type row
+		// struct{...} }`) and a function-local alias. Subtracting catches every
+		// nesting there is, including ones nobody has thought of.
+		//
+		// The message differs from the package-level one because the remedy does.
+		// Go does not allow a method on a type declared inside a function, so such
+		// a struct CANNOT implement LogValue and "declare one" would send its
+		// author somewhere that does not exist. The fix is to hoist the type.
+		ast.Inspect(file, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok || topLevel[ts] {
+				return true
+			}
+			line := fset.Position(ts.Pos()).Line
+			if st, isStruct := ts.Type.(*ast.StructType); isStruct {
+				if holdsASecret(st, names) {
+					found = append(found, problem{f.rel, line, fmt.Sprintf(
+						"%s holds a secret and is declared inside a function; a type declared "+
+							"in a function body cannot have a LogValue at all, so hoist it to "+
+							"package level and give it one (§12)", ts.Name.Name)})
+				}
+				return true
+			}
+			if aliasesASecret(ts, names) {
+				found = append(found, problem{f.rel, line, fmt.Sprintf(
+					"%s gives secret.String a second name inside a function; a field typed %s "+
+						"is invisible to this rule, and a redefinition (no `=`) also drops "+
+						"LogValue, String, GoString and MarshalJSON", ts.Name.Name, ts.Name.Name)})
+			}
+			return true
+		})
 	}
 
-	var found []problem
 	for dir, types := range bearers {
 		for name, at := range types {
 			if redacts[dir][name] {
@@ -1524,6 +2073,32 @@ func typeString(expr ast.Expr) string {
 		return "*" + typeString(t.X)
 	case *ast.ArrayType:
 		return "[]" + typeString(t.Elt)
+	case *ast.IndexExpr:
+		// A generic type with one parameter — Holder[T]. The BASE NAME, without
+		// the parameter, because that is the name a TypeSpec declares and the
+		// name every caller keys on.
+		//
+		// NOT COSMETIC, which is what 0vk.43's adjacent note assumed. It says
+		// "detection is unaffected; only the message is garbled" — true where
+		// typeString feeds a message, false in checkSecretBearingStructsRedact,
+		// which matches a LogValue's receiver against the type name to decide
+		// whether the type redacts itself. Without these two cases the receiver
+		// rendered as "*ast.IndexExpr", matched no type, and a generic struct
+		// with a perfectly good LogValue was reported as having none — a false
+		// positive against the contributor who did the right thing. Measured by
+		// planting exactly that type (0vk.46/0vk.43 branch).
+		return typeString(t.X)
+	case *ast.IndexListExpr:
+		// Two or more parameters — Pair[K, V]. Same reasoning.
+		return typeString(t.X)
+		// AND THE CHANGE IS MONOTONE, which is what makes it safe for the seven
+		// other call sites 0vk.46 deliberately left alone. The strings these two
+		// cases used to produce — "*ast.IndexExpr", "*ast.IndexListExpr" — appear
+		// in no comparison literal or membership list anywhere in this file
+		// (carriers, bypasses, "*store.Store", "*Store", the callee names). So
+		// resolving them can only ADD a match, never remove one: every affected
+		// rule moves toward catching more. Write any future case here to that
+		// invariant and it needs no separate argument.
 	default:
 		return fmt.Sprintf("%T", expr)
 	}
@@ -4181,4 +4756,70 @@ func broker(path string) *guard.SocketClient {
 	return guard.NewSocketClient(path, nil)
 }
 `)}), "reachable only through the socket")
+}
+
+// A generic type's LogValue is credited to it, and its absence is still reported.
+//
+// THIS WAS A FALSE POSITIVE, and the bead that handed over the decision said it
+// could not be: 0vk.43's adjacent note reads "detection is unaffected; only the
+// message is garbled". That is true where typeString feeds a message and false
+// here, because this rule matches a LogValue's RECEIVER against the type name to
+// decide whether the type redacts itself. A generic receiver rendered as
+// "*ast.IndexExpr", matched nothing, and the type was reported as having no
+// LogValue while looking straight at one — which is the worst kind of arch
+// failure, the one that punishes the contributor who did the right thing.
+//
+// Both directions, because the fix is a rendering change and a rendering change
+// that returned a constant would satisfy either half alone.
+func TestAGenericTypesLogValueIsCredited(t *testing.T) {
+	const bearer = `package store
+
+import (
+	"log/slog"
+
+	"github.com/davotoula/brollyzapper/internal/secret"
+)
+
+type holder[T any] struct {
+	Name  T
+	Token secret.String
+}
+`
+	clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store",
+		bearer+"\nfunc (h holder[T]) LogValue() slog.Value { return slog.StringValue(\"redacted\") }\n")}))
+
+	catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", bearer)}),
+		"implements no LogValue")
+
+	// TWO PARAMETERS AND A POINTER RECEIVER, which are the two branches this diff
+	// added that nothing exercised — *ast.IndexListExpr, and StarExpr wrapping a
+	// generic. Review counted them as untested against this file's own bar, that a
+	// rule which has only ever passed has been written rather than tested.
+	const pair = `package store
+
+import (
+	"log/slog"
+
+	"github.com/davotoula/brollyzapper/internal/secret"
+)
+
+type pair[K comparable, V any] struct {
+	Key   K
+	Token secret.String
+}
+`
+	clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store",
+		pair+"\nfunc (p *pair[K, V]) LogValue() slog.Value { return slog.StringValue(\"redacted\") }\n")}))
+	catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", pair)}),
+		"implements no LogValue")
+
+	// And the message names the type rather than an AST node type.
+	got := checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/store", `package store
+
+func (h holder[T]) LogValue() slog.Value { return slog.StringValue(h.Token.Reveal()) }
+`)})
+	if len(got) != 1 || !strings.Contains(got[0].String(), "holder.LogValue names Reveal") {
+		t.Errorf("the message reads %v, want it to name holder.LogValue — a receiver rendered "+
+			"as an AST node type tells the reader nothing about which type to fix", got)
+	}
 }
