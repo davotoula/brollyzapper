@@ -1285,6 +1285,20 @@ func checkSecretBearingFields(t *testing.T, files []sourceFile) []problem {
 }
 
 func TestSecretBearingFieldsUseTheRedactingType(t *testing.T) {
+	// A PARENTHESISED FIELD TYPE, which walked past this rule until 0vk.52.
+	// typeString had no ParenExpr case, so `AdminPassword (string)` rendered as
+	// "*ast.ParenExpr", matched none of the carriers, and the rule stayed green on
+	// a plain-string password. Found by that bead's inventory, not by its brief:
+	// the same family as g5n and 0vk.52 itself, at a third decision point.
+	t.Run("a parenthesised field type", func(t *testing.T) {
+		catches(t, checkSecretBearingFields(t, []sourceFile{planted("internal/api", `package api
+
+type creds struct {
+	AdminPassword (string)
+	MacaroonBytes ([]byte)
+}
+`)}), "must be secret.String")
+	})
 
 	clean(t, checkSecretBearingFields(t, sourceFiles(t,
 		"internal/lnd/lnrpc", "internal/lnd/lndtest", "internal/secret")))
@@ -2867,14 +2881,20 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 // typeString renders a field's type well enough to compare against
 // "secret.String"; anything more exotic is reported as-is and fails.
 //
-// NO ParenExpr CASE, AND IT NEEDS NONE — measured 6 Sep 2026, not assumed, and
-// written here so the next reader does not measure it again. Its callers ask
-// about RECEIVERS, and `func (s (Server)) LogValue()` is legal Go that gofmt
-// REWRITES to `func (s Server)`; `gofmt -l` is a gate step, so that spelling
-// cannot reach main. A field type and a declaration's type are the opposite case
-// — gofmt KEEPS those parens — which is why isSecretString has a ParenExpr case
-// (g5n) and why declaredStruct exists (0vk.52). Three questions, two answers, and
-// the difference is what gofmt does rather than what the parser produces.
+// RECEIVERS NEED NO ParenExpr CASE — measured 6 Sep 2026, not assumed, and
+// written here so the next reader does not measure it again. `func (s (Server))
+// LogValue()` is legal Go that gofmt REWRITES to `func (s Server)`, and
+// `gofmt -l` is a gate step, so that spelling cannot reach main.
+//
+// FIELDS ARE THE OPPOSITE, and the case below exists for them. gofmt KEEPS the
+// parens a person writes around a field type or a declaration's type — which is
+// why isSecretString has a ParenExpr case (g5n) and why declaredStruct exists
+// (0vk.52). This function has a field caller too: checkSecretBearingFields
+// compares typeString(field.Type) against "string", "[]byte" and "[]string", and
+// `AdminPassword (string)` rendered as "*ast.ParenExpr", matched no carrier, and
+// walked past the rule. Planted and measured on the 0vk.52 branch, which is where
+// an earlier draft of this very comment said no case was needed at all — it had
+// generalised the receiver measurement to every caller.
 func typeString(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:
@@ -2885,6 +2905,12 @@ func typeString(expr ast.Expr) string {
 		return "*" + typeString(t.X)
 	case *ast.ArrayType:
 		return "[]" + typeString(t.Elt)
+	case *ast.ParenExpr:
+		// Parens are spelling, not structure, and gofmt keeps them around a field
+		// type. Same monotone argument as the two generic cases below: the string
+		// this case used to produce, "*ast.ParenExpr", appears in no comparison
+		// literal anywhere in this file, so resolving it can only ADD a match.
+		return typeString(t.X)
 	case *ast.IndexExpr:
 		// A generic type with one parameter — Holder[T]. The BASE NAME, without
 		// the parameter, because that is the name a TypeSpec declares and the
