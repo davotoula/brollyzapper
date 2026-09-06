@@ -1432,6 +1432,19 @@ type pairing struct {
 	}
 }
 `},
+		// And the containers compose with the nesting rather than shadowing it: a
+		// nested struct reached through a pointer, a slice or a map value is still
+		// reached. internal/logging keeps the same three in one row.
+		{"a nested struct behind a pointer, a slice and a map value", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	One   *struct{ Token secret.String }
+	Many  []struct{ Token secret.String }
+	Keyed map[string]struct{ Token secret.String }
+}
+`},
 	} {
 		t.Run(plant.name, func(t *testing.T) {
 			catches(t, checkSecretBearingStructsRedact(t,
@@ -1456,6 +1469,24 @@ type pairing struct {
 `)}))
 	})
 
+	// THE OTHER TWO EXCLUSIONS, planted so the reasons beside them are tested
+	// rather than merely written. A func field renders as an address like a
+	// channel; an interface field does NOT, and is excluded because what it holds
+	// is a runtime fact no syntax check can see — see isSecretString, where the
+	// two reasons are kept apart on purpose.
+	t.Run("a func returning a secret, and an interface field, are not bearers", func(t *testing.T) {
+		clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Fn  func() secret.String
+	Any any
+	Rdr interface{ Read() secret.String }
+}
+`)}))
+	})
+
 	// THE BOUNDARY COMPOSES THROUGH THE NESTING, which is the property that stops
 	// the new case quietly widening the chan exclusion. A nested struct whose only
 	// secret sits behind a channel is still not a bearer, for the same reason a
@@ -1469,21 +1500,6 @@ type pairing struct {
 	Inner struct{ C chan secret.String }
 }
 `)}))
-	})
-
-	// AND THE CONTAINERS COMPOSE WITH IT in the other direction: a nested struct
-	// reached through a pointer, a slice or a map value is still reached.
-	t.Run("a nested struct behind a pointer, a slice and a map value", func(t *testing.T) {
-		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
-
-import "github.com/davotoula/brollyzapper/internal/secret"
-
-type pairing struct {
-	One   *struct{ Token secret.String }
-	Many  []struct{ Token secret.String }
-	Keyed map[string]struct{ Token secret.String }
-}
-`)}), "implements no LogValue")
 	})
 
 	// THE CONTROL FOR THE NESTED CASE, and the reason it is not merely symmetry
@@ -1991,13 +2007,23 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 //
 // TWO CHOSEN BOUNDARIES, both of them deliberate answers rather than gaps:
 //
-//   - `chan secret.String` is NOT a bearer, and `func` and `interface` fields are
-//     not either. The go-review pass planted the channel and it passes, which is
-//     the intended answer: those fields render as an address under slog.Any and
-//     under %v, so unlike a slice or a map they cannot spill their contents into
-//     a log line. The container cases above are here because they DO print their
-//     elements. If a rendering path is ever added that walks a channel, this is
-//     the line to revisit.
+//   - `chan secret.String` and `func() secret.String` are NOT bearers. The
+//     go-review pass planted the channel and it passes, which is the intended
+//     answer: both render as an ADDRESS under %v and under slog.Any (measured —
+//     `Ch:0x239a89356230 Fn:0x104cb1970`), so unlike a slice or a map they cannot
+//     spill their contents into a log line. The container cases above are here
+//     because they DO print their elements. If a rendering path is ever added
+//     that walks a channel, this is the line to revisit.
+//
+//     An INTERFACE field — `Any any` — is excluded too, on a DIFFERENT reason,
+//     and the difference matters enough to write down: it does not hide behind an
+//     address, it renders its dynamic value. It is out of this family because
+//     what it holds is a runtime fact and not a spelling — no syntax check can
+//     see it, at any depth. Measured, an `any` holding a secret.String still
+//     prints `[redacted]`, because every rendering path on secret.String is
+//     overridden; what survives is a plain string that CAME from a secret, which
+//     is dataflow and the redaction tests' job. Do not fold this bullet back into
+//     the one above: "renders as an address" is false for an interface.
 //
 //   - `Token Box[secret.String]` is NOT a bearer either — an *ast.IndexExpr, and
 //     `pkg.Pair[string, secret.String]` an *ast.IndexListExpr. This one is a

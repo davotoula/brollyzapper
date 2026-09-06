@@ -368,10 +368,19 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 // TWO CHOSEN BOUNDARIES, both deliberate answers rather than gaps:
 //
 //   - The containers here are the ones that PRINT THEIR ELEMENTS. `chan
-//     secret.String` is deliberately not a bearer and neither copy treats it as
-//     one — the reason is on secretBearingTypes' first bullet, and internal/arch
-//     keeps a plant that requires it to pass. `func` and `interface` fields are
-//     excluded on the same reasoning.
+//     secret.String` and `func() secret.String` are deliberately not bearers and
+//     neither copy treats them as such — both render as an ADDRESS under %v and
+//     slog.Any (measured), so they cannot spill what they hold. The reason is on
+//     secretBearingTypes' first bullet, and internal/arch keeps a plant that
+//     requires the channel to pass.
+//
+//     An INTERFACE field is excluded on a DIFFERENT reason and the two must not
+//     be merged: it renders its dynamic value rather than an address. It is out
+//     of this family because what it holds is a runtime fact, not a spelling, so
+//     no syntax check can see it at any depth. Measured, an `any` holding a
+//     secret.String still prints `[redacted]` — every rendering path on the type
+//     is overridden — and what survives is a plain string that CAME from a
+//     secret, which is dataflow and these tests' own job.
 //
 //   - `Token Box[secret.String]` is not a bearer either — an *ast.IndexExpr, and
 //     `pkg.Pair[string, secret.String]` an *ast.IndexListExpr. A boundary rather

@@ -157,6 +157,14 @@ type Plain struct {
 		src:  "package store\n\ntype Pairing struct {\n\tInner struct{ Count int }\n}\n",
 		want: "",
 	}, {
+		// An INTERFACE field is excluded on a different reason from chan and func —
+		// it renders its dynamic value, not an address — and is planted so that
+		// reason is tested rather than merely written. See isSecretString.
+		name: "an interface field is not a bearer",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tAny any\n\tRdr interface{ Read() secret.String }\n}\n",
+		want: "",
+	}, {
 		// THE BOUNDARY COMPOSES THROUGH THE NESTING. A nested struct whose only
 		// secret sits behind a channel is still not a bearer, for the same reason a
 		// parenthesised chan is still a chan — otherwise the nested case would have
