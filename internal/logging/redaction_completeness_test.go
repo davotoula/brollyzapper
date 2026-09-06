@@ -42,11 +42,17 @@ import (
 // to be deleted.
 func TestEverySecretBearingTypeIsCoveredByOneOfTheTwoConventions(t *testing.T) {
 	files := moduleGoFiles(t)
-	bearers, aliases := secretBearingTypes(t, files)
+	bearers, aliases, unrecognised := secretBearingTypes(t, files)
 	if len(bearers) == 0 {
 		t.Fatal("found no secret-bearing types in the module; this rule is reading the wrong thing")
 	}
 	for _, p := range aliases {
+		t.Error(p)
+	}
+	// Reported on its own, never folded into the alias or the bearer messages: an
+	// unrecognised node is a request for a decision and not an allegation of a
+	// leak (0vk.49).
+	for _, p := range unrecognised {
 		t.Error(p)
 	}
 	markers, misplaced := redactionMarkers(t, files)
@@ -206,12 +212,16 @@ const markerPrefix = "//redaction:covers "
 //     has no TypeSpec of its own so neither walk ever visited it — evaded both
 //     until 0vk.48 closed it in the two copies together.
 //
-//     AND WITH THAT THE FAMILY IS CLOSED, by ruling on 6 Sep 2026: every further
-//     shape needs go/types, which is a different decision and not another case.
-//     The two boundaries that remain are deliberate and are written out on
-//     isSecretString — channel, func and interface fields, which render as an
-//     address and cannot spill; and a generic field like `Token Box[secret.String]`,
-//     where unwrapping the type argument would report a struct that stores nothing.
+//     AND WITH THAT THE FAMILY IS CLOSED — but NOT for the reason first given.
+//     The 6 Sep ruling closed it on a promise to stop looking, which is the
+//     weakest kind of closure and would have been broken by the ninth spelling
+//     exactly as the eight before it were. 0vk.49 closed it on a MECHANISM
+//     instead: isSecretString now enumerates what it excludes and REPORTS a node
+//     kind it has never seen, so a ninth spelling announces itself the first time
+//     anyone writes it rather than being answered "not a secret" in silence. The
+//     exclusions and their reasons are cases on that function; read them there,
+//     not here, because a second statement of them is what this bullet is warning
+//     about.
 //
 //     The code is duplicated rather than shared, because this file is
 //     `package logging_test` and a test file cannot be imported; if a third rule
@@ -235,10 +245,9 @@ const markerPrefix = "//redaction:covers "
 //     because the remedy differs: Go does not allow a method on a type declared
 //     in a function body, so there the fix is to hoist the type rather than to
 //     give it a LogValue.
-func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []string) {
+func secretBearingTypes(t *testing.T, files []moduleFile) (
+	bearers []secretBearer, aliases, unrecognised []string) {
 	t.Helper()
-	var found []secretBearer
-	var aliases []string
 	fset := token.NewFileSet()
 	for _, f := range files {
 		if strings.HasSuffix(f.rel, "_test.go") {
@@ -252,13 +261,16 @@ func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []str
 			t.Fatalf("parsing %s: %v", f.rel, err)
 		}
 		names := secretNames(file)
+		// One collector per FILE, drained below, so a reported node can be given
+		// the filename and line the predicate itself has no way to know.
+		unknown := &unknownNodes{}
 		ast.Inspect(file, func(n ast.Node) bool {
 			ts, ok := n.(*ast.TypeSpec)
 			if !ok {
 				return true
 			}
 			at := fset.Position(ts.Pos())
-			if aliasesASecret(ts, names) {
+			if aliasesASecret(ts, names, unknown) {
 				aliases = append(aliases, fmt.Sprintf("%s:%d declares %s as another name for "+
 					"secret.String. Spell the type out: this rule and internal/arch both match "+
 					"the field's SOURCE, so a field typed %s is invisible to the requirement "+
@@ -276,10 +288,10 @@ func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []str
 			// results, which would have put a made-up file and line in the failure
 			// message. Measured: it said secret.go:0.
 			name := file.Name.Name + "." + ts.Name.Name
-			if name != "secret.String" && !holdsASecret(st, names) {
+			if name != "secret.String" && !holdsASecret(st, names, unknown) {
 				return true
 			}
-			found = append(found, secretBearer{
+			bearers = append(bearers, secretBearer{
 				name: name,
 				dir:  f.dir,
 				file: f.rel,
@@ -287,9 +299,13 @@ func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []str
 			})
 			return true
 		})
+		for _, expr := range unknown.nodes {
+			unrecognised = append(unrecognised,
+				unrecognisedNode(f.rel, fset.Position(expr.Pos()).Line, expr))
+		}
 	}
-	slices.SortFunc(found, func(a, b secretBearer) int { return strings.Compare(a.name, b.name) })
-	return found, aliases
+	slices.SortFunc(bearers, func(a, b secretBearer) int { return strings.Compare(a.name, b.name) })
+	return bearers, aliases, unrecognised
 }
 
 // secretNames returns the identifiers that mean secret.String in this file: the
@@ -331,11 +347,17 @@ func secretNames(file *ast.File) map[string]bool {
 // Redefinition is included because it is the worse of the two: a defined type
 // over secret.String does NOT inherit String, GoString, LogValue or MarshalJSON,
 // so it is a secret that has lost every one of its redactions.
-func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
+// AN UNRECOGNISED NODE IS NOT A SECOND NAME, and that falls out of the bool
+// answer rather than needing a guard: isSecretString collects the node and still
+// returns false, so `type T <something nobody has taught the switch>` is reported
+// as unrecognised by the walk and never as an alias. The collector is threaded
+// through rather than dropped because a TypeSpec is exactly as good a place to
+// meet a new node kind as a field is (0vk.49).
+func aliasesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) bool {
 	if containsAnonymousStruct(ts.Type) {
 		return false
 	}
-	return isSecretString(ts.Type, names)
+	return isSecretString(ts.Type, names, unknown)
 }
 
 // containsAnonymousStruct reports whether expr has an anonymous struct type
@@ -360,6 +382,17 @@ func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
 // The BROADER conflation is older than this bead and is left alone: `type T
 // []secret.String` and `type T *secret.String` are reported as second names
 // today and are not ones either. That is BrollyZap-0vk.50.
+//
+// ONE CONSEQUENCE FOR 0vk.49'S GUARANTEE, measured and filed as BrollyZap-0vk.51.
+// Refusing here happens BEFORE isSecretString is called, and the walk then falls
+// through because ts.Type is not a *ast.StructType — so for `type T
+// []struct{...}` and `type T map[string]struct{...}` the inner struct's fields
+// are never handed to the predicate at all, and a node kind first written in
+// there is never collected. With the ChanType case removed, a plain `type T
+// struct{ C chan secret.String }` reports one unrecognised node and the named
+// slice reports none. Collecting is not diagnosing, so it is fixable without
+// changing what is reported — but it is held behind 0vk.50, which owns whether
+// this family is reported at all and would move the same guard.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
@@ -373,73 +406,116 @@ func containsAnonymousStruct(expr ast.Expr) bool {
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it
 // is spelled and however it is wrapped. See the FIRST bullet on
-// secretBearingTypes for the seven spellings that used to get through.
-func holdsASecret(st *ast.StructType, names map[string]bool) bool {
-	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
-		return isSecretString(field.Type, names)
-	})
+// secretBearingTypes for the spellings that used to get through.
+//
+// NOT COUNTED HERE. It said "four" when there were four, and stayed at four while
+// 0vk.46 made it six; it was corrected to seven by g5n and was stale again the
+// same day, because 0vk.48 made it eight. A number restated away from the list it
+// counts goes wrong on the next bead by construction — the plants file's own
+// header made this mistake too, and the bullet is the one place that has to be
+// right.
+//
+// EVERY FIELD IS VISITED, where this used to be a slices.ContainsFunc that stopped
+// at the first true one. Under 0vk.49 the walk is also collecting unrecognised
+// nodes, and short-circuiting would skip the fields after a secret — so a struct
+// with one known secret and one node kind nobody has taught this predicate would
+// report the first and stay silent about the second.
+func holdsASecret(st *ast.StructType, names map[string]bool, unknown *unknownNodes) bool {
+	secret := false
+	for _, field := range st.Fields.List {
+		if isSecretString(field.Type, names, unknown) {
+			secret = true
+		}
+	}
+	return secret
+}
+
+// unknownNodes collects the type expressions isSecretString did not recognise.
+//
+// A COLLECTOR, chosen over the two other shapes the brief offered.
+//
+// A t.Fatalf from the predicate is cheapest and is ruled out by criterion 1: the
+// rule has to be PROVED to report an unrecognised node, and a Fatalf cannot be
+// planted — it ends the test rather than returning a message a plant can assert.
+// It would also put a *testing.T inside a pure predicate, in a package whose whole
+// design is scanners that RETURN problems and Test wrappers that assert them.
+//
+// A third outcome is pure and is rejected on WEIGHT, not on impossibility — an
+// earlier draft of this comment said a map with an unrecognised key and a secret
+// value "has no single right pair to return", which is true of
+// (bool, ast.Expr) and false of (bool, []ast.Expr), where the combination is
+// plainly concatenation. The honest reason is that threading a returned slice
+// through six recursion sites IS this collector, hand-written, with a join
+// allocation at every site. Same conclusion; the reader who spots the difference
+// should not be left thinking the choice rested on a mistake.
+//
+// It holds ast.Expr rather than a formatted string because the predicate has no
+// FileSet and no filename; the caller resolves the position, which is the only
+// place that can.
+type unknownNodes struct{ nodes []ast.Expr }
+
+// unrecognisedNode is what the walk reports for one. It says UNRECOGNISED and
+// never that a secret was found — see the fail-closed paragraph on
+// isSecretString for why that distinction is the whole bead.
+func unrecognisedNode(file string, line int, expr ast.Expr) string {
+	return fmt.Sprintf("%s:%d: unrecognised type expression %T. isSecretString has never "+
+		"been taught this node kind, so it cannot say whether the field carries a secret — "+
+		"this is a request for a decision, NOT a report of a leak. Add a case that unwraps "+
+		"it, or an exclusion case with its reason beside chan and interface (0vk.49)",
+		file, line, expr)
 }
 
 // isSecretString reports whether expr denotes a secret.String, through any number
 // of pointers, slices, arrays, maps, parentheses and anonymous nested structs.
 // Map KEYS are unwrapped as well as values: a secret is no less exposed for being
-// on the left of the colon, and the cost of checking is one recursive call.
+// on the left of the colon.
 //
-// THE SYNTACTIC-SPELLING FAMILY IS CLOSED (David's ruling, 6 Sep 2026). Four
-// beads walked it — 0vk.36 wrote this predicate, 0vk.46 ported it to
-// internal/arch and added map keys and local types, g5n closed the parenthesised
-// type, 0vk.48 the anonymous nested struct. None was a live leak; each was an
-// ordinary re-spelling that made a CONTAINER stop being a bearer, so nothing had
-// to render-test it.
+// IT FAILS CLOSED (0vk.49, David's ruling of 6 Sep 2026). Every node kind this
+// predicate accepts or refuses is an explicit case carrying its own reason, and a
+// node kind it has never seen is REPORTED — file, line and %T — rather than
+// silently answered "not a secret".
 //
-// Anything past this point is not another case. Resolving what an identifier
-// actually denotes — an alias, a named type from another package, a type
-// parameter — is go/types, a different and larger decision rather than a line in
-// this switch. IF YOU ARE HERE TO ADD A CASE, that is the decision you are
-// making; take it deliberately, never by symmetry with the containers above.
+// THAT IS WHY THE SPELLING FAMILY IS CLOSED, and it is a better reason than the
+// one that stood here before. Four beads walked it: 0vk.36 wrote this predicate,
+// 0vk.46 ported it to internal/arch and added map keys and local types, g5n closed
+// the parenthesised type, 0vk.48 the anonymous nested struct. Every one was the
+// same event with a different node kind — an ordinary Go spelling reached
+// `default: return false`, the CONTAINER stopped being a bearer, and the whole
+// tree stayed green. The missing case differed each time; the mechanism never did.
+// So the family does not close because anyone promised to stop looking. It closes
+// because the fifth spelling now announces itself.
 //
-// THREE CHOSEN BOUNDARIES, each a deliberate answer rather than a gap, and each
-// on ITS OWN REASON — they look alike and are not, which is why they are three
-// bullets and not one:
+// FAILING CLOSED IS NOT `default: return true`, and that distinction is the whole
+// bead. Answering true would report an unrecognised node as "holds a secret.String
+// and implements no LogValue" — a confident and wrong diagnosis, which is a cost
+// 0vk.48 paid once already. The bool answer therefore stays false and the node is
+// collected instead, so the walk can ask for a decision rather than allege a leak.
 //
-//   - The containers here are the ones that PRINT THEIR ELEMENTS. `chan
-//     secret.String` and `func() secret.String` are deliberately not bearers and
-//     neither copy treats them as such — both render as an ADDRESS under %v and
-//     slog.Any (measured), so they cannot spill what they hold. The reason is on
-//     secretBearingTypes' first bullet, and internal/arch keeps a plant that
-//     requires the channel to pass.
-//
-//   - An INTERFACE field is not a bearer either, and NOT for the reason above: it
-//     renders its dynamic value rather than an address. It is out of this family
-//     because what it holds is a runtime fact, not a spelling, so no syntax check
-//     can see it at any depth. Measured, an `any` holding a secret.String still
-//     prints `[redacted]` — every rendering path on the type is overridden — and
-//     what survives is a plain string that CAME from a secret, which is dataflow
-//     and these tests' own job. An earlier draft folded this into the bullet above
-//     and said interfaces render as an address. They do not.
-//
-//   - `Token Box[secret.String]` is not a bearer either — an *ast.IndexExpr, and
-//     `pkg.Pair[string, secret.String]` an *ast.IndexListExpr. A boundary rather
-//     than a case because unwrapping the type ARGUMENT is not sound: `type Box[T
-//     any] struct{ n int }` never stores its T, so it would report a struct
-//     holding no secret at all. internal/arch's typeString already learned those
-//     two nodes for generic RECEIVERS, which makes it easy to assume field types
-//     followed; they did not.
-func isSecretString(expr ast.Expr, names map[string]bool) bool {
+// Resolving what an identifier DENOTES — an alias, a named type from another
+// package, a type parameter — is still go/types and still a different decision. An
+// unrecognised node is a shape this switch has never been taught, not a name whose
+// meaning has to be looked up.
+func isSecretString(expr ast.Expr, names map[string]bool, unknown *unknownNodes) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
-		return isSecretString(t.X, names)
+		return isSecretString(t.X, names, unknown)
 	case *ast.ArrayType:
-		return isSecretString(t.Elt, names)
+		return isSecretString(t.Elt, names, unknown)
 	case *ast.MapType:
-		return isSecretString(t.Key, names) || isSecretString(t.Value, names)
+		// BOTH HALVES, NEVER SHORT-CIRCUITED. `||` would stop at a secret key and
+		// never look at the value, so an unrecognised node on the right would go
+		// uncollected in exactly the struct someone is already being told about.
+		// Under a fail-closed rule an unvisited node is the thing to avoid.
+		key := isSecretString(t.Key, names, unknown)
+		value := isSecretString(t.Value, names, unknown)
+		return key || value
 	case *ast.ParenExpr:
 		// `Token (secret.String)` is legal Go and IS a secret.String — the parens
 		// are not a container, they are spelling, and gofmt keeps them. Found by
 		// the go-review pass on 0vk.46, which planted it in internal/arch and
 		// watched a secret-bearing struct with no LogValue pass clean; this copy
 		// carried the same hole for a day longer (g5n).
-		return isSecretString(t.X, names)
+		return isSecretString(t.X, names, unknown)
 	case *ast.StructType:
 		// An ANONYMOUS NESTED STRUCT — `Inner struct{ Token secret.String }` —
 		// has no TypeSpec of its own, so neither walk ever visits it and the
@@ -450,15 +526,55 @@ func isSecretString(expr ast.Expr, names map[string]bool) bool {
 		// struct has no name to report, and the container is the type that needs
 		// the LogValue. A nested struct inside a function-local type therefore
 		// keeps that walk's own message, whose remedy is to hoist.
-		return holdsASecret(t, names)
+		return holdsASecret(t, names, unknown)
 	case *ast.SelectorExpr:
 		pkg, ok := t.X.(*ast.Ident)
-		return ok && names[pkg.Name] && t.Sel.Name == "String"
+		if !ok {
+			// The one refusal left inside this switch that was silent, and under a
+			// rule whose whole claim is that none of them are. A qualified type
+			// name is always ident.Name in legal Go — `pkg.Pair[T]` arrives as an
+			// IndexExpr, not as a nested selector — so this is unreachable today.
+			// "Unreachable today" is exactly what the four beads before this one
+			// were each told about the case they were missing.
+			unknown.nodes = append(unknown.nodes, expr)
+			return false
+		}
+		return names[pkg.Name] && t.Sel.Name == "String"
 	case *ast.Ident:
 		// A bare String: either the package was dot-imported, or this file IS
 		// package secret.
 		return names["."] && t.Name == "String"
+
+	// THE EXCLUSIONS. Each is a deliberate answer with its own reason, and the
+	// reasons differ — they look alike and are not, which is why they are separate
+	// cases and not one. Before 0vk.49 these lived in prose above the switch while
+	// the code said nothing, which is two statements of one list.
+	case *ast.ChanType, *ast.FuncType:
+		// Both render as an ADDRESS under %v and under slog.Any (measured), so
+		// unlike a slice or a map they cannot spill what they hold. The containers
+		// above are unwrapped precisely because they DO print their elements.
+		return false
+	case *ast.InterfaceType:
+		// NOT for the reason above, though it is easy to file it there: an
+		// interface renders its dynamic value, not an address. It is out because
+		// what it holds is a runtime fact, which no syntax check can see at any
+		// depth. Measured: an `any` holding a secret.String still prints
+		// `[redacted]`, every rendering path on the type being overridden, and what
+		// survives is a plain string that CAME from a secret — dataflow, and these
+		// tests' own job. An earlier draft said interfaces render as an address.
+		// They do not.
+		return false
+	case *ast.IndexExpr, *ast.IndexListExpr:
+		// `Token Box[secret.String]`, and `pkg.Pair[string, secret.String]` for the
+		// list form. Excluded because unwrapping the type ARGUMENT is not sound:
+		// `type Box[T any] struct{ n int }` never stores its T, so this would
+		// report a struct holding no secret at all. internal/arch's typeString
+		// already learned these two nodes for generic RECEIVERS, which makes it
+		// easy to assume field types followed; they did not.
+		return false
+
 	default:
+		unknown.nodes = append(unknown.nodes, expr)
 		return false
 	}
 }
