@@ -223,9 +223,14 @@ const markerPrefix = "//redaction:covers "
 //     not here, because a second statement of them is what this bullet is warning
 //     about.
 //
-//     The code is duplicated rather than shared, because this file is
-//     `package logging_test` and a test file cannot be imported; if a third rule
-//     ever wants the predicate, that is the moment to give it a real home.
+//     The code is duplicated rather than shared, and that is CHOSEN rather than
+//     forced — an earlier version of this sentence said a test file cannot be
+//     imported and stopped there, which internal/arch's copy of the argument
+//     records as refuted twice over. The real costs, and the point at which the
+//     trade flips, are written out in full above secretNames there; the short
+//     version is that a shared package would be the first non-test source in a
+//     package whose doc says it has none, and would point internal/logging at
+//     internal/arch. At a THIRD consumer it stops being the cheaper trade.
 //
 //   - THE SKIP LIST IS SHORTER. checkSecretBearingStructsRedact skipped
 //     internal/secret and no longer does (0vk.46 checked that it protected
@@ -448,11 +453,14 @@ func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes
 // checkDeclarationStructAssertions finds a bare `X.Type.(*ast.StructType)` — the
 // question declaredStruct exists to be the only asker of.
 //
-// THE RULE THAT KEEPS 0vk.52 FIXED. Four sites in this file pair each decided
+// THE RULE THAT KEEPS 0vk.52 FIXED. FIVE sites in this file pair each decided
 // whether a declaration was a struct with that assertion, and every one was false
 // for `type T (struct{...})` — legal Go that gofmt preserves, so it reaches main.
-// Routing them through declaredStruct fixes the four that exist; this fixes the
-// fifth, written next year by someone who has not read that helper's comment.
+// Routing them through declaredStruct fixes the five that exist; this fixes the
+// sixth, written next year by someone who has not read that helper's comment, and
+// it scans the whole PACKAGE rather than this file, because a new walk is at
+// least as likely to arrive in a new file. (The brief counted four; the
+// bare-struct guard exists in BOTH copies, and each needed its own plant.)
 //
 // IT IS THE CALLERS' HALF OF 0vk.49'S GUARANTEE. Fail closed covers the
 // PREDICATE — a node kind isSecretString does not recognise. A ParenExpr is
@@ -463,9 +471,14 @@ func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes
 // result of a CALL, stripParens(ts.Type), so it does not match its own rule. The
 // one place allowed to ask is the one place the rule cannot see.
 //
-// MATCHED ON THE AST, not on the file's bytes. The two comments in this file that
-// quote the forbidden spelling in prose are therefore not violations, and a real
-// one cannot hide behind a line break or a renamed variable. An assertion on a
+// MATCHED ON THE AST, not on the file's bytes. The several comments in this file
+// that quote the forbidden spelling in prose are therefore not violations, nor is
+// the const below that holds a whole planted violation as a string — a byte grep
+// would fire on every one of them, and the count changes with each bead, which is
+// why this does not count them. A real violation cannot hide behind a line break
+// or a renamed receiver. It CAN hide behind a local alias — `d := ts.Type` then
+// `d.(*ast.StructType)` — which the /simplify pass planted and confirmed; widening
+// to catch that is dataflow, and the plants are what cover it. An assertion on a
 // plain node — `n.(*ast.StructType)`, which containsAnonymousStruct and the field
 // walk both make — is not a declaration's type and is not this rule's business.
 func checkDeclarationStructAssertions(t *testing.T, rel string, src []byte) []string {
@@ -478,7 +491,7 @@ func checkDeclarationStructAssertions(t *testing.T, rel string, src []byte) []st
 	var found []string
 	ast.Inspect(parsed, func(n ast.Node) bool {
 		asserted, ok := n.(*ast.TypeAssertExpr)
-		if !ok || asserted.Type == nil {
+		if !ok {
 			return true
 		}
 		star, ok := asserted.Type.(*ast.StarExpr)
@@ -520,18 +533,30 @@ func aFifthSite(ts *ast.TypeSpec) {
 // written rather than tested, and this one guards an edit nobody will remember
 // to look for.
 func TestOnlyTheHelperAsksWhetherADeclarationIsAStruct(t *testing.T) {
-	const rel = "internal/logging/redaction_completeness_test.go"
-	var src []byte
+	// THE WHOLE PACKAGE, not this file. An earlier version read only this file,
+	// and the /simplify pass proved the hole by adding a bare assertion to
+	// redaction_completeness_plants_test.go and watching the rule stay green —
+	// which is exactly the "sixth site, written next year" the rule claims to
+	// stop, and that plants file is a plausible home for one.
+	//
+	// PACKAGE AND NOT MODULE, deliberately. These predicates live in two
+	// packages; a module-wide scan would parse 250-odd files, including the
+	// generated lnrpc tree, to police code with no TypeSpec walk in it.
+	scanned := 0
 	for _, f := range moduleGoFiles(t) {
-		if f.rel == rel {
-			src = f.src
+		if f.dir != "internal/logging" {
+			continue
+		}
+		scanned++
+		for _, p := range checkDeclarationStructAssertions(t, f.rel, f.src) {
+			t.Error(p)
 		}
 	}
-	if src == nil {
-		t.Fatalf("did not find %s in the module; this rule is reading the wrong thing", rel)
-	}
-	for _, p := range checkDeclarationStructAssertions(t, rel, src) {
-		t.Error(p)
+	// A self-check that reads nothing passes silently, which is the one failure
+	// this rule cannot afford.
+	if scanned < 2 {
+		t.Errorf("scanned %d files in internal/logging; the package has more than that, so "+
+			"this rule is reading the wrong thing", scanned)
 	}
 	if len(checkDeclarationStructAssertions(t, "planted.go", []byte(plantedFifthSite))) == 0 {
 		t.Error("the planted fifth site was NOT detected; this rule can no longer fail, " +
@@ -543,8 +568,14 @@ func TestOnlyTheHelperAsksWhetherADeclarationIsAStruct(t *testing.T) {
 //
 // Parens are SPELLING, not structure, and gofmt keeps the ones a person writes
 // around a FIELD type or a DECLARATION's type — measured 6 Sep, which is why g5n
-// and 0vk.52 both exist. Around a RECEIVER gofmt removes them, which is why
-// typeString needs no case of its own; that reason is written there.
+// and 0vk.52 both exist. Around a RECEIVER gofmt removes them, so that one
+// spelling cannot reach main at all.
+//
+// The distinction is per QUESTION, not per function: internal/arch's typeString
+// is asked about receivers AND about field types, and it needed a ParenExpr case
+// for the second even though the first can never need one. An earlier draft of
+// this sentence said it needed none, having generalised the receiver measurement;
+// the reasoning now lives at typeString itself, in the copy that has one.
 //
 // ANY NUMBER, not one. gofmt collapses `((struct{...}))` to a single pair, so the
 // doubly parenthesised form cannot reach main through a file — but it reaches

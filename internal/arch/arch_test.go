@@ -1411,11 +1411,13 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		// The walk descends it through declaredStruct now, so the guard must exit
 		// through declaredStruct too, or the node is reported TWICE.
 		//
-		// THIS PAIR IS THE ONLY THING COVERING THE GUARD'S SITE IN THIS COPY. Measured
+		// THIS PAIR IS THE ONLY BEHAVIOURAL COVER FOR THE GUARD'S SITE. Measured
 		// while checking criterion 2: without these rows, reverting namesASecret's
 		// first line to a bare assertion turned NOTHING red here, while every other
 		// site had a plant. The model already carried the equivalent rows; this copy
-		// did not.
+		// did not. TestOnlyTheHelperAsksWhetherADeclarationIsAStruct now catches that
+		// revert too, but it catches the SPELLING; only these rows say what the
+		// behaviour must be, which is that the node is collected once and not twice.
 		{"a parenthesised bare struct", &ast.ParenExpr{X: inner()}, 0},
 		{"a doubly parenthesised bare struct", &ast.ParenExpr{X: &ast.ParenExpr{X: inner()}}, 0},
 	} {
@@ -2197,12 +2199,19 @@ func (s Server) `+method+`() ([]byte, error) {
 // "file, line and %T" half of the claim is pinned on the model's side only.
 //
 // NOTHING DETECTS DRIFT between the copies but the names, so the names are kept
-// identical on purpose (secretNames, isSecretString, namesASecret,
-// secretNaming and its three constants and its String, secretIsAtTheRoot,
-// containsAnonymousStruct, holdsASecret): `grep -rn 'func isSecretString'` finds
-// both. The one difference
-// is deliberate — holdsASecret here guards a nil Fields, which the model does not
-// bother with because the parser always sets it.
+// identical on purpose (secretNames, isSecretString, namesASecret, secretNaming
+// and its three constants and its String, secretIsAtTheRoot,
+// containsAnonymousStruct, holdsASecret, and since 0vk.52 stripParens,
+// declaredStruct, checkDeclarationStructAssertions, plantedFifthSite and
+// TestOnlyTheHelperAsksWhetherADeclarationIsAStruct): `grep -rn 'func
+// isSecretString'` finds both. KEEP THIS LIST FED — it is the whole detector, and
+// the /simplify pass on 0vk.52 found it had not learned that bead's five names.
+//
+// The differences are deliberate and there are two. holdsASecret here guards a
+// nil Fields, which the model does not bother with because the parser always sets
+// it. And the self-check's TEST BODY differs, because each package finds its own
+// files differently — arch reads the directory, the model filters moduleGoFiles —
+// while the SCANNER it calls is byte-identical like everything else.
 //
 // THE TWO MUST AGREE ON WHAT A BEARER IS, and after 0vk.49 that is checkable
 // rather than merely intended: both switches enumerate the same node kinds, and a
@@ -2468,11 +2477,14 @@ func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes
 // checkDeclarationStructAssertions finds a bare `X.Type.(*ast.StructType)` — the
 // question declaredStruct exists to be the only asker of.
 //
-// THE RULE THAT KEEPS 0vk.52 FIXED. Four sites in this file pair each decided
+// THE RULE THAT KEEPS 0vk.52 FIXED. FIVE sites in this file pair each decided
 // whether a declaration was a struct with that assertion, and every one was false
 // for `type T (struct{...})` — legal Go that gofmt preserves, so it reaches main.
-// Routing them through declaredStruct fixes the four that exist; this fixes the
-// fifth, written next year by someone who has not read that helper's comment.
+// Routing them through declaredStruct fixes the five that exist; this fixes the
+// sixth, written next year by someone who has not read that helper's comment, and
+// it scans the whole PACKAGE rather than this file, because a new walk is at
+// least as likely to arrive in a new file. (The brief counted four; the
+// bare-struct guard exists in BOTH copies, and each needed its own plant.)
 //
 // IT IS THE CALLERS' HALF OF 0vk.49'S GUARANTEE. Fail closed covers the
 // PREDICATE — a node kind isSecretString does not recognise. A ParenExpr is
@@ -2483,9 +2495,14 @@ func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes
 // result of a CALL, stripParens(ts.Type), so it does not match its own rule. The
 // one place allowed to ask is the one place the rule cannot see.
 //
-// MATCHED ON THE AST, not on the file's bytes. The two comments in this file that
-// quote the forbidden spelling in prose are therefore not violations, and a real
-// one cannot hide behind a line break or a renamed variable. An assertion on a
+// MATCHED ON THE AST, not on the file's bytes. The several comments in this file
+// that quote the forbidden spelling in prose are therefore not violations, nor is
+// the const below that holds a whole planted violation as a string — a byte grep
+// would fire on every one of them, and the count changes with each bead, which is
+// why this does not count them. A real violation cannot hide behind a line break
+// or a renamed receiver. It CAN hide behind a local alias — `d := ts.Type` then
+// `d.(*ast.StructType)` — which the /simplify pass planted and confirmed; widening
+// to catch that is dataflow, and the plants are what cover it. An assertion on a
 // plain node — `n.(*ast.StructType)`, which containsAnonymousStruct and the field
 // walk both make — is not a declaration's type and is not this rule's business.
 func checkDeclarationStructAssertions(t *testing.T, rel string, src []byte) []string {
@@ -2498,7 +2515,7 @@ func checkDeclarationStructAssertions(t *testing.T, rel string, src []byte) []st
 	var found []string
 	ast.Inspect(parsed, func(n ast.Node) bool {
 		asserted, ok := n.(*ast.TypeAssertExpr)
-		if !ok || asserted.Type == nil {
+		if !ok {
 			return true
 		}
 		star, ok := asserted.Type.(*ast.StarExpr)
@@ -2540,13 +2557,41 @@ func aFifthSite(ts *ast.TypeSpec) {
 // written rather than tested, and this one guards an edit nobody will remember
 // to look for.
 func TestOnlyTheHelperAsksWhetherADeclarationIsAStruct(t *testing.T) {
-	rel := "internal/arch/arch_test.go"
-	src, err := os.ReadFile(filepath.Join(moduleRoot(t), rel))
+	// THE WHOLE PACKAGE, not this file. An earlier version read only
+	// arch_test.go, and the /simplify pass proved the hole by adding a bare
+	// assertion to a sibling file in this package and watching the rule stay
+	// green — which is exactly the "sixth site, written next year" the rule
+	// claims to stop. A new walk is at least as likely to arrive in a new file
+	// as in this one.
+	//
+	// PACKAGE AND NOT MODULE, deliberately. These predicates live in two
+	// packages; a module-wide scan would parse 250-odd files, including the
+	// generated lnrpc tree, to police code that has no TypeSpec walk in it. The
+	// model does the same for the same reason.
+	dir := filepath.Join(moduleRoot(t), "internal/arch")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("reading this rule's own file: %v", err)
+		t.Fatalf("reading this rule's own package: %v", err)
 	}
-	for _, p := range checkDeclarationStructAssertions(t, rel, src) {
-		t.Error(p)
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		scanned++
+		for _, p := range checkDeclarationStructAssertions(t, "internal/arch/"+e.Name(), src) {
+			t.Error(p)
+		}
+	}
+	// A self-check that reads nothing passes silently, which is the one failure
+	// this rule cannot afford.
+	if scanned < 2 {
+		t.Errorf("scanned %d files in internal/arch; the package has more than that, so "+
+			"this rule is reading the wrong thing", scanned)
 	}
 	if len(checkDeclarationStructAssertions(t, "planted.go", []byte(plantedFifthSite))) == 0 {
 		t.Error("the planted fifth site was NOT detected; this rule can no longer fail, " +
@@ -2558,8 +2603,14 @@ func TestOnlyTheHelperAsksWhetherADeclarationIsAStruct(t *testing.T) {
 //
 // Parens are SPELLING, not structure, and gofmt keeps the ones a person writes
 // around a FIELD type or a DECLARATION's type — measured 6 Sep, which is why g5n
-// and 0vk.52 both exist. Around a RECEIVER gofmt removes them, which is why
-// typeString needs no case of its own; that reason is written there.
+// and 0vk.52 both exist. Around a RECEIVER gofmt removes them, so that one
+// spelling cannot reach main at all.
+//
+// The distinction is per QUESTION, not per function: internal/arch's typeString
+// is asked about receivers AND about field types, and it needed a ParenExpr case
+// for the second even though the first can never need one. An earlier draft of
+// this sentence said it needed none, having generalised the receiver measurement;
+// the reasoning now lives at typeString itself, in the copy that has one.
 //
 // ANY NUMBER, not one. gofmt collapses `((struct{...}))` to a single pair, so the
 // doubly parenthesised form cannot reach main through a file — but it reaches

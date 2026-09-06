@@ -104,9 +104,6 @@ type Plain struct {
 			"type Pairing struct {\n\tTokens map[string]secret.String\n}\n",
 		want: "store.Pairing",
 	}, {
-		// Ported from internal/arch, where the go-review pass on 0vk.46 planted it
-		// and watched a secret-bearing struct with no LogValue pass clean. The
-		// parens are not a container; they are spelling, and gofmt keeps them.
 		// PARENS AROUND THE DECLARATION, a different site from parens around a
 		// FIELD type below: g5n taught the PREDICATE that field parens are spelling,
 		// 0vk.52 teaches this WALK the same about a declaration.
@@ -120,6 +117,9 @@ type Plain struct {
 			"type Pairing ((struct {\n\tToken secret.String\n}))\n",
 		want: "store.Pairing",
 	}, {
+		// Ported from internal/arch, where the go-review pass on 0vk.46 planted it
+		// and watched a secret-bearing struct with no LogValue pass clean. The
+		// parens are not a container; they are spelling, and gofmt keeps them.
 		name: "a parenthesised type, which is spelling and not a container",
 		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
 			"type Pairing struct {\n\tToken (secret.String)\n}\n",
