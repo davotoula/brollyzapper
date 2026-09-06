@@ -4429,6 +4429,26 @@ func bake() {
 	_ = m
 }
 `)}), "entity:action pair")
+
+	// A PARENTHESISED CALLEE, which is legal Go that gofmt KEEPS — measured, unlike
+	// a parenthesised receiver, which it rewrites. This rule renders the callee
+	// through typeString, so before 0vk.52 gave that a ParenExpr case the call
+	// rendered as "*ast.ParenExpr", matched no name, and a §6 credential mint
+	// walked past this rule entirely.
+	//
+	// Planted here rather than left as an incidental fix. The go-review pass on
+	// 0vk.52 noticed the improvement and observed that nothing pinned it; on a rule
+	// about who may mint a macaroon, an unpinned improvement is one refactor away
+	// from being an unnoticed regression.
+	t.Run("a parenthesised callee, which gofmt keeps", func(t *testing.T) {
+		catches(t, checkCredentialMintingCallSites(t, []sourceFile{planted("internal/api", `package api
+
+func mint() {
+	m, _ := (node.BakeMacaroon)(ctx, lnd.URIPermissions(perms), 1)
+	_ = m
+}
+`)}), "only the guard holds")
+	})
 }
 
 // §6, d24.1: nothing under regtest/ speaks the socket API in its own words.
