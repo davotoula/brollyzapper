@@ -382,23 +382,28 @@ func TestTheWalletRendersAnOutgoingZapsPayee(t *testing.T) {
 // On the box (2026-09-02, the incident 8vj was filed on) that misreading ended
 // in a 24-hour ceiling ten times looser than intended, on the control whose
 // whole purpose is bounding loss. 8vj fixed what they are told after the
-// refusal; this is the half that stops some of them being refused at all.
+// refusal; this is the half that stops some of them being refused at all — which
+// is why the paragraph now sits ABOVE both forms rather than below them, where
+// only an operator who read past the boxes would have found it.
 //
-// THE TIGHTENING DIRECTION IS THE ONE NAMED, and that is the asymmetry §6 is
-// built on: lowering either limit is the free direction — one click, no code —
-// so an ordering rule that obstructs it is the expensive kind of surprise. The
-// other direction needs a confirmation code anyway, and the paragraph above the
-// forms already explains that ceremony.
+// BOTH DIRECTIONS ARE NAMED, and the reason the first version gave for naming
+// only one was wrong. It said the raising case "needs a confirmation code
+// anyway", implying the ceremony would explain it. Review checked the guard:
+// checkCapPair is called from ApplyChange and NOT from RequestAuthorisation, so
+// raising the per-payment cap past the window is refused only after the operator
+// has fetched the code file and typed the code back in. That direction costs a
+// whole wasted ceremony — it is the MORE expensive one to walk into, not the
+// less, and leaving it unnamed was the opposite of the trade I recorded.
 //
-// THE PHRASE ASSERTED IS THE GUARD'S OWN REMEDY, word for word
-// (internal/guard/operator.go's checkCapPair, "lower the per-payment limit
-// first"). The hint and the refusal are read minutes apart by the same person,
-// and a test that accepted any wording would let them drift into two different
-// instructions for one action. It cannot be shared as a constant — the guard
-// composes it per control inside a switch, and the page is static prose above
-// both forms — so matching text is the only agreement available, and this is
-// what holds it.
-func TestTheSendingPageNamesWhichLimitToLowerFirst(t *testing.T) {
+// WHAT THIS TEST DOES AND DOES NOT GUARANTEE. It asserts the rendered page
+// carries both of the guard's remedies, so the sentence cannot quietly go away.
+// It does NOT hold the page and the guard in step — it pins a literal, so a
+// reword on the guard's side would fail the guard's test and leave this one
+// passing against stale copy, which is exactly the drift it used to claim to
+// prevent. internal/arch's TestTheCapPairRemediesReadTheSameEverywhere is the
+// rule that actually holds it, because it reads the remedies out of the guard's
+// source and requires all three documents to contain them.
+func TestTheSendingPageNamesWhichLimitToMoveFirst(t *testing.T) {
 	renderer := newRenderer(t)
 	var buf bytes.Buffer
 	// GuardReachable, because the caps panel and its hint are behind it: with the
@@ -410,23 +415,31 @@ func TestTheSendingPageNamesWhichLimitToLowerFirst(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
+	// Whitespace-normalised: the sentence wraps in the template and the guard's
+	// string does not.
 	body := strings.Join(strings.Fields(strings.ToLower(buf.String())), " ")
 
-	if !strings.Contains(body, "lower the per-payment limit first") {
-		t.Error(`the Sending page does not say "lower the per-payment limit first"; without it ` +
-			`the hint states the constraint and leaves the operator to discover the order from ` +
-			`a refusal, which is BrollyZap-6zd`)
+	// THE PRECONDITION FIRST, because it is a precondition and not a vacuity
+	// guard — the assertions below are positive Contains checks, so a page that
+	// never rendered the panel already fails them. What this buys is the right
+	// DIAGNOSIS, and it only buys it by running before the messages it corrects.
+	if !strings.Contains(body, "spending limits") {
+		t.Fatal("the spending-limits panel did not render, so the assertions below would " +
+			"report a missing sentence when the whole section is missing")
 	}
-	// The constraint itself is still there — the direction replaces nothing.
+	for _, phrase := range []string{
+		"lower the per-payment limit first",
+		"raise the 24-hour limit first",
+	} {
+		if !strings.Contains(body, phrase) {
+			t.Errorf("the Sending page does not say %q; without it the hint states the "+
+				"constraint and leaves the operator to discover the order from a refusal, "+
+				"which is BrollyZap-6zd", phrase)
+		}
+	}
+	// The constraint's REASON is still there — the direction is an addition to it,
+	// not a replacement for it.
 	if !strings.Contains(body, "could never be reached") {
-		t.Error("the Sending page no longer explains WHY the two limits are ordered; the " +
-			"direction is an addition to that reason, not a replacement for it")
-	}
-	// ANTI-VACUITY: whitespace-normalising a page that failed to render would
-	// leave an empty string that contains nothing, and both checks above would
-	// fire for the wrong reason. This says the render produced the caps panel.
-	if !strings.Contains(body, "set the 24-hour limit") {
-		t.Fatal("the caps panel did not render at all, so the assertions above were not " +
-			"about the sentence they name")
+		t.Error("the Sending page no longer explains WHY the two limits are ordered")
 	}
 }

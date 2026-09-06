@@ -4823,3 +4823,62 @@ func (h holder[T]) LogValue() slog.Value { return slog.StringValue(h.Token.Revea
 			"as an AST node type tells the reader nothing about which type to fix", got)
 	}
 }
+
+// 6zd: the guard's cap-pair remedies are the words the operator-facing documents
+// use, and this is what keeps them so.
+//
+// THE PROBLEM IT SOLVES IS DRIFT IN ONE DIRECTION. checkCapPair composes the two
+// remedies — "lower the per-payment limit first" and "raise the 24-hour limit
+// first" — and the Sending page, MANUAL.html and OPERATING.md all print the same
+// instruction as prose. The hint and the refusal are read minutes apart by the
+// same person, so two wordings for one action is how they become two different
+// instructions.
+//
+// A TEST IN internal/web CANNOT HOLD THIS, and 6zd's first attempt is the proof:
+// it asserted the page against a LITERAL, so rewording the guard would fail the
+// guard's own test, get updated there, and leave the page passing against copy
+// that no longer matched. The assertion has to run from the side that owns the
+// string. Found by review.
+//
+// AND IT CANNOT BE A SHARED CONSTANT: 06v's rule below allows only Change,
+// Control and the three control names to be spoken from outside internal/guard,
+// so an exported remedy consumed by internal/web would be an arch failure in its
+// own right. Matching text really is the only agreement available, which is what
+// makes a rule that checks the text worth its lines.
+func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/guard/operator.go"))
+	if err != nil {
+		t.Fatalf("reading the guard: %v", err)
+	}
+	remedy := regexp.MustCompile(`remedy = "([^"]+)"`)
+	matches := remedy.FindAllStringSubmatch(string(source), -1)
+	// ANTI-VACUITY, and this is the shape that matters: if checkCapPair is ever
+	// rewritten so the remedies are not `remedy = "..."` literals, this rule finds
+	// nothing and every document below "agrees" with an empty set.
+	if len(matches) != 2 {
+		t.Fatalf("found %d cap-pair remedies in internal/guard/operator.go, want 2; this rule "+
+			"reads them out of the source and cannot check documents against a set it "+
+			"failed to find", len(matches))
+	}
+
+	for _, doc := range []string{
+		"internal/web/templates/sending.html",
+		"MANUAL.html",
+		"OPERATING.md",
+	} {
+		body, err := os.ReadFile(filepath.Join(moduleRoot(t), doc))
+		if err != nil {
+			t.Fatalf("reading %s: %v", doc, err)
+		}
+		// Whitespace-normalised, because prose wraps and the guard's string does
+		// not: every one of these three has the phrase broken across a line.
+		flat := strings.Join(strings.Fields(string(body)), " ")
+		for _, m := range matches {
+			if !strings.Contains(flat, m[1]) {
+				t.Errorf("%s does not contain the guard's remedy %q; an operator reads the "+
+					"refusal and the page minutes apart, and two wordings for one action "+
+					"become two different instructions (6zd)", doc, m[1])
+			}
+		}
+	}
+}

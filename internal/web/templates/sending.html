@@ -103,6 +103,10 @@
   <strong>Lowering either takes one click.</strong> Raising one needs the same confirmation code
   as turning sending on — a limit this part of the app could raise on its own would not be a
   limit.</p>
+  <p class="hint">A limit of 0 refuses every payment. The per-payment limit cannot be above the
+  24-hour one, because it could never be reached, so the two move in an order: to lower the
+  24-hour limit below the per-payment one, lower the per-payment limit first; to raise the
+  per-payment limit above the 24-hour one, raise the 24-hour limit first.</p>
   <form method="post" action="/sending/caps">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     <input type="hidden" name="control" value="spend_cap">
@@ -119,9 +123,6 @@
     </label>
     <button type="submit">Set the per-payment limit</button>
   </form>
-  <p class="hint">A limit of 0 refuses every payment. The per-payment limit cannot be above the
-  24-hour one, because it could never be reached. To lower the 24-hour limit below the
-  per-payment one, lower the per-payment limit first.</p>
   {{if and .Sending.Authorisation.Pending (ne .Sending.Authorisation.Control "sending")}}
     {{template "authorisation" .}}
   {{end}}
