@@ -1,6 +1,8 @@
 package logging_test
 
 import (
+	"fmt"
+	"go/ast"
 	"strings"
 	"testing"
 )
@@ -48,7 +50,7 @@ type Plain struct {
 	Name string
 }
 `
-	found, _ := secretBearingTypes(t, []moduleFile{planted("internal/web", "internal/web/web.go", bearers)})
+	found, _, _ := secretBearingTypes(t, []moduleFile{planted("internal/web", "internal/web/web.go", bearers)})
 	names := make([]string, len(found))
 	for i, b := range found {
 		names[i] = b.name
@@ -63,14 +65,14 @@ type Plain struct {
 	}
 
 	// secret.String is matched by name, being the one bearer with no such field.
-	primitive, _ := secretBearingTypes(t, []moduleFile{planted("internal/secret",
+	primitive, _, _ := secretBearingTypes(t, []moduleFile{planted("internal/secret",
 		"internal/secret/secret.go", "package secret\n\ntype String struct {\n\tv string\n}\n")})
 	if len(primitive) != 1 || primitive[0].name != "secret.String" {
 		t.Errorf("the walk did not find secret.String itself: %v", primitive)
 	}
 
 	// A test file is not source: a fixture in a _test.go is not a bearer.
-	if in, _ := secretBearingTypes(t, []moduleFile{planted("internal/web",
+	if in, _, _ := secretBearingTypes(t, []moduleFile{planted("internal/web",
 		"internal/web/web_test.go", bearers)}); len(in) != 0 {
 		t.Errorf("the walk read a _test.go file and found %v; test fixtures are not the "+
 			"module's types", in)
@@ -191,7 +193,7 @@ type Plain struct {
 		want: "store.Pairing",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
-			got, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",
+			got, _, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",
 				"internal/store/nwc.go", c.src)})
 			names := make([]string, len(got))
 			for i, b := range got {
@@ -256,7 +258,7 @@ type Plain struct {
 		want: "",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
-			_, aliases := secretBearingTypes(t, []moduleFile{planted("internal/store",
+			_, aliases, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",
 				"internal/store/nwc.go", c.src)})
 			got := strings.Join(aliases, "\n")
 			switch {
@@ -363,4 +365,71 @@ type Plain struct {
 // need only be distinctive.
 func planted(dir, rel, src string) moduleFile {
 	return moduleFile{rel: rel, dir: dir, path: rel, src: []byte(src)}
+}
+
+// The fail-closed default, pinned (0vk.49).
+//
+// AN UNRECOGNISED NODE CANNOT BE WRITTEN IN REAL SOURCE — that is the whole point
+// of the rule, and it is what makes this plant awkward. Every ast.Expr a field
+// type can actually be now has a case. So the node is SYNTHESISED rather than
+// parsed: handed straight to the predicate, it exercises the same default branch
+// that a Go version with a new type-expression node would reach, without pretending
+// to be Go anybody can write today.
+//
+// The other half — that the exclusion cases are what stand between the tree and
+// this message — cannot be pinned here, because it is a statement about code that
+// is present. It is a mutation check: remove `case *ast.ChanType, *ast.FuncType`
+// and a chan field reports unrecognised instead of nothing. Run on 6 Sep and
+// recorded in the report; TestTheCompletenessRuleDetectsItsOwnViolations' chan
+// subtests are what would notice the case going missing on its own.
+func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
+	names := map[string]bool{"secret": true}
+
+	for _, node := range []ast.Expr{&ast.BadExpr{}, &ast.Ellipsis{}} {
+		t.Run(fmt.Sprintf("%T", node), func(t *testing.T) {
+			unknown := &unknownNodes{}
+			if isSecretString(node, names, unknown) {
+				t.Error("an unrecognised node was answered TRUE. That is the `default: return " +
+					"true` the bead's design constraint rules out: it reports the field as " +
+					"holding a secret, which is a confident wrong diagnosis")
+			}
+			if len(unknown.nodes) != 1 {
+				t.Fatalf("the node was not collected (%d collected); it was answered `not a "+
+					"secret` silently, which is the fail-OPEN behaviour this bead removed",
+					len(unknown.nodes))
+			}
+
+			// The message is the other half of the constraint: it must ask for a
+			// decision, and must not allege a leak.
+			msg := unrecognisedNode("internal/store/nwc.go", 42, unknown.nodes[0])
+			for _, want := range []string{"unrecognised type expression", fmt.Sprintf("%T", node),
+				"internal/store/nwc.go:42", "NOT a report of a leak"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the message does not contain %q:\n%s", want, msg)
+				}
+			}
+			for _, never := range []string{"holds a secret.String", "carries a secret but",
+				"second name"} {
+				if strings.Contains(msg, never) {
+					t.Errorf("the message says %q, which is a diagnosis this rule cannot "+
+						"honestly make about a node kind it does not know:\n%s", never, msg)
+				}
+			}
+		})
+	}
+
+	// Criterion 3: an unrecognised node in a TypeSpec is not a second name for
+	// secret.String. It falls out of the bool answer rather than needing a guard,
+	// and it is planted because the day someone changes that bool is the day
+	// aliasesASecret starts reporting "T gives secret.String a second name" about
+	// a node kind nobody has ever seen.
+	unknown := &unknownNodes{}
+	ts := &ast.TypeSpec{Name: ast.NewIdent("T"), Type: &ast.BadExpr{}}
+	if aliasesASecret(ts, names, unknown) {
+		t.Error("an unrecognised node was reported as a second name for secret.String")
+	}
+	if len(unknown.nodes) != 1 {
+		t.Errorf("aliasesASecret dropped the collector, so a new node kind first met in a "+
+			"TypeSpec would go unreported (%d collected)", len(unknown.nodes))
+	}
 }
