@@ -1769,7 +1769,7 @@ func (s Server) `+method+`() ([]byte, error) {
 	}
 }
 
-// AND FORMAT IS A KNOWN GAP, recorded rather than hidden (BrollyZap filed on the
+// AND FORMAT IS A KNOWN GAP, recorded rather than hidden (BrollyZap-4on, filed on the
 // 0vk.43 branch).
 //
 // 0vk.43's ruling excludes MarshalJSON, MarshalText and Format together, on the
@@ -1871,7 +1871,7 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 //
 // The ParenExpr case is a DIFFERENCE FROM THE MODEL in internal/logging, which
 // does not have it yet — see the differences list on secretBearingTypes there,
-// and BrollyZap filed to close it. Two copies that must agree now disagree by one
+// and BrollyZap-g5n is filed to close it. Two copies that must agree now disagree by one
 // case, which is exactly the drift this pair's comments warn about; it is
 // recorded rather than quietly tolerated.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
