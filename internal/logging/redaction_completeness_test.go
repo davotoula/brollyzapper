@@ -346,13 +346,21 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 // well as values: a secret is no less exposed for being on the left of the colon,
 // and the cost of checking is one recursive call.
 //
-// A NAMED GAP, chosen rather than missed: `chan secret.String` is NOT a bearer.
-// internal/arch plants it and requires it to pass, and that is the intended
-// answer — a channel field renders as an address under slog.Any and under %v, so
-// unlike a slice or a map it cannot spill its contents into a log line. The other
-// container cases are here because they DO print their elements. If a rendering
-// path is ever added that walks a channel, this is the line to revisit, and it
-// should be revisited on that reason rather than by symmetry.
+// The containers here are the ones that PRINT THEIR ELEMENTS. `chan
+// secret.String` is deliberately not a bearer and neither copy treats it as one —
+// the reason is on secretBearingTypes' first bullet, and internal/arch keeps a
+// plant that requires it to pass. Add a case here on that reason, never by
+// symmetry with the containers above.
+//
+// TWO SHAPES ARE STILL UNCOVERED, both filed as BrollyZap-0vk.48 and both present in
+// this copy and internal/arch's alike. `Inner struct{ Token secret.String }` is
+// an *ast.StructType here and has no TypeSpec of its own, so neither the field
+// nor the inner type is ever seen and the CONTAINER escapes the LogValue
+// requirement — the ParenExpr class again, measured green on the whole tree.
+// `Token Box[secret.String]` is an *ast.IndexExpr; that one is a chosen boundary
+// rather than an oversight, because `type Box[T any] struct{ n int }` never
+// stores its T and unwrapping the argument would report a struct holding no
+// secret at all.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
