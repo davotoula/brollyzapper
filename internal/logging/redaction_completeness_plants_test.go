@@ -515,6 +515,19 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		{"a named map valued by one", &ast.MapType{Key: ast.NewIdent("string"), Value: inner()}, 1},
 		{"a named map keyed by one", &ast.MapType{Key: inner(), Value: ast.NewIdent("bool")}, 1},
 		{"a named pointer to one", &ast.StarExpr{X: inner()}, 1},
+		// A WRAPPER HOLDING BOTH: a real secret AND an unrecognised node. The
+		// collector must still see the second, which is only true because
+		// holdsASecret visits every field rather than stopping at the first secret
+		// (0vk.49). Added on the go-review pass, which measured the behaviour as
+		// correct and observed that nothing pinned it — a change back to
+		// slices.ContainsFunc would regress this shape silently while every other
+		// row here stayed green.
+		{"a wrapper holding a secret AND an unrecognised node", &ast.ArrayType{Elt: &ast.StructType{
+			Fields: &ast.FieldList{List: []*ast.Field{
+				{Type: &ast.SelectorExpr{X: ast.NewIdent("secret"), Sel: ast.NewIdent("String")}},
+				{Type: &ast.BadExpr{}},
+			}},
+		}}, 1},
 		// A BARE STRUCT: the walk descends this itself through holdsASecret, so
 		// collecting here as well would report the node twice. Nought is the whole
 		// assertion.

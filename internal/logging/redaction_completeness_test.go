@@ -513,7 +513,21 @@ func secretIsAtTheRoot(expr ast.Expr) bool {
 // at all, and 0vk.49's guarantee stopped at the wrapper. namesASecret now runs
 // isSecretString before this refusal is consulted, so the collection happens and
 // only the REPORT is withheld. A bare struct leaves before that, because the walk
-// descends it itself. Both halves are planted.
+// descends it itself. Both halves are planted.//
+// A GAP THE FAIL-CLOSED DEFAULT DOES NOT COVER, filed as BrollyZap-0vk.52 and
+// pre-existing. `type T (struct{ Token secret.String })` — parentheses around the
+// STRUCT in a type declaration — is legal Go, gofmt keeps them, and with no
+// LogValue anywhere the whole tree stays green; the unparenthesised form is caught
+// at once. isSecretString sees the secret perfectly well, having handled ParenExpr
+// since g5n. What misses is every WALK's `ts.Type.(*ast.StructType)` assertion,
+// which is false for a ParenExpr, so the struct is never handed to holdsASecret.
+//
+// 0vk.49's default reports a node kind the predicate does not RECOGNISE; a
+// ParenExpr is recognised, and what fails is a caller's decision to descend. Fail
+// closed covers the predicate, not its callers — worth knowing next to the
+// guarantee. Note the first line of namesASecret makes the same assertion for a
+// different reason, so a parenthesised struct declaration does NOT take that early
+// return, which is why its inner fields still reach the predicate today.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
