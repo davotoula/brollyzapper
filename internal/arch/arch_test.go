@@ -4823,3 +4823,142 @@ func (h holder[T]) LogValue() slog.Value { return slog.StringValue(h.Token.Revea
 			"as an AST node type tells the reader nothing about which type to fix", got)
 	}
 }
+
+// 6zd: the guard's cap-pair remedies are the words the operator-facing documents
+// use, and this is what keeps them so.
+//
+// THE PROBLEM IT SOLVES IS DRIFT IN ONE DIRECTION. checkCapPair composes the two
+// remedies — "lower the per-payment limit first" and "raise the 24-hour limit
+// first" — and the Sending page, MANUAL.html and OPERATING.md all print the same
+// instruction as prose. The hint and the refusal are read minutes apart by the
+// same person, so two wordings for one action is how they become two different
+// instructions.
+//
+// A TEST IN internal/web CANNOT HOLD THIS, and 6zd's first attempt is the proof:
+// it asserted the page against a LITERAL, so rewording the guard would fail the
+// guard's own test, get updated there, and leave the page passing against copy
+// that no longer matched. The assertion has to run from the side that owns the
+// string. Found by review.
+//
+// AND IT CANNOT BE A SHARED CONSTANT: 06v's rule below allows only Change,
+// Control and the three control names to be spoken from outside internal/guard,
+// so an exported remedy consumed by internal/web would be an arch failure in its
+// own right. Matching text really is the only agreement available, which is what
+// makes a rule that checks the text worth its lines.
+func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/guard/operator.go"))
+	if err != nil {
+		t.Fatalf("reading the guard: %v", err)
+	}
+	remedy := regexp.MustCompile(`remedy = "([^"]+)"`)
+	matches := remedy.FindAllStringSubmatch(string(source), -1)
+	// ANTI-VACUITY, and this is the shape that matters: if checkCapPair is ever
+	// rewritten so the remedies are not `remedy = "..."` literals, this rule finds
+	// nothing and every document below "agrees" with an empty set.
+	if len(matches) != 2 {
+		t.Fatalf("found %d cap-pair remedies in internal/guard/operator.go, want 2; this rule "+
+			"reads them out of the source and cannot check documents against a set it "+
+			"failed to find", len(matches))
+	}
+
+	docs := []string{
+		"internal/web/templates/sending.html",
+		"MANUAL.html",
+		"OPERATING.md",
+	}
+	// lead-in text before each remedy, per document, so the three can be compared
+	// with each other as well as with the guard.
+	leadIn := map[string]map[string]string{}
+
+	for _, doc := range docs {
+		body, err := os.ReadFile(filepath.Join(moduleRoot(t), doc))
+		if err != nil {
+			t.Fatalf("reading %s: %v", doc, err)
+		}
+		// Whitespace-normalised and case-folded. Prose wraps and the guard's
+		// string does not — every one of these three has the phrase broken across
+		// a line — and folding case means a document that opens a sentence with
+		// the remedy is not failed for capitalising it.
+		flat := strings.ToLower(strings.Join(strings.Fields(string(body)), " "))
+		leadIn[doc] = map[string]string{}
+		for _, m := range matches {
+			remedy := strings.ToLower(m[1])
+			at := strings.Index(flat, remedy)
+			if at < 0 {
+				t.Errorf("%s does not contain the guard's remedy %q; an operator reads the "+
+					"refusal and the page minutes apart, and two wordings for one action "+
+					"become two different instructions (6zd)", doc, m[1])
+				continue
+			}
+			leadIn[doc][remedy] = flat[max(0, at-leadInWindow):at]
+		}
+	}
+
+	// AND THE THREE MUST AGREE WITH EACH OTHER, not merely each with the guard.
+	//
+	// Containment alone cannot see a SWAP. A document that paired "to lower the
+	// 24-hour limit below the per-payment one" with "raise the 24-hour limit
+	// first" would still hold both of the guard's remedies verbatim, pass, and
+	// tell the operator the exact opposite of what the guard does. Found by
+	// review, and it is the one failure this rule exists to prevent.
+	//
+	// THE COMMON SUFFIX, not a fixed window, and the first attempt is why. A
+	// fixed lookback reached past the shared clause into each document's own
+	// preamble — "an order: to lower..." against "order.** to lower..." — and
+	// reported a disagreement that was really three different sentences leading
+	// into the same one. What the three owe each other is the CLAUSE that says
+	// which case the remedy answers, not the words before it.
+	//
+	// The clause is not written out here on purpose: it is the documents' prose,
+	// not the guard's, and putting it in this rule would make a fourth copy of
+	// the thing whose copies are the problem.
+	for _, m := range matches {
+		remedy := strings.ToLower(m[1])
+		shared := leadIn[docs[0]][remedy]
+		for _, doc := range docs[1:] {
+			shared = commonSuffix(shared, leadIn[doc][remedy])
+		}
+		if len(shared) < minSharedClause {
+			t.Errorf("the three documents introduce the remedy %q differently — they share "+
+				"only %q before it. Each must say which case this remedy answers, in the "+
+				"same words, or a swapped pairing reads as the opposite instruction while "+
+				"still containing both remedies (6zd)", m[1], shared)
+		}
+	}
+
+	// AND THE TWO REMEDIES MUST BE INTRODUCED DIFFERENTLY, which is the other
+	// half of the same claim: if both were preceded by identical text, the
+	// documents would be naming two remedies for one case and the check above
+	// would be satisfied by prose that distinguishes nothing.
+	if len(matches) == 2 {
+		a := leadIn[docs[0]][strings.ToLower(matches[0][1])]
+		b := leadIn[docs[0]][strings.ToLower(matches[1][1])]
+		if a != "" && a == b {
+			t.Errorf("both remedies are introduced by the same text (%q), so the documents "+
+				"do not say which case each one answers", a)
+		}
+	}
+}
+
+// commonSuffix is the longest ending the two strings share.
+func commonSuffix(a, b string) string {
+	i := 0
+	for i < len(a) && i < len(b) && a[len(a)-1-i] == b[len(b)-1-i] {
+		i++
+	}
+	return a[len(a)-i:]
+}
+
+// leadInWindow is how much text before a remedy the rule keeps, and
+// minSharedClause is how much of it the three documents must have in common.
+//
+// EXPIRY CONDITION: the window has to be long enough to reach past the scenario
+// clause that distinguishes the two remedies, and the minimum long enough that
+// sharing it is a real claim rather than a coincidence of two words. Today's
+// clause — "to lower the 24-hour limit below the per-payment one, " — is 52
+// characters. If it is ever rephrased longer than the window, the rule reports a
+// disagreement that is really a truncation, and these are the numbers to change.
+const (
+	leadInWindow    = 96
+	minSharedClause = 40
+)

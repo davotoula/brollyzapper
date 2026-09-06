@@ -530,3 +530,110 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 		})
 	}
 }
+
+// pou: a request that could never be applied is refused at the REQUEST, and
+// costs nothing on the way.
+//
+// checkCapPair ran only in ApplyChange, which is the end of the ceremony. So
+// raising the per-payment cap above the 24-hour limit issued a code, wrote the
+// file an operator has to go and read, audited the request — and refused only
+// when they came back and typed the code in. A whole ceremony spent on a change
+// that could never be applied, with the ordering rule learned at the most
+// expensive possible moment. 6zd names that order on the Sending page and in
+// OPERATING.md; this is the half that stops the walk.
+//
+// THE THREE THINGS THAT MUST NOT HAPPEN are asserted separately, because each is
+// a different cost to a different person: no code file (the operator is not sent
+// to read one), no stored grant (nothing is outstanding to redeem or supersede),
+// and no audit row (a refused request must not spend the ceremony's audit
+// budget, or a caller who never holds a code can exhaust the trail).
+func TestARequestThatCouldNeverBeAppliedIsRefusedBeforeAnyCodeExists(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	g := openGuardUnpermitted(t, node, d, caps{window: 100_000, payment: 50_000})
+
+	// A LOOSENING, so it gets past the "does not need an authorisation" refusal
+	// and would have been issued a code before pou.
+	err := g.RequestAuthorisation(t.Context(),
+		guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000})
+
+	if err == nil {
+		t.Fatal("a per-payment cap above the 24-hour limit was granted a ceremony; it can " +
+			"never be applied, so the operator would have fetched a code to be refused with it")
+	}
+	if !strings.Contains(err.Error(), "raise the 24-hour limit first") {
+		t.Errorf("the refusal reads %q, want the guard's own remedy — the request and the "+
+			"apply must say the same thing about the same pair", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(d.data, "authorisation.txt")); statErr == nil {
+		t.Error("an authorisation file was written for a change that can never be applied; " +
+			"the operator is sent to read a code that buys them a refusal")
+	}
+	if status, statusErr := g.Status(t.Context()); statusErr != nil {
+		t.Fatalf("Status: %v", statusErr)
+	} else if !status.AuthorisationExpiresAt.IsZero() {
+		t.Error("a grant is outstanding after a refused request; it would supersede a real " +
+			"one and would be redeemable against a change the guard has already refused")
+	}
+
+	// AND NO AUDIT ROW, asserted directly rather than inferred from the absence
+	// of a grant. Every response carries the guard's recent events back to the
+	// server, so this is the same view the server gets. auditAuthorisation draws
+	// on authoriseBudget on every call, and a bound that a REFUSED request can
+	// spend is a bound a caller can exhaust without ever holding a code.
+	resp := g.Handle(t.Context(), guard.Request{
+		Op:     guard.OpRequestAuthorisation,
+		Change: &guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
+	})
+	for _, event := range resp.Events {
+		if event.Event == logging.EventGuardAuthorise {
+			t.Errorf("a refused request recorded %s (%v); the ceremony's audit budget must "+
+				"not be spent by a change the guard refused before issuing anything",
+				event.Event, event.Attrs)
+		}
+	}
+	// ANTI-VACUITY: if the socket path stopped answering this operation at all,
+	// the loop above would pass over an empty slice and assert nothing.
+	if resp.Error == "" {
+		t.Error("the socket path granted the request that the direct call refused; the two " +
+			"must agree, or the server can obtain what the guard would not give")
+	}
+}
+
+// And ApplyChange keeps its own check, which is not redundant.
+//
+// The state can move between the request and the redemption: a grant for a
+// per-payment raise is outstanding, and the operator meanwhile lowers the
+// 24-hour limit — a tightening, free and needing no code — so the pair is
+// consistent when the code is issued and inconsistent when it is spent. Only the
+// check at apply time can see that, which is why pou ADDS a check rather than
+// moving one.
+func TestAPairMadeInconsistentAfterTheRequestIsStillRefusedAtApply(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	g := openGuardUnpermitted(t, node, d, caps{window: 200_000, payment: 50_000})
+
+	// Consistent at request time: 150k per-payment sits under the 200k window.
+	raise := guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000}
+	if err := g.RequestAuthorisation(t.Context(), raise); err != nil {
+		t.Fatalf("the request should have been issued; the pair is consistent: %v", err)
+	}
+	code := readAuthorisationCode(t, d)
+
+	// Then the window comes down under it — a tightening, so no code needed.
+	if err := g.ApplyChange(t.Context(),
+		guard.Change{Control: guard.ControlSpendCap, Msat: 100_000}, ""); err != nil {
+		t.Fatalf("lowering the window is a tightening and must be free: %v", err)
+	}
+
+	// The grant is still valid, the code is still right, and the change is now
+	// unapplicable. This is the case the request-time check cannot see.
+	err := g.ApplyChange(t.Context(), raise, code)
+	if err == nil {
+		t.Fatal("a stale grant applied a per-payment cap above the window; the pair is only " +
+			"inconsistent at apply time, which is why both checks exist")
+	}
+	if !strings.Contains(err.Error(), "raise the 24-hour limit first") {
+		t.Errorf("the refusal reads %q, want the cap-pair remedy", err)
+	}
+}
