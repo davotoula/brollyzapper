@@ -333,8 +333,8 @@ func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
 }
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it
-// is spelled and however it is wrapped. See the third bullet on
-// secretBearingTypes for the four spellings that used to get through.
+// is spelled and however it is wrapped. See the FIRST bullet on
+// secretBearingTypes for the seven spellings that used to get through.
 func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
 		return isSecretString(field.Type, names)
