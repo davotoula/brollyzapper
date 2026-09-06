@@ -386,16 +386,26 @@ const (
 	namesAContainerOfSecrets
 )
 
+// String names the answer, so a red build reads `namesAContainerOfSecrets`
+// rather than `2`. In the deliberately-identical set with the rest.
+func (n secretNaming) String() string {
+	switch n {
+	case namesSecretItself:
+		return "namesSecretItself"
+	case namesAContainerOfSecrets:
+		return "namesAContainerOfSecrets"
+	default:
+		return "namesNoSecret"
+	}
+}
+
 // namesASecret classifies what ts does to secret.String.
 //
-// FORBIDDEN RATHER THAN RESOLVED, for both answers. Following a second name — or
-// a container's name — to the fields typed with it means resolving types across a
-// package, which is go/types and a much larger rule. Refusing the shape costs a
-// few lines and cannot be got wrong. Redefinition is grouped with the alias
-// because it is the worse of the two: a defined type over secret.String inherits
-// none of String, GoString, LogValue or MarshalJSON, so it is a secret that has
-// lost every one of its redactions. A CONTAINER loses nothing, which is exactly
-// why it needed its own message.
+// FORBIDDEN RATHER THAN RESOLVED, for both answers: following a name to the
+// fields typed with it is go/types and a much larger rule. Redefinition is
+// grouped with the alias because it is the worse of the two — a defined type over
+// secret.String inherits none of String, GoString, LogValue or MarshalJSON. A
+// CONTAINER loses nothing, which is exactly why it needed its own message.
 //
 // AN UNRECOGNISED NODE IS NEITHER, and that falls out of the answers rather than
 // needing a guard: isSecretString collects the node and still returns false, so
@@ -403,49 +413,57 @@ const (
 // the walk and never as a name. The collector is threaded through because a
 // TypeSpec is exactly as good a place to meet a new node kind as a field is
 // (0vk.49).
+//
+// THE ORDER OF THESE FOUR TESTS IS THE DESIGN, and an earlier arrangement of it
+// needed a discarded bool and a nested guard to say the same thing. Each line
+// earns its place:
+//
+//   - A BARE STRUCT LEAVES FIRST because the WALK descends it, through
+//     holdsASecret. Running the predicate here as well would collect every
+//     unrecognised node inside it TWICE (0vk.51). This is the only exit that must
+//     come before isSecretString.
+//   - isSecretString RUNS ON EVERYTHING ELSE, and that is what carries 0vk.49's
+//     guarantee into a named wrapper: `type T []struct{...}` is undiagnosed but
+//     its inner fields still reach the predicate, so a node kind first written in
+//     there is still collected. Collecting is not diagnosing.
+//   - THE ANONYMOUS-STRUCT REFUSAL COMES LAST, after the collection has happened
+//     and after identity has been decided, because it is only about what to
+//     REPORT.
 func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) secretNaming {
-	if containsAnonymousStruct(ts.Type) {
-		// COLLECTION WITHOUT DIAGNOSIS (0vk.51). This family is deliberately
-		// undiagnosed — a named wrapper over an anonymous struct is neither a
-		// second name nor, under 0vk.50's ruling, a reported container — but
-		// refusing here used to mean isSecretString never ran on it at all, and the
-		// walk then fell through because ts.Type is an ArrayType or a MapType
-		// rather than a StructType. So 0vk.49's guarantee stopped at the wrapper:
-		// a node kind first written inside `type T []struct{...}` was never
-		// collected. Measured with the ChanType case dropped: the plain struct
-		// reported one unrecognised node and all three wrapper forms reported none.
-		//
-		// The bool is discarded, which is the whole point — collecting is not
-		// diagnosing, and the two are separate outputs precisely so one can happen
-		// without the other.
-		//
-		// ONLY FOR A WRAPPER. A bare `type T struct{...}` is descended by the walk
-		// itself, through holdsASecret, so running the predicate here as well would
-		// report every new node kind in it TWICE. The type assertion is what keeps
-		// the two paths disjoint, and it is planted.
-		if _, isBareStruct := ts.Type.(*ast.StructType); !isBareStruct {
-			_ = isSecretString(ts.Type, names, unknown)
-		}
+	if _, isBareStruct := ts.Type.(*ast.StructType); isBareStruct {
 		return namesNoSecret
 	}
 	if !isSecretString(ts.Type, names, unknown) {
 		return namesNoSecret
 	}
-	if denotesSecretString(ts.Type, names) {
+	if secretIsAtTheRoot(ts.Type) {
 		return namesSecretItself
+	}
+	if containsAnonymousStruct(ts.Type) {
+		return namesNoSecret
 	}
 	return namesAContainerOfSecrets
 }
 
-// denotesSecretString reports whether expr IS secret.String rather than merely
-// containing one — the identity half of the question above.
+// secretIsAtTheRoot reports whether the secret isSecretString just found is the
+// type ITSELF rather than something inside a container.
+//
+// ONLY MEANINGFUL AFTER isSecretString HAS SAID YES, which is why it takes no
+// names map and asks only about SHAPE. Once the predicate is true, the only
+// leaves it accepts are a selector or an identifier it has ALREADY matched
+// against the import names; every other node it accepts is a container. So
+// re-testing the name here would be a second statement of the secret.String
+// spelling, in a file pair whose last four beads were each one predicate learning
+// a spelling the other had not. Measured 6 Sep: with isSecretString true, this
+// function and a shape-only test agree on every input.
+//
+// The name says "the secret" for that reason — outside the precondition it would
+// call `type T = fmt.Stringer` a root, and there is exactly one caller.
 //
 // Parentheses are stripped and nothing else is: they are spelling, as
-// isSecretString has held since g5n, and `type T = (secret.String)` is as much an
-// alias as the unparenthesised form. Every other node — a pointer, a slice, a map
-// — makes T a container of secrets and not a name for one, which is the whole
-// distinction 0vk.50 exists to draw.
-func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
+// isSecretString has held since g5n, so `type T = (secret.String)` is as much an
+// alias as the unparenthesised form.
+func secretIsAtTheRoot(expr ast.Expr) bool {
 	for {
 		paren, ok := expr.(*ast.ParenExpr)
 		if !ok {
@@ -453,12 +471,9 @@ func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
 		}
 		expr = paren.X
 	}
-	switch t := expr.(type) {
-	case *ast.SelectorExpr:
-		pkg, ok := t.X.(*ast.Ident)
-		return ok && names[pkg.Name] && t.Sel.Name == "String"
-	case *ast.Ident:
-		return names["."] && t.Name == "String"
+	switch expr.(type) {
+	case *ast.SelectorExpr, *ast.Ident:
+		return true
 	default:
 		return false
 	}
@@ -467,9 +482,9 @@ func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
 // containsAnonymousStruct reports whether expr has an anonymous struct type
 // anywhere inside it.
 //
-// IT EXISTS TO KEEP namesASecret ASKING ITS OWN QUESTION. That rule is about
-// IDENTITY — "is this a second NAME for secret.String" — and it answers it by
-// reusing isSecretString, which is about CONTAINMENT. The two agreed until
+// IT EXISTS TO KEEP namesASecret FROM CALLING A STRUCT FAMILY EITHER OF ITS TWO
+// ANSWERS. Since 0vk.50 that rule answers IDENTITY or CONTAINER, and it decides
+// both by reusing isSecretString, which is about CONTAINMENT. The two agreed until
 // 0vk.48 taught isSecretString to see into an anonymous struct: after that,
 // `type T []struct{ Token secret.String }` made isSecretString true, and
 // namesASecret reported "T gives secret.String a second name; a redefinition
@@ -481,22 +496,24 @@ func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
 // A struct is never a second name for secret.String — it is a different type
 // that happens to hold one — so this refuses the whole family and leaves
 // namesASecret exactly as it behaved before 0vk.48. It subsumes the bare
-// `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
+// `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself
+// — 0vk.51 then reintroduced that assertion as namesASecret's first line, NOT as
+// a detector but to keep the collector's path disjoint from the walk's, so there
+// are deliberately two struct tests now and they answer different questions.
 //
-// THE BROADER CONFLATION IS CLOSED (0vk.50). `type T []secret.String` and `type T
-// *secret.String` were reported as second names and are not ones; they are now
-// classified as containers and get a message that is true of one. That is why
-// namesASecret returns three answers rather than a bool, and why it is no longer
-// called aliasesASecret.
+// THE BROADER CONFLATION IS CLOSED (0vk.50) — `type T []secret.String` and `type
+// T *secret.String` are classified as containers now, not as second names. The
+// argument is on secretNaming, where the decision lives; it is not restated here,
+// because this file pair has already paid for a fact written in three places.
 //
 // AND REFUSING HERE NO LONGER HIDES A NODE KIND (0vk.51). The refusal happens
 // before isSecretString is called, and the walk then falls through because
 // ts.Type is an ArrayType or a MapType rather than a StructType — so for `type T
-// []struct{...}` and the map forms the inner fields used to reach the predicate
-// never, and 0vk.49's guarantee stopped at the wrapper. namesASecret now runs the
-// predicate for the COLLECTOR's sake and discards the bool, for wrappers only:
-// a bare struct is descended by the walk itself, and running it here too would
-// report every new node kind in it twice. Both halves are planted.
+// []struct{...}` and the map forms, the inner fields never reached the predicate
+// at all, and 0vk.49's guarantee stopped at the wrapper. namesASecret now runs
+// isSecretString before this refusal is consulted, so the collection happens and
+// only the REPORT is withheld. A bare struct leaves before that, because the walk
+// descends it itself. Both halves are planted.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
