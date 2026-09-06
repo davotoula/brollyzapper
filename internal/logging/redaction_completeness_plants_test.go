@@ -134,6 +134,47 @@ type Plain struct {
 			"type Pairing struct {\n\tToken (func() secret.String)\n}\n",
 		want: "",
 	}, {
+		// THE ANONYMOUS NESTED STRUCT (0vk.48), reported against its CONTAINER.
+		// The inner struct has no TypeSpec, so the walk never visits it and it has
+		// no name to report; Pairing is the type that needs the LogValue.
+		name: "an anonymous nested struct, reported against its container",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tName  string\n\tInner struct{ Token secret.String }\n}\n",
+		want: "store.Pairing",
+	}, {
+		// Two levels, because RECURSION is the claim: a case that looked one field
+		// deep would satisfy the plant above and miss this one.
+		name: "an anonymous nested struct two levels down",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tInner struct {\n\t\tDeeper struct{ Token secret.String }\n\t}\n}\n",
+		want: "store.Pairing",
+	}, {
+		// THE CONTROL, and the reason the case is not merely symmetry with the
+		// containers: a nested struct holding no secret must not make its container
+		// a bearer. `case *ast.StructType: return true` would pass both plants above
+		// and fail this one.
+		name: "an anonymous nested struct holding no secret is not one",
+		src:  "package store\n\ntype Pairing struct {\n\tInner struct{ Count int }\n}\n",
+		want: "",
+	}, {
+		// THE BOUNDARY COMPOSES THROUGH THE NESTING. A nested struct whose only
+		// secret sits behind a channel is still not a bearer, for the same reason a
+		// parenthesised chan is still a chan — otherwise the nested case would have
+		// quietly widened the chan exclusion.
+		name: "a nested struct holding only a chan is still not a bearer",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tInner struct{ C chan secret.String }\n}\n",
+		want: "",
+	}, {
+		// And the containers compose with it in the other direction: a nested
+		// struct reached through a pointer, a slice or a map value is still reached.
+		name: "a nested struct behind a pointer, a slice and a map value",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tOne   *struct{ Token secret.String }\n" +
+			"\tMany  []struct{ Token secret.String }\n" +
+			"\tKeyed map[string]struct{ Token secret.String }\n}\n",
+		want: "store.Pairing",
+	}, {
 		// And it composes with the containers rather than shadowing them: parens
 		// around a pointer, and parens around parens, are both still the secret.
 		name: "a parenthesised pointer, and parens around parens",
