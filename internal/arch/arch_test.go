@@ -1297,17 +1297,6 @@ type creds struct {
 `)}), "must be secret.String")
 }
 
-// §12: a struct that HOLDS a secret must be able to redact itself.
-//
-// The rule above makes the field a secret.String, which stops the secret from
-// being printed. This is the other half, and §12 states it as a requirement
-// rather than a suggestion — "every type holding a secret must implement
-// slog.LogValuer" — because slog.Any on such a struct otherwise emits every
-// OTHER field in full. store.NWCConnection was the first violation, and §12 uses
-// that very type as its worked example.
-//
-// A rule and not a review note because the trigger is adding a field, which is
-// the least conspicuous edit there is.
 // The fail-closed default, pinned (0vk.49). The model
 // (internal/logging/redaction_completeness_plants_test.go) carries the same
 // plant and the reasoning; this is the arch half, kept because the two copies
@@ -1363,6 +1352,17 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 	}
 }
 
+// §12: a struct that HOLDS a secret must be able to redact itself.
+//
+// The rule above makes the field a secret.String, which stops the secret from
+// being printed. This is the other half, and §12 states it as a requirement
+// rather than a suggestion — "every type holding a secret must implement
+// slog.LogValuer" — because slog.Any on such a struct otherwise emits every
+// OTHER field in full. store.NWCConnection was the first violation, and §12 uses
+// that very type as its worked example.
+//
+// A rule and not a review note because the trigger is adding a field, which is
+// the least conspicuous edit there is.
 func TestEverySecretBearingStructRedactsItself(t *testing.T) {
 	// NO SKIP ARGUMENT any more, and internal/secret is now scanned like every
 	// other package (0vk.46). The skip protected nothing: internal/secret
@@ -1538,6 +1538,31 @@ type pairing struct {
 	Fn  func() secret.String
 	Any any
 	Rdr interface{ Read() secret.String }
+}
+`)}))
+	})
+
+	// THE GENERIC FIELD, the one exclusion that had no plant in either copy until
+	// 0vk.49: the module has no generic-typed struct field, so deleting the
+	// IndexExpr/IndexListExpr case was invisible to the whole gate. Excluded rather
+	// than unwrapped because `type Box[T any] struct{ n int }` never stores its T,
+	// so following the type ARGUMENT would report a struct holding no secret.
+	//
+	// clean() is what makes this a guard now: since 0vk.49 an unrecognised node is
+	// a problem like any other, so deleting the case turns this red on the
+	// unrecognised message rather than leaving it silently green.
+	t.Run("a generic field is a boundary, not a bearer", func(t *testing.T) {
+		clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type Box[T any] struct{ n int }
+
+type Pair[K comparable, V any] struct{ n int }
+
+type pairing struct {
+	One Box[secret.String]
+	Two Pair[string, secret.String]
 }
 `)}))
 	})
@@ -2017,6 +2042,13 @@ func (s Server) `+method+`() ([]byte, error) {
 // cheaper trade at two consumers. AT THREE IT IS NOT: that is the moment to make
 // the package, and this paragraph is the argument ready-made.
 //
+// ONE DELIBERATE ASYMMETRY, recorded so nobody "fixes" it: unrecognisedNode here
+// takes only the expression, where the model's takes file and line as well. This
+// package's `problem` already renders `file:line: msg`, so a message carrying its
+// own position would print it twice; the model's aliases and unrecognised entries
+// are bare strings that have to describe themselves. The consequence is that the
+// "file, line and %T" half of the claim is pinned on the model's side only.
+//
 // NOTHING DETECTS DRIFT between the copies but the names, so the names are kept
 // identical on purpose (secretNames, isSecretString, aliasesASecret,
 // holdsASecret): `grep -rn 'func isSecretString'` finds both. The one difference
@@ -2068,8 +2100,6 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 // The model's own comment (internal/logging/redaction_completeness_test.go)
 // carries why a collector was chosen over a third return value or a t.Fatalf.
 type unknownNodes struct{ nodes []ast.Expr }
-
-func (u *unknownNodes) add(expr ast.Expr) { u.nodes = append(u.nodes, expr) }
 
 // unrecognisedNode is what the walk reports for one. It says UNRECOGNISED and
 // never that a secret was found — see the fail-closed paragraph on
@@ -2149,7 +2179,17 @@ func isSecretString(expr ast.Expr, names map[string]bool, unknown *unknownNodes)
 		return holdsASecret(t, names, unknown)
 	case *ast.SelectorExpr:
 		pkg, ok := t.X.(*ast.Ident)
-		return ok && names[pkg.Name] && t.Sel.Name == "String"
+		if !ok {
+			// The one refusal left inside this switch that was silent, and under a
+			// rule whose whole claim is that none of them are. A qualified type
+			// name is always ident.Name in legal Go — `pkg.Pair[T]` arrives as an
+			// IndexExpr, not as a nested selector — so this is unreachable today.
+			// "Unreachable today" is exactly what the four beads before this one
+			// were each told about the case they were missing.
+			unknown.nodes = append(unknown.nodes, expr)
+			return false
+		}
+		return names[pkg.Name] && t.Sel.Name == "String"
 	case *ast.Ident:
 		return names["."] && t.Name == "String"
 
@@ -2183,7 +2223,7 @@ func isSecretString(expr ast.Expr, names map[string]bool, unknown *unknownNodes)
 		return false
 
 	default:
-		unknown.add(expr)
+		unknown.nodes = append(unknown.nodes, expr)
 		return false
 	}
 }
@@ -2226,6 +2266,17 @@ func aliasesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNod
 // The BROADER conflation is older than this bead and is left alone: `type T
 // []secret.String` and `type T *secret.String` are reported as second names
 // today and are not ones either. That is BrollyZap-0vk.50.
+//
+// ONE CONSEQUENCE FOR 0vk.49'S GUARANTEE, measured and filed as BrollyZap-0vk.51.
+// Refusing here happens BEFORE isSecretString is called, and the walk then falls
+// through because ts.Type is not a *ast.StructType — so for `type T
+// []struct{...}` and `type T map[string]struct{...}` the inner struct's fields
+// are never handed to the predicate at all, and a node kind first written in
+// there is never collected. With the ChanType case removed, a plain `type T
+// struct{ C chan secret.String }` reports one unrecognised node and the named
+// slice reports none. Collecting is not diagnosing, so it is fixable without
+// changing what is reported — but it is held behind 0vk.50, which owns whether
+// this family is reported at all and would move the same guard.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {

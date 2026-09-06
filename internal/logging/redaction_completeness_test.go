@@ -248,7 +248,6 @@ const markerPrefix = "//redaction:covers "
 func secretBearingTypes(t *testing.T, files []moduleFile) (
 	bearers []secretBearer, aliases, unrecognised []string) {
 	t.Helper()
-	var found []secretBearer
 	fset := token.NewFileSet()
 	for _, f := range files {
 		if strings.HasSuffix(f.rel, "_test.go") {
@@ -292,7 +291,7 @@ func secretBearingTypes(t *testing.T, files []moduleFile) (
 			if name != "secret.String" && !holdsASecret(st, names, unknown) {
 				return true
 			}
-			found = append(found, secretBearer{
+			bearers = append(bearers, secretBearer{
 				name: name,
 				dir:  f.dir,
 				file: f.rel,
@@ -305,8 +304,8 @@ func secretBearingTypes(t *testing.T, files []moduleFile) (
 				unrecognisedNode(f.rel, fset.Position(expr.Pos()).Line, expr))
 		}
 	}
-	slices.SortFunc(found, func(a, b secretBearer) int { return strings.Compare(a.name, b.name) })
-	return found, aliases, unrecognised
+	slices.SortFunc(bearers, func(a, b secretBearer) int { return strings.Compare(a.name, b.name) })
+	return bearers, aliases, unrecognised
 }
 
 // secretNames returns the identifiers that mean secret.String in this file: the
@@ -383,6 +382,17 @@ func aliasesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNod
 // The BROADER conflation is older than this bead and is left alone: `type T
 // []secret.String` and `type T *secret.String` are reported as second names
 // today and are not ones either. That is BrollyZap-0vk.50.
+//
+// ONE CONSEQUENCE FOR 0vk.49'S GUARANTEE, measured and filed as BrollyZap-0vk.51.
+// Refusing here happens BEFORE isSecretString is called, and the walk then falls
+// through because ts.Type is not a *ast.StructType — so for `type T
+// []struct{...}` and `type T map[string]struct{...}` the inner struct's fields
+// are never handed to the predicate at all, and a node kind first written in
+// there is never collected. With the ChanType case removed, a plain `type T
+// struct{ C chan secret.String }` reports one unrecognised node and the named
+// slice reports none. Collecting is not diagnosing, so it is fixable without
+// changing what is reported — but it is held behind 0vk.50, which owns whether
+// this family is reported at all and would move the same guard.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
@@ -423,17 +433,19 @@ func holdsASecret(st *ast.StructType, names map[string]bool, unknown *unknownNod
 // It would also put a *testing.T inside a pure predicate, in a package whose whole
 // design is scanners that RETURN problems and Test wrappers that assert them.
 //
-// A third outcome — (secret bool, unknown ast.Expr) — is pure, but every
-// recursion site then has to decide how to combine two answers, and a map with an
-// unrecognised key and a secret value has no single right pair to return. A
-// collector keeps the bool answer clean and records the two facts independently.
+// A third outcome is pure and is rejected on WEIGHT, not on impossibility — an
+// earlier draft of this comment said a map with an unrecognised key and a secret
+// value "has no single right pair to return", which is true of
+// (bool, ast.Expr) and false of (bool, []ast.Expr), where the combination is
+// plainly concatenation. The honest reason is that threading a returned slice
+// through six recursion sites IS this collector, hand-written, with a join
+// allocation at every site. Same conclusion; the reader who spots the difference
+// should not be left thinking the choice rested on a mistake.
 //
 // It holds ast.Expr rather than a formatted string because the predicate has no
 // FileSet and no filename; the caller resolves the position, which is the only
 // place that can.
 type unknownNodes struct{ nodes []ast.Expr }
-
-func (u *unknownNodes) add(expr ast.Expr) { u.nodes = append(u.nodes, expr) }
 
 // unrecognisedNode is what the walk reports for one. It says UNRECOGNISED and
 // never that a secret was found — see the fail-closed paragraph on
@@ -510,7 +522,17 @@ func isSecretString(expr ast.Expr, names map[string]bool, unknown *unknownNodes)
 		return holdsASecret(t, names, unknown)
 	case *ast.SelectorExpr:
 		pkg, ok := t.X.(*ast.Ident)
-		return ok && names[pkg.Name] && t.Sel.Name == "String"
+		if !ok {
+			// The one refusal left inside this switch that was silent, and under a
+			// rule whose whole claim is that none of them are. A qualified type
+			// name is always ident.Name in legal Go — `pkg.Pair[T]` arrives as an
+			// IndexExpr, not as a nested selector — so this is unreachable today.
+			// "Unreachable today" is exactly what the four beads before this one
+			// were each told about the case they were missing.
+			unknown.nodes = append(unknown.nodes, expr)
+			return false
+		}
+		return names[pkg.Name] && t.Sel.Name == "String"
 	case *ast.Ident:
 		// A bare String: either the package was dot-imported, or this file IS
 		// package secret.
@@ -545,7 +567,7 @@ func isSecretString(expr ast.Expr, names map[string]bool, unknown *unknownNodes)
 		return false
 
 	default:
-		unknown.add(expr)
+		unknown.nodes = append(unknown.nodes, expr)
 		return false
 	}
 }

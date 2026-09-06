@@ -121,6 +121,18 @@ type Plain struct {
 			"type Pairing struct {\n\tToken String\n}\n",
 		want: "",
 	}, {
+		// THE GENERIC FIELD, which until 0vk.49 had no plant in either copy: the
+		// module has no generic-typed struct field, so deleting the
+		// IndexExpr/IndexListExpr case was invisible to the entire gate. Excluded
+		// rather than unwrapped because `type Box[T any] struct{ n int }` never
+		// stores its T — see isSecretString. With the collector asserted above,
+		// this row now fails if that case is removed.
+		name: "a generic field is a boundary, not a bearer",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Box[T any] struct{ n int }\n\n" +
+			"type Pairing struct {\n\tOne Box[secret.String]\n}\n",
+		want: "",
+	}, {
 		// THE BOUNDARY THE PAREN CASE MUST NOT CROSS. Parens unwrap SPELLING, and
 		// the shapes deliberately excluded stay excluded when they are wrapped in
 		// them — a parenthesised channel is still a channel. Kept because the
@@ -193,7 +205,7 @@ type Plain struct {
 		want: "store.Pairing",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
-			got, _, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",
+			got, _, unrecognised := secretBearingTypes(t, []moduleFile{planted("internal/store",
 				"internal/store/nwc.go", c.src)})
 			names := make([]string, len(got))
 			for i, b := range got {
@@ -201,6 +213,19 @@ type Plain struct {
 			}
 			if strings.Join(names, ",") != c.want {
 				t.Errorf("the walk found %v, want %q", names, c.want)
+			}
+			// EVERY ROW ASSERTS THIS, and it is what makes the exclusion cases
+			// guarded at all. Discarding the third value was measured on 6 Sep to
+			// leave chan, func and interface deletable from isSecretString with
+			// this whole test still green: a collected-but-dropped node looks
+			// exactly like a field that is not a bearer. The rows below that
+			// expect `want: ""` are the exclusions, so a deleted case turns them
+			// red here rather than relying on the module happening to contain a
+			// field of that shape.
+			if len(unrecognised) != 0 {
+				t.Errorf("the walk did not recognise a node it is supposed to have a case "+
+					"for; an exclusion has probably been deleted from isSecretString:\n%s",
+					strings.Join(unrecognised, "\n"))
 			}
 		})
 	}
@@ -258,8 +283,12 @@ type Plain struct {
 		want: "",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
-			_, aliases, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",
+			_, aliases, unrecognised := secretBearingTypes(t, []moduleFile{planted("internal/store",
 				"internal/store/nwc.go", c.src)})
+			if len(unrecognised) != 0 {
+				t.Errorf("the walk did not recognise a node it has a case for:\n%s",
+					strings.Join(unrecognised, "\n"))
+			}
 			got := strings.Join(aliases, "\n")
 			switch {
 			case c.want == "" && got != "":
@@ -377,11 +406,14 @@ func planted(dir, rel, src string) moduleFile {
 // to be Go anybody can write today.
 //
 // The other half — that the exclusion cases are what stand between the tree and
-// this message — cannot be pinned here, because it is a statement about code that
-// is present. It is a mutation check: remove `case *ast.ChanType, *ast.FuncType`
-// and a chan field reports unrecognised instead of nothing. Run on 6 Sep and
-// recorded in the report; TestTheCompletenessRuleDetectsItsOwnViolations' chan
-// subtests are what would notice the case going missing on its own.
+// this message — is pinned by the tables in
+// TestTheCompletenessRuleDetectsItsOwnViolations, every row of which now asserts
+// that the walk recognised everything it was handed. AN EARLIER VERSION OF THIS
+// COMMENT CLAIMED THOSE ROWS ALREADY DID THAT AND THEY DID NOT: they discarded
+// the collector, so all four exclusions could be deleted from isSecretString with
+// the whole plant file green, and the only thing that noticed was the module-wide
+// test — which noticed only because the tree happens to contain chan and func
+// fields today. Source coincidence is not a plant. Measured, and fixed, 6 Sep.
 func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 	names := map[string]bool{"secret": true}
 
