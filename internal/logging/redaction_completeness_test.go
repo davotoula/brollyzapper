@@ -202,10 +202,16 @@ const markerPrefix = "//redaction:covers "
 //     now agree on every one of those shapes, and both keep permanent plants for
 //     them. A SEVENTH spelling — `Token (secret.String)`, where the parens are
 //     not a container but spelling — evaded both, was closed in arch by 0vk.46
-//     and here by g5n; the two copies now agree on every spelling there is.
-//     Neither treats `chan secret.String` as a bearer, and that is deliberate on
-//     both sides: a channel field renders as an address under slog.Any and %v, so
-//     it cannot spill its contents into a log line the way a slice or map can.
+//     and here by g5n. An EIGHTH — `Inner struct{ Token secret.String }`, which
+//     has no TypeSpec of its own so neither walk ever visited it — evaded both
+//     until 0vk.48 closed it in the two copies together.
+//
+//     AND WITH THAT THE FAMILY IS CLOSED, by ruling on 6 Sep 2026: every further
+//     shape needs go/types, which is a different decision and not another case.
+//     The two boundaries that remain are deliberate and are written out on
+//     isSecretString — channel, func and interface fields, which render as an
+//     address and cannot spill; and a generic field like `Token Box[secret.String]`,
+//     where unwrapping the type argument would report a struct that stores nothing.
 //
 //     The code is duplicated rather than shared, because this file is
 //     `package logging_test` and a test file cannot be imported; if a third rule
@@ -326,10 +332,43 @@ func secretNames(file *ast.File) map[string]bool {
 // over secret.String does NOT inherit String, GoString, LogValue or MarshalJSON,
 // so it is a secret that has lost every one of its redactions.
 func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
-	if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+	if containsAnonymousStruct(ts.Type) {
 		return false
 	}
 	return isSecretString(ts.Type, names)
+}
+
+// containsAnonymousStruct reports whether expr has an anonymous struct type
+// anywhere inside it.
+//
+// IT EXISTS TO KEEP aliasesASecret ASKING ITS OWN QUESTION. That rule is about
+// IDENTITY — "is this a second NAME for secret.String" — and it answers it by
+// reusing isSecretString, which is about CONTAINMENT. The two agreed until
+// 0vk.48 taught isSecretString to see into an anonymous struct: after that,
+// `type T []struct{ Token secret.String }` made isSecretString true, and
+// aliasesASecret reported "T gives secret.String a second name; a redefinition
+// also drops LogValue, String, GoString and MarshalJSON" — every clause of which
+// is false about a named slice type, which drops nothing and is not a second
+// name for anything. Measured before and after: main reported nothing for that
+// shape, this branch reported the wrong thing, which is worse than the gap.
+//
+// A struct is never a second name for secret.String — it is a different type
+// that happens to hold one — so this refuses the whole family and leaves
+// aliasesASecret exactly as it behaved before 0vk.48. It subsumes the bare
+// `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
+//
+// The BROADER conflation is older than this bead and is left alone: `type T
+// []secret.String` and `type T *secret.String` are reported as second names
+// today and are not ones either. That is BrollyZap-0vk.50.
+func containsAnonymousStruct(expr ast.Expr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if _, ok := n.(*ast.StructType); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it
@@ -342,26 +381,50 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 }
 
 // isSecretString reports whether expr denotes a secret.String, through any number
-// of pointers, slices, arrays, maps and parentheses. Map KEYS are unwrapped as
-// well as values: a secret is no less exposed for being on the left of the colon,
-// and the cost of checking is one recursive call.
+// of pointers, slices, arrays, maps, parentheses and anonymous nested structs.
+// Map KEYS are unwrapped as well as values: a secret is no less exposed for being
+// on the left of the colon, and the cost of checking is one recursive call.
 //
-// The containers here are the ones that PRINT THEIR ELEMENTS. `chan
-// secret.String` is deliberately not a bearer and neither copy treats it as one —
-// the reason is on secretBearingTypes' first bullet, and internal/arch keeps a
-// plant that requires it to pass. Add a case here on that reason, never by
-// symmetry with the containers above.
+// THE SYNTACTIC-SPELLING FAMILY IS CLOSED (David's ruling, 6 Sep 2026). Four
+// beads walked it — 0vk.36 wrote this predicate, 0vk.46 ported it to
+// internal/arch and added map keys and local types, g5n closed the parenthesised
+// type, 0vk.48 the anonymous nested struct. None was a live leak; each was an
+// ordinary re-spelling that made a CONTAINER stop being a bearer, so nothing had
+// to render-test it.
 //
-// TWO SHAPES ARE STILL UNCOVERED, both filed as BrollyZap-0vk.48 and both present in
-// this copy and internal/arch's alike. `Inner struct{ Token secret.String }` is
-// an *ast.StructType here and has no TypeSpec of its own, so neither the field
-// nor the inner type is ever seen and the CONTAINER escapes the LogValue
-// requirement — the ParenExpr class again, measured green on the whole tree.
-// `Token Box[secret.String]` is an *ast.IndexExpr (and `pkg.Pair[string,
-// secret.String]` an *ast.IndexListExpr); those are a chosen boundary
-// rather than an oversight, because `type Box[T any] struct{ n int }` never
-// stores its T and unwrapping the argument would report a struct holding no
-// secret at all.
+// Anything past this point is not another case. Resolving what an identifier
+// actually denotes — an alias, a named type from another package, a type
+// parameter — is go/types, a different and larger decision rather than a line in
+// this switch. IF YOU ARE HERE TO ADD A CASE, that is the decision you are
+// making; take it deliberately, never by symmetry with the containers above.
+//
+// THREE CHOSEN BOUNDARIES, each a deliberate answer rather than a gap, and each
+// on ITS OWN REASON — they look alike and are not, which is why they are three
+// bullets and not one:
+//
+//   - The containers here are the ones that PRINT THEIR ELEMENTS. `chan
+//     secret.String` and `func() secret.String` are deliberately not bearers and
+//     neither copy treats them as such — both render as an ADDRESS under %v and
+//     slog.Any (measured), so they cannot spill what they hold. The reason is on
+//     secretBearingTypes' first bullet, and internal/arch keeps a plant that
+//     requires the channel to pass.
+//
+//   - An INTERFACE field is not a bearer either, and NOT for the reason above: it
+//     renders its dynamic value rather than an address. It is out of this family
+//     because what it holds is a runtime fact, not a spelling, so no syntax check
+//     can see it at any depth. Measured, an `any` holding a secret.String still
+//     prints `[redacted]` — every rendering path on the type is overridden — and
+//     what survives is a plain string that CAME from a secret, which is dataflow
+//     and these tests' own job. An earlier draft folded this into the bullet above
+//     and said interfaces render as an address. They do not.
+//
+//   - `Token Box[secret.String]` is not a bearer either — an *ast.IndexExpr, and
+//     `pkg.Pair[string, secret.String]` an *ast.IndexListExpr. A boundary rather
+//     than a case because unwrapping the type ARGUMENT is not sound: `type Box[T
+//     any] struct{ n int }` never stores its T, so it would report a struct
+//     holding no secret at all. internal/arch's typeString already learned those
+//     two nodes for generic RECEIVERS, which makes it easy to assume field types
+//     followed; they did not.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
@@ -377,6 +440,17 @@ func isSecretString(expr ast.Expr, names map[string]bool) bool {
 		// watched a secret-bearing struct with no LogValue pass clean; this copy
 		// carried the same hole for a day longer (g5n).
 		return isSecretString(t.X, names)
+	case *ast.StructType:
+		// An ANONYMOUS NESTED STRUCT — `Inner struct{ Token secret.String }` —
+		// has no TypeSpec of its own, so neither walk ever visits it and the
+		// CONTAINER escaped the LogValue requirement entirely (0vk.48). Mutual
+		// recursion with holdsASecret closes it at any depth.
+		//
+		// Reported against the CONTAINER, per David's ruling of 6 Sep: the inner
+		// struct has no name to report, and the container is the type that needs
+		// the LogValue. A nested struct inside a function-local type therefore
+		// keeps that walk's own message, whose remedy is to hoist.
+		return holdsASecret(t, names)
 	case *ast.SelectorExpr:
 		pkg, ok := t.X.(*ast.Ident)
 		return ok && names[pkg.Name] && t.Sel.Name == "String"

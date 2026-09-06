@@ -134,6 +134,55 @@ type Plain struct {
 			"type Pairing struct {\n\tToken (func() secret.String)\n}\n",
 		want: "",
 	}, {
+		// THE ANONYMOUS NESTED STRUCT (0vk.48), reported against its CONTAINER.
+		// The inner struct has no TypeSpec, so the walk never visits it and it has
+		// no name to report; Pairing is the type that needs the LogValue.
+		name: "an anonymous nested struct, reported against its container",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tName  string\n\tInner struct{ Token secret.String }\n}\n",
+		want: "store.Pairing",
+	}, {
+		// Two levels, because RECURSION is the claim: a case that looked one field
+		// deep would satisfy the plant above and miss this one.
+		name: "an anonymous nested struct two levels down",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tInner struct {\n\t\tDeeper struct{ Token secret.String }\n\t}\n}\n",
+		want: "store.Pairing",
+	}, {
+		// THE CONTROL, and the reason the case is not merely symmetry with the
+		// containers: a nested struct holding no secret must not make its container
+		// a bearer. `case *ast.StructType: return true` would pass both plants above
+		// and fail this one.
+		name: "an anonymous nested struct holding no secret is not one",
+		src:  "package store\n\ntype Pairing struct {\n\tInner struct{ Count int }\n}\n",
+		want: "",
+	}, {
+		// An INTERFACE field is excluded on a different reason from chan and func —
+		// it renders its dynamic value, not an address — and is planted so that
+		// reason is tested rather than merely written. See isSecretString.
+		name: "an interface field is not a bearer",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tAny any\n\tRdr interface{ Read() secret.String }\n}\n",
+		want: "",
+	}, {
+		// THE BOUNDARY COMPOSES THROUGH THE NESTING. A nested struct whose only
+		// secret sits behind a channel is still not a bearer, for the same reason a
+		// parenthesised chan is still a chan — otherwise the nested case would have
+		// quietly widened the chan exclusion.
+		name: "a nested struct holding only a chan is still not a bearer",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tInner struct{ C chan secret.String }\n}\n",
+		want: "",
+	}, {
+		// And the containers compose with it in the other direction: a nested
+		// struct reached through a pointer, a slice or a map value is still reached.
+		name: "a nested struct behind a pointer, a slice and a map value",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tOne   *struct{ Token secret.String }\n" +
+			"\tMany  []struct{ Token secret.String }\n" +
+			"\tKeyed map[string]struct{ Token secret.String }\n}\n",
+		want: "store.Pairing",
+	}, {
 		// And it composes with the containers rather than shadowing them: parens
 		// around a pointer, and parens around parens, are both still the secret.
 		name: "a parenthesised pointer, and parens around parens",
@@ -170,6 +219,36 @@ type Plain struct {
 		name: "an alias for something else",
 		src:  "package store\n\ntype Token = string\n",
 		want: "",
+	}, {
+		// A NAMED CONTAINER OF AN ANONYMOUS STRUCT IS NOT A SECOND NAME. 0vk.48
+		// taught isSecretString to see into an anonymous struct, and aliasesASecret
+		// reuses it, so without containsAnonymousStruct these three reported "gives
+		// secret.String a second name" — false about a named slice or map type,
+		// which drops nothing and names nothing. Measured against main, which
+		// reported nothing for all three; a wrong diagnostic is worse than the gap.
+		name: "a named slice of an anonymous struct is not a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T []struct{ Token secret.String }\n",
+		want: "",
+	}, {
+		name: "a named map keyed by an anonymous struct is not a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T map[struct{ Token secret.String }]bool\n",
+		want: "",
+	}, {
+		name: "a named map valued by an anonymous struct is not a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T map[string]struct{ Token secret.String }\n",
+		want: "",
+	}, {
+		// AND THE SHAPES THAT MUST KEEP REPORTING, so the narrowing above did not
+		// quietly turn aliasesASecret off. `type T []secret.String` is reported
+		// today and is not a second name either — an older conflation, left alone
+		// deliberately and filed as 0vk.50; pinned here so 0vk.50 has a before.
+		name: "a named slice of secret.String still reports (0vk.50 owns whether it should)",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T []secret.String\n",
+		want: "declares T as another name for secret.String",
 	}, {
 		name: "a struct is not an alias",
 		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
