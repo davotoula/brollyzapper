@@ -406,7 +406,14 @@ func containsAnonymousStruct(expr ast.Expr) bool {
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it
 // is spelled and however it is wrapped. See the FIRST bullet on
-// secretBearingTypes for the seven spellings that used to get through.
+// secretBearingTypes for the spellings that used to get through.
+//
+// NOT COUNTED HERE. It said "four" when there were four, and stayed at four while
+// 0vk.46 made it six; it was corrected to seven by g5n and was stale again the
+// same day, because 0vk.48 made it eight. A number restated away from the list it
+// counts goes wrong on the next bead by construction — the plants file's own
+// header made this mistake too, and the bullet is the one place that has to be
+// right.
 //
 // EVERY FIELD IS VISITED, where this used to be a slices.ContainsFunc that stopped
 // at the first true one. Under 0vk.49 the walk is also collecting unrecognised
