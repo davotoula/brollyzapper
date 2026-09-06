@@ -1615,10 +1615,9 @@ func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
 // on an example. No type here reveals through one today — secret.String's own
 // MarshalJSON returns Redacted and is the tree's ONLY one, lnrpc included
 // (measured 6 Sep; earlier wordings said "outside internal/lnd/lnrpc", which
-// implied lnrpc had one and it has none) — so the ban would be green on day one,
-// and an earlier
-// version of this argument cited internal/store/nwc.go as a counterexample, which
-// was WRONG: that code binds Reveal() as a raw SQL argument, not through
+// implied lnrpc had one and it has none) — so the ban would be green on day one.
+// An earlier version of this argument cited internal/store/nwc.go as a
+// counterexample, which was WRONG: that code binds Reveal() as a raw SQL argument, not through
 // encoding/json. The real reason is an asymmetry of purpose. The five seams above
 // exist for rendering alone, which §12 forbids secrets from reaching absolutely.
 // Marshalling is also how a value is exported, persisted or backed up, where
