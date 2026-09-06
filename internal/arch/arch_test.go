@@ -1554,6 +1554,25 @@ type pairing struct {
 `)}), "gives secret.String a second name")
 	})
 
+	// A NAMED CONTAINER OF AN ANONYMOUS STRUCT IS NOT A SECOND NAME. 0vk.48 taught
+	// isSecretString to see into an anonymous struct, and aliasesASecret reuses it,
+	// so without containsAnonymousStruct these reported "gives secret.String a
+	// second name" — false about a named slice or map type, which drops nothing and
+	// names nothing. Measured against main, which reported nothing for them: a
+	// wrong diagnostic is worse than the gap it replaced.
+	t.Run("a named container of an anonymous struct is not a second name", func(t *testing.T) {
+		clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type Slice []struct{ Token secret.String }
+
+type Keyed map[struct{ Token secret.String }]bool
+
+type Valued map[string]struct{ Token secret.String }
+`)}))
+	})
+
 	// And a REDEFINITION, which is the worse of the two: it inherits none of
 	// String, GoString, LogValue or MarshalJSON.
 	t.Run("a redefinition", func(t *testing.T) {
@@ -2005,7 +2024,9 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 // line in this switch. IF YOU ARE HERE TO ADD A CASE, that is the decision you
 // are making; take it deliberately rather than by symmetry with the ones above.
 //
-// TWO CHOSEN BOUNDARIES, both of them deliberate answers rather than gaps:
+// THREE CHOSEN BOUNDARIES, each a deliberate answer rather than a gap, and each
+// on ITS OWN REASON — they look alike and are not, which is why they are three
+// bullets and not one:
 //
 //   - `chan secret.String` and `func() secret.String` are NOT bearers. The
 //     go-review pass planted the channel and it passes, which is the intended
@@ -2015,15 +2036,15 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 //     because they DO print their elements. If a rendering path is ever added
 //     that walks a channel, this is the line to revisit.
 //
-//     An INTERFACE field — `Any any` — is excluded too, on a DIFFERENT reason,
-//     and the difference matters enough to write down: it does not hide behind an
-//     address, it renders its dynamic value. It is out of this family because
-//     what it holds is a runtime fact and not a spelling — no syntax check can
-//     see it, at any depth. Measured, an `any` holding a secret.String still
-//     prints `[redacted]`, because every rendering path on secret.String is
-//     overridden; what survives is a plain string that CAME from a secret, which
-//     is dataflow and the redaction tests' job. Do not fold this bullet back into
-//     the one above: "renders as an address" is false for an interface.
+//   - An INTERFACE field — `Any any` — is not a bearer either, and NOT for the
+//     reason above: it does not hide behind an address, it renders its dynamic
+//     value. It is out of this family because what it holds is a runtime fact and
+//     not a spelling, so no syntax check can see it at any depth. Measured, an
+//     `any` holding a secret.String still prints `[redacted]`, because every
+//     rendering path on secret.String is overridden; what survives is a plain
+//     string that CAME from a secret, which is dataflow and the redaction tests'
+//     job. An earlier draft of this comment folded this bullet into the one above
+//     and said interfaces render as an address. They do not.
 //
 //   - `Token Box[secret.String]` is NOT a bearer either — an *ast.IndexExpr, and
 //     `pkg.Pair[string, secret.String]` an *ast.IndexListExpr. This one is a
@@ -2078,10 +2099,43 @@ func isSecretString(expr ast.Expr, names map[string]bool) bool {
 // aliasesASecret reports whether ts gives secret.String a second name, by alias
 // (`type T = secret.String`) or by redefinition (`type T secret.String`).
 func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
-	if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+	if containsAnonymousStruct(ts.Type) {
 		return false
 	}
 	return isSecretString(ts.Type, names)
+}
+
+// containsAnonymousStruct reports whether expr has an anonymous struct type
+// anywhere inside it.
+//
+// IT EXISTS TO KEEP aliasesASecret ASKING ITS OWN QUESTION. That rule is about
+// IDENTITY — "is this a second NAME for secret.String" — and it answers it by
+// reusing isSecretString, which is about CONTAINMENT. The two agreed until
+// 0vk.48 taught isSecretString to see into an anonymous struct: after that,
+// `type T []struct{ Token secret.String }` made isSecretString true, and
+// aliasesASecret reported "T gives secret.String a second name; a redefinition
+// also drops LogValue, String, GoString and MarshalJSON" — every clause of which
+// is false about a named slice type, which drops nothing and is not a second
+// name for anything. Measured before and after: main reported nothing for that
+// shape, this branch reported the wrong thing, which is worse than the gap.
+//
+// A struct is never a second name for secret.String — it is a different type
+// that happens to hold one — so this refuses the whole family and leaves
+// aliasesASecret exactly as it behaved before 0vk.48. It subsumes the bare
+// `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
+//
+// The BROADER conflation is older than this bead and is left alone: `type T
+// []secret.String` and `type T *secret.String` are reported as second names
+// today and are not ones either. That is BrollyZap-0vk.50.
+func containsAnonymousStruct(expr ast.Expr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if _, ok := n.(*ast.StructType); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it

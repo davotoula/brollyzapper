@@ -332,10 +332,43 @@ func secretNames(file *ast.File) map[string]bool {
 // over secret.String does NOT inherit String, GoString, LogValue or MarshalJSON,
 // so it is a secret that has lost every one of its redactions.
 func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
-	if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+	if containsAnonymousStruct(ts.Type) {
 		return false
 	}
 	return isSecretString(ts.Type, names)
+}
+
+// containsAnonymousStruct reports whether expr has an anonymous struct type
+// anywhere inside it.
+//
+// IT EXISTS TO KEEP aliasesASecret ASKING ITS OWN QUESTION. That rule is about
+// IDENTITY — "is this a second NAME for secret.String" — and it answers it by
+// reusing isSecretString, which is about CONTAINMENT. The two agreed until
+// 0vk.48 taught isSecretString to see into an anonymous struct: after that,
+// `type T []struct{ Token secret.String }` made isSecretString true, and
+// aliasesASecret reported "T gives secret.String a second name; a redefinition
+// also drops LogValue, String, GoString and MarshalJSON" — every clause of which
+// is false about a named slice type, which drops nothing and is not a second
+// name for anything. Measured before and after: main reported nothing for that
+// shape, this branch reported the wrong thing, which is worse than the gap.
+//
+// A struct is never a second name for secret.String — it is a different type
+// that happens to hold one — so this refuses the whole family and leaves
+// aliasesASecret exactly as it behaved before 0vk.48. It subsumes the bare
+// `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
+//
+// The BROADER conflation is older than this bead and is left alone: `type T
+// []secret.String` and `type T *secret.String` are reported as second names
+// today and are not ones either. That is BrollyZap-0vk.50.
+func containsAnonymousStruct(expr ast.Expr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if _, ok := n.(*ast.StructType); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it
@@ -365,7 +398,9 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 // this switch. IF YOU ARE HERE TO ADD A CASE, that is the decision you are
 // making; take it deliberately, never by symmetry with the containers above.
 //
-// TWO CHOSEN BOUNDARIES, both deliberate answers rather than gaps:
+// THREE CHOSEN BOUNDARIES, each a deliberate answer rather than a gap, and each
+// on ITS OWN REASON — they look alike and are not, which is why they are three
+// bullets and not one:
 //
 //   - The containers here are the ones that PRINT THEIR ELEMENTS. `chan
 //     secret.String` and `func() secret.String` are deliberately not bearers and
@@ -374,13 +409,14 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 //     secretBearingTypes' first bullet, and internal/arch keeps a plant that
 //     requires the channel to pass.
 //
-//     An INTERFACE field is excluded on a DIFFERENT reason and the two must not
-//     be merged: it renders its dynamic value rather than an address. It is out
-//     of this family because what it holds is a runtime fact, not a spelling, so
-//     no syntax check can see it at any depth. Measured, an `any` holding a
-//     secret.String still prints `[redacted]` — every rendering path on the type
-//     is overridden — and what survives is a plain string that CAME from a
-//     secret, which is dataflow and these tests' own job.
+//   - An INTERFACE field is not a bearer either, and NOT for the reason above: it
+//     renders its dynamic value rather than an address. It is out of this family
+//     because what it holds is a runtime fact, not a spelling, so no syntax check
+//     can see it at any depth. Measured, an `any` holding a secret.String still
+//     prints `[redacted]` — every rendering path on the type is overridden — and
+//     what survives is a plain string that CAME from a secret, which is dataflow
+//     and these tests' own job. An earlier draft folded this into the bullet above
+//     and said interfaces render as an address. They do not.
 //
 //   - `Token Box[secret.String]` is not a bearer either — an *ast.IndexExpr, and
 //     `pkg.Pair[string, secret.String]` an *ast.IndexListExpr. A boundary rather

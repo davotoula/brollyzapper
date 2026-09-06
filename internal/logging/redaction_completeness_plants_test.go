@@ -220,6 +220,36 @@ type Plain struct {
 		src:  "package store\n\ntype Token = string\n",
 		want: "",
 	}, {
+		// A NAMED CONTAINER OF AN ANONYMOUS STRUCT IS NOT A SECOND NAME. 0vk.48
+		// taught isSecretString to see into an anonymous struct, and aliasesASecret
+		// reuses it, so without containsAnonymousStruct these three reported "gives
+		// secret.String a second name" — false about a named slice or map type,
+		// which drops nothing and names nothing. Measured against main, which
+		// reported nothing for all three; a wrong diagnostic is worse than the gap.
+		name: "a named slice of an anonymous struct is not a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T []struct{ Token secret.String }\n",
+		want: "",
+	}, {
+		name: "a named map keyed by an anonymous struct is not a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T map[struct{ Token secret.String }]bool\n",
+		want: "",
+	}, {
+		name: "a named map valued by an anonymous struct is not a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T map[string]struct{ Token secret.String }\n",
+		want: "",
+	}, {
+		// AND THE SHAPES THAT MUST KEEP REPORTING, so the narrowing above did not
+		// quietly turn aliasesASecret off. `type T []secret.String` is reported
+		// today and is not a second name either — an older conflation, left alone
+		// deliberately and filed as 0vk.50; pinned here so 0vk.50 has a before.
+		name: "a named slice of secret.String still reports (0vk.50 owns whether it should)",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T []secret.String\n",
+		want: "declares T as another name for secret.String",
+	}, {
 		name: "a struct is not an alias",
 		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
 			"type Token struct {\n\tv secret.String\n}\n",
