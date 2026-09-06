@@ -1309,14 +1309,160 @@ type creds struct {
 // A rule and not a review note because the trigger is adding a field, which is
 // the least conspicuous edit there is.
 func TestEverySecretBearingStructRedactsItself(t *testing.T) {
-	clean(t, checkSecretBearingStructsRedact(t, sourceFiles(t, "internal/secret")))
+	// NO SKIP ARGUMENT any more, and internal/secret is now scanned like every
+	// other package (0vk.46). The skip protected nothing: internal/secret
+	// declares one type, `String struct{ v string }`, whose field is a plain
+	// string. Dropping it was checked by running this clean half over the whole
+	// tree, not by reading the package — and a skip is an exemption, which this
+	// file names as a failure shape in its own right.
+	clean(t, checkSecretBearingStructsRedact(t, sourceFiles(t)))
+
+	// THE PLANT NOW IMPORTS THE PACKAGE, and it did not before. Under the old
+	// rule the type was matched as the literal text "secret.String", so a file
+	// that never imported internal/secret still tripped it; this rule resolves
+	// the import, so an unimported `secret.String` is correctly nothing at all.
+	// The old plant broke the moment the rule became honest, which is the best
+	// evidence available that it did.
 	catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
 
 type pairing struct {
 	Name   string
 	Secret secret.String
 }
 `)}), "implements no LogValue")
+
+	// THE SIX SPELLINGS THAT USED TO EVADE THIS RULE, kept one per case so a
+	// regression names which one came back. Each was measured against the rule as
+	// it stood at 6760ea1 and left it green with no LogValue anywhere; the plain
+	// field above was the control that proved the measurement was reaching the
+	// rule at all.
+	for _, plant := range []struct{ name, src string }{
+		{"an aliased import", `package store
+
+import sec "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token sec.String
+}
+`},
+		{"a dot import", `package store
+
+import . "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token String
+}
+`},
+		{"a map value", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens map[string]secret.String
+}
+`},
+		{"a pointer", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name  string
+	Token *secret.String
+}
+`},
+		{"a slice", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens []secret.String
+}
+`},
+		{"a map KEY, which the value case does not cover", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing struct {
+	Name   string
+	Tokens map[secret.String]string
+}
+`},
+	} {
+		t.Run(plant.name, func(t *testing.T) {
+			catches(t, checkSecretBearingStructsRedact(t,
+				[]sourceFile{planted("internal/store", plant.src)}), "implements no LogValue")
+		})
+	}
+
+	// The sixth evading shape is not a bearer but an ALIAS, and it is refused
+	// rather than followed, so it has its own message.
+	t.Run("a type alias", func(t *testing.T) {
+		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type Token = secret.String
+
+type pairing struct {
+	Name string
+	Tok  Token
+}
+`)}), "gives secret.String a second name")
+	})
+
+	// And a REDEFINITION, which is the worse of the two: it inherits none of
+	// String, GoString, LogValue or MarshalJSON.
+	t.Run("a redefinition", func(t *testing.T) {
+		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type Token secret.String
+`)}), "gives secret.String a second name")
+	})
+
+	// A struct inside a function, which file.Decls could not see at all.
+	t.Run("a struct declared inside a function", func(t *testing.T) {
+		catches(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+func save() {
+	type row struct {
+		Name  string
+		Token secret.String
+	}
+	_ = row{}
+}
+`)}), "cannot have a LogValue at all")
+	})
+
+	// AND THE OTHER DIRECTION, which is what stops this rule becoming a rule that
+	// only ever fires: each spelling with a LogValue present must PASS. Without
+	// this, a predicate that reported every struct would satisfy every case above.
+	t.Run("a LogValue satisfies the rule in any spelling", func(t *testing.T) {
+		clean(t, checkSecretBearingStructsRedact(t, []sourceFile{planted("internal/store", `package store
+
+import (
+	"log/slog"
+
+	sec "github.com/davotoula/brollyzapper/internal/secret"
+)
+
+type pairing struct {
+	Name   string
+	Tokens map[string]*sec.String
+}
+
+func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
+`)}))
+	})
 }
 
 // §12, and total by construction: a LogValue body may not name Reveal.
@@ -1441,6 +1587,112 @@ func (s Server) LogValue() slog.Value {
 `)}), "Server.LogValue names Reveal")
 }
 
+// secretPackageNames, isSecretString, aliasesASecret and holdsASecret are ports
+// of internal/logging's redaction_completeness_test.go, which 0vk.36 wrote and
+// which is the model this rule was measured against.
+//
+// DUPLICATED, NOT SHARED, and that is forced rather than chosen. The model lives
+// in `package logging_test`; test files are not importable from another package
+// at all, and internal/arch has no non-test file to hang a shared helper on. The
+// alternatives were a new shipped package existing only for two test rules, or
+// leaving this rule blind to six spellings. If a third rule ever needs this
+// predicate, the shipped package becomes the right answer and this comment is
+// the argument for it.
+//
+// THE TWO MUST AGREE ON WHAT A BEARER IS. After this bead they do, on every
+// shape: alias and dot imports, pointers, slices, arrays, maps (keys as well as
+// values), and a refusal to follow an alias or redefinition. The differences
+// that remain are written down on secretBearingTypes' own comment in
+// internal/logging, which this bead updates.
+
+// secretPackageNames returns the identifiers that denote internal/secret in this
+// file: whatever it was imported as, "." for a dot-import, and "." again inside
+// package secret itself, where the type is spelled bare.
+func secretPackageNames(file *ast.File) map[string]bool {
+	names := map[string]bool{}
+	if file.Name.Name == "secret" {
+		names["."] = true // a bare String, inside the package that declares it
+	}
+	for _, spec := range file.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || !strings.HasSuffix(path, "/internal/secret") {
+			continue
+		}
+		switch {
+		case spec.Name == nil:
+			names["secret"] = true
+		case spec.Name.Name == "_":
+			// Imported for side effects; nothing in this file names the type.
+		default:
+			names[spec.Name.Name] = true // an alias, or "." for a dot-import
+		}
+	}
+	return names
+}
+
+// isSecretString reports whether expr denotes a secret.String, through any number
+// of pointers, slices, arrays and maps. Map KEYS are unwrapped as well as values:
+// a secret is no less exposed for being on the left of the colon.
+func isSecretString(expr ast.Expr, names map[string]bool) bool {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return isSecretString(t.X, names)
+	case *ast.ArrayType:
+		return isSecretString(t.Elt, names)
+	case *ast.MapType:
+		return isSecretString(t.Key, names) || isSecretString(t.Value, names)
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		return ok && names[pkg.Name] && t.Sel.Name == "String"
+	case *ast.Ident:
+		return names["."] && t.Name == "String"
+	default:
+		return false
+	}
+}
+
+// aliasesASecret reports whether ts gives secret.String a second name, by alias
+// (`type T = secret.String`) or by redefinition (`type T secret.String`).
+func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
+	if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+		return false
+	}
+	return isSecretString(ts.Type, names)
+}
+
+// holdsASecret reports whether any of st's fields is a secret.String, however it
+// is spelled and however it is wrapped.
+func holdsASecret(st *ast.StructType, names map[string]bool) bool {
+	if st.Fields == nil {
+		return false
+	}
+	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
+		return isSecretString(field.Type, names)
+	})
+}
+
+// localStructTypes returns the named struct types declared inside fn's body.
+//
+// Named only: an anonymous struct literal has no name to report and no way to
+// carry a method either, so it would be noise this rule cannot make actionable.
+func localStructTypes(fn *ast.FuncDecl) []*ast.TypeSpec {
+	var out []*ast.TypeSpec
+	if fn.Body == nil {
+		return out
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok {
+			return true
+		}
+		if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+			out = append(out, ts)
+		}
+		return true
+	})
+	return out
+}
+
 // checkSecretBearingStructsRedact finds structs with a secret.String field and
 // asserts the same package declares LogValue on that type.
 //
@@ -1455,12 +1707,14 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 	bearers := map[string]map[string]decl{} // dir -> type -> where
 	redacts := map[string]map[string]bool{} // dir -> type
 
+	var found []problem
 	fset := token.NewFileSet()
 	for _, f := range files {
 		file, err := parser.ParseFile(fset, f.path, f.src, 0)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", f.rel, err)
 		}
+		names := secretPackageNames(file)
 		for _, d := range file.Decls {
 			switch d := d.(type) {
 			case *ast.GenDecl:
@@ -1469,14 +1723,26 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 					if !ok {
 						continue
 					}
+					// An alias or redefinition is REFUSED rather than followed,
+					// exactly as internal/logging's rule refuses it: following the
+					// second name to the fields typed with it is go/types and a
+					// much larger rule. Redefinition is the worse of the two — a
+					// defined type over secret.String inherits none of String,
+					// GoString, LogValue or MarshalJSON, so it is a secret that
+					// has lost every one of its redactions.
+					if aliasesASecret(ts, names) {
+						found = append(found, problem{f.rel, fset.Position(ts.Pos()).Line,
+							fmt.Sprintf("%s gives secret.String a second name; a field typed "+
+								"%s is invisible to this rule, and a redefinition (no `=`) "+
+								"also drops LogValue, String, GoString and MarshalJSON",
+								ts.Name.Name, ts.Name.Name)})
+						continue
+					}
 					st, ok := ts.Type.(*ast.StructType)
 					if !ok {
 						continue
 					}
-					for _, field := range st.Fields.List {
-						if typeString(field.Type) != "secret.String" {
-							continue
-						}
+					if holdsASecret(st, names) {
 						if bearers[f.dir] == nil {
 							bearers[f.dir] = map[string]decl{}
 						}
@@ -1484,6 +1750,26 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 					}
 				}
 			case *ast.FuncDecl:
+				// A STRUCT DECLARED INSIDE A FUNCTION is as loggable as a
+				// package-level one, and until this bead the rule could not see
+				// it — it read file.Decls only.
+				//
+				// It gets its own message because the package-level advice is
+				// impossible here: Go does not allow a method on a type declared
+				// in a function body, so a local secret-bearing struct CANNOT
+				// implement LogValue and telling its author to add one would send
+				// them somewhere that does not exist. The fix is to hoist it.
+				for _, ts := range localStructTypes(d) {
+					st := ts.Type.(*ast.StructType)
+					if !holdsASecret(st, names) {
+						continue
+					}
+					found = append(found, problem{f.rel, fset.Position(ts.Pos()).Line,
+						fmt.Sprintf("%s is declared inside %s and holds a secret; a type "+
+							"declared in a function body cannot have a LogValue at all, so "+
+							"hoist it to package level and give it one (§12)",
+							ts.Name.Name, d.Name.Name)})
+				}
 				if d.Name.Name != "LogValue" || d.Recv == nil || len(d.Recv.List) != 1 {
 					continue
 				}
@@ -1496,7 +1782,6 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 		}
 	}
 
-	var found []problem
 	for dir, types := range bearers {
 		for name, at := range types {
 			if redacts[dir][name] {
