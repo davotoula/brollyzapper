@@ -204,7 +204,7 @@ const markerPrefix = "//redaction:covers "
 //     0vk.46 ported this walk's predicate over — resolve the import rather than
 //     assume the identifier `secret` (secretNames), unwrap pointers, slices,
 //     arrays and maps including KEYS (holdsASecret), and refuse aliases and
-//     redefinitions outright rather than chase them (aliasesASecret). Both rules
+//     redefinitions outright rather than chase them (namesASecret). Both rules
 //     now agree on every one of those shapes, and both keep permanent plants for
 //     them. A SEVENTH spelling — `Token (secret.String)`, where the parens are
 //     not a container but spelling — evaded both, was closed in arch by 0vk.46
@@ -270,12 +270,26 @@ func secretBearingTypes(t *testing.T, files []moduleFile) (
 				return true
 			}
 			at := fset.Position(ts.Pos())
-			if aliasesASecret(ts, names, unknown) {
+			switch namesASecret(ts, names, unknown) {
+			case namesSecretItself:
 				aliases = append(aliases, fmt.Sprintf("%s:%d declares %s as another name for "+
 					"secret.String. Spell the type out: this rule and internal/arch both match "+
 					"the field's SOURCE, so a field typed %s is invisible to the requirement "+
 					"that its struct redact itself and to the requirement that something "+
 					"render it", f.rel, at.Line, ts.Name.Name, ts.Name.Name))
+				return true
+			case namesAContainerOfSecrets:
+				// TRUE OF A CONTAINER, which the alias message was not. Nothing is
+				// dropped here — the elements are still secret.String and still
+				// redact themselves — so the only complaint is the one that
+				// applies: a field typed T is invisible to a rule that reads
+				// source.
+				aliases = append(aliases, fmt.Sprintf("%s:%d %s is a named container of "+
+					"secret.String. Its elements still redact themselves, so nothing is lost "+
+					"at the point of use — but a field typed %s is invisible to this rule and "+
+					"to internal/arch, which both match the field's SOURCE, so the struct "+
+					"holding it escapes the requirement to redact itself. Spell the container "+
+					"out at the field", f.rel, at.Line, ts.Name.Name, ts.Name.Name))
 				return true
 			}
 			st, ok := ts.Type.(*ast.StructType)
@@ -338,37 +352,106 @@ func secretNames(file *ast.File) map[string]bool {
 	return names
 }
 
-// aliasesASecret reports whether ts gives secret.String a second name, by alias
-// (`type T = secret.String`) or by redefinition (`type T secret.String`).
+// secretNaming is what a TypeSpec does to secret.String, and the reason this is
+// three answers rather than a bool (0vk.50).
 //
-// FORBIDDEN RATHER THAN RESOLVED. Following the second name to the fields typed
-// with it means resolving types across a package, which is go/types and a much
-// larger rule. Refusing the shape costs four lines and cannot be got wrong.
-// Redefinition is included because it is the worse of the two: a defined type
-// over secret.String does NOT inherit String, GoString, LogValue or MarshalJSON,
-// so it is a secret that has lost every one of its redactions.
-// AN UNRECOGNISED NODE IS NOT A SECOND NAME, and that falls out of the bool
-// answer rather than needing a guard: isSecretString collects the node and still
-// returns false, so `type T <something nobody has taught the switch>` is reported
-// as unrecognised by the walk and never as an alias. The collector is threaded
-// through rather than dropped because a TypeSpec is exactly as good a place to
-// meet a new node kind as a field is (0vk.49).
-func aliasesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) bool {
+// The function below used to be called aliasesASecret and to return one. It asked
+// an IDENTITY question — "is this a second NAME for secret.String" — and answered
+// it with isSecretString, which asks a CONTAINMENT question. So `type T
+// []secret.String` and `type T *secret.String` were reported with the alias
+// message, every clause of which is false about them: T is not another name for
+// anything, and its elements keep String, GoString, LogValue and MarshalJSON and
+// redact themselves normally (measured under %v on the 0vk.48 branch).
+//
+// David's ruling of 6 Sep is option (b): keep reporting those shapes, with a
+// message that is true of a container. Not option (a) — narrowing to identity and
+// letting the container be reported as a bearer — because that needs the rule to
+// resolve what T denotes, which is the type-information boundary this family
+// closed on.
+//
+// The name went with the meaning. A function that answers "container" cannot
+// honestly be called aliasesASecret, and this pair of files has now spent four
+// beads correcting names and comments that outlived what they described.
+type secretNaming int
+
+const (
+	namesNoSecret secretNaming = iota
+	// namesSecretItself: `type T = secret.String` and `type T secret.String`,
+	// with or without parentheses. A genuine second name.
+	namesSecretItself
+	// namesAContainerOfSecrets: `type T []secret.String`, `type T
+	// *secret.String`, `type T map[string]secret.String`. Not a second name — but
+	// still reported, because a field typed T is invisible to a rule that matches
+	// SOURCE, which is the same reason the identity shapes are refused.
+	namesAContainerOfSecrets
+)
+
+// namesASecret classifies what ts does to secret.String.
+//
+// FORBIDDEN RATHER THAN RESOLVED, for both answers. Following a second name — or
+// a container's name — to the fields typed with it means resolving types across a
+// package, which is go/types and a much larger rule. Refusing the shape costs a
+// few lines and cannot be got wrong. Redefinition is grouped with the alias
+// because it is the worse of the two: a defined type over secret.String inherits
+// none of String, GoString, LogValue or MarshalJSON, so it is a secret that has
+// lost every one of its redactions. A CONTAINER loses nothing, which is exactly
+// why it needed its own message.
+//
+// AN UNRECOGNISED NODE IS NEITHER, and that falls out of the answers rather than
+// needing a guard: isSecretString collects the node and still returns false, so
+// `type T <something nobody has taught the switch>` is reported as unrecognised by
+// the walk and never as a name. The collector is threaded through because a
+// TypeSpec is exactly as good a place to meet a new node kind as a field is
+// (0vk.49).
+func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) secretNaming {
 	if containsAnonymousStruct(ts.Type) {
+		return namesNoSecret
+	}
+	if !isSecretString(ts.Type, names, unknown) {
+		return namesNoSecret
+	}
+	if denotesSecretString(ts.Type, names) {
+		return namesSecretItself
+	}
+	return namesAContainerOfSecrets
+}
+
+// denotesSecretString reports whether expr IS secret.String rather than merely
+// containing one — the identity half of the question above.
+//
+// Parentheses are stripped and nothing else is: they are spelling, as
+// isSecretString has held since g5n, and `type T = (secret.String)` is as much an
+// alias as the unparenthesised form. Every other node — a pointer, a slice, a map
+// — makes T a container of secrets and not a name for one, which is the whole
+// distinction 0vk.50 exists to draw.
+func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = paren.X
+	}
+	switch t := expr.(type) {
+	case *ast.SelectorExpr:
+		pkg, ok := t.X.(*ast.Ident)
+		return ok && names[pkg.Name] && t.Sel.Name == "String"
+	case *ast.Ident:
+		return names["."] && t.Name == "String"
+	default:
 		return false
 	}
-	return isSecretString(ts.Type, names, unknown)
 }
 
 // containsAnonymousStruct reports whether expr has an anonymous struct type
 // anywhere inside it.
 //
-// IT EXISTS TO KEEP aliasesASecret ASKING ITS OWN QUESTION. That rule is about
+// IT EXISTS TO KEEP namesASecret ASKING ITS OWN QUESTION. That rule is about
 // IDENTITY — "is this a second NAME for secret.String" — and it answers it by
 // reusing isSecretString, which is about CONTAINMENT. The two agreed until
 // 0vk.48 taught isSecretString to see into an anonymous struct: after that,
 // `type T []struct{ Token secret.String }` made isSecretString true, and
-// aliasesASecret reported "T gives secret.String a second name; a redefinition
+// namesASecret reported "T gives secret.String a second name; a redefinition
 // also drops LogValue, String, GoString and MarshalJSON" — every clause of which
 // is false about a named slice type, which drops nothing and is not a second
 // name for anything. Measured before and after: main reported nothing for that
@@ -376,7 +459,7 @@ func aliasesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNod
 //
 // A struct is never a second name for secret.String — it is a different type
 // that happens to hold one — so this refuses the whole family and leaves
-// aliasesASecret exactly as it behaved before 0vk.48. It subsumes the bare
+// namesASecret exactly as it behaved before 0vk.48. It subsumes the bare
 // `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
 //
 // The BROADER conflation is older than this bead and is left alone: `type T
