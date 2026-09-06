@@ -200,12 +200,9 @@ const markerPrefix = "//redaction:covers "
 //     arrays and maps including KEYS (holdsASecret), and refuse aliases and
 //     redefinitions outright rather than chase them (aliasesASecret). Both rules
 //     now agree on every one of those shapes, and both keep permanent plants for
-//     them — with ONE difference, recorded here rather than tolerated quietly:
-//     internal/arch also unwraps a PARENTHESISED type, because `Token
-//     (secret.String)` is legal Go and is a secret.String with no container at
-//     all. A go-review plant showed it evading both rules. This walk does not
-//     have that case yet; the follow-up bead carries it, and until then arch is
-//     the stricter of the two by exactly one spelling.
+//     them. A SEVENTH spelling — `Token (secret.String)`, where the parens are
+//     not a container but spelling — evaded both, was closed in arch by 0vk.46
+//     and here by g5n; the two copies now agree on every spelling there is.
 //     Neither treats `chan secret.String` as a bearer, and that is deliberate on
 //     both sides: a channel field renders as an address under slog.Any and %v, so
 //     it cannot spill its contents into a log line the way a slice or map can.
@@ -336,8 +333,8 @@ func aliasesASecret(ts *ast.TypeSpec, names map[string]bool) bool {
 }
 
 // holdsASecret reports whether any of st's fields is a secret.String, however it
-// is spelled and however it is wrapped. See the third bullet on
-// secretBearingTypes for the four spellings that used to get through.
+// is spelled and however it is wrapped. See the FIRST bullet on
+// secretBearingTypes for the seven spellings that used to get through.
 func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 	return slices.ContainsFunc(st.Fields.List, func(field *ast.Field) bool {
 		return isSecretString(field.Type, names)
@@ -345,9 +342,26 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 }
 
 // isSecretString reports whether expr denotes a secret.String, through any number
-// of pointers, slices, arrays and maps. Map KEYS are unwrapped as well as values:
-// a secret is no less exposed for being on the left of the colon, and the cost of
-// checking is one recursive call.
+// of pointers, slices, arrays, maps and parentheses. Map KEYS are unwrapped as
+// well as values: a secret is no less exposed for being on the left of the colon,
+// and the cost of checking is one recursive call.
+//
+// The containers here are the ones that PRINT THEIR ELEMENTS. `chan
+// secret.String` is deliberately not a bearer and neither copy treats it as one —
+// the reason is on secretBearingTypes' first bullet, and internal/arch keeps a
+// plant that requires it to pass. Add a case here on that reason, never by
+// symmetry with the containers above.
+//
+// TWO SHAPES ARE STILL UNCOVERED, both filed as BrollyZap-0vk.48 and both present in
+// this copy and internal/arch's alike. `Inner struct{ Token secret.String }` is
+// an *ast.StructType here and has no TypeSpec of its own, so neither the field
+// nor the inner type is ever seen and the CONTAINER escapes the LogValue
+// requirement — the ParenExpr class again, measured green on the whole tree.
+// `Token Box[secret.String]` is an *ast.IndexExpr (and `pkg.Pair[string,
+// secret.String]` an *ast.IndexListExpr); those are a chosen boundary
+// rather than an oversight, because `type Box[T any] struct{ n int }` never
+// stores its T and unwrapping the argument would report a struct holding no
+// secret at all.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
@@ -356,6 +370,13 @@ func isSecretString(expr ast.Expr, names map[string]bool) bool {
 		return isSecretString(t.Elt, names)
 	case *ast.MapType:
 		return isSecretString(t.Key, names) || isSecretString(t.Value, names)
+	case *ast.ParenExpr:
+		// `Token (secret.String)` is legal Go and IS a secret.String — the parens
+		// are not a container, they are spelling, and gofmt keeps them. Found by
+		// the go-review pass on 0vk.46, which planted it in internal/arch and
+		// watched a secret-bearing struct with no LogValue pass clean; this copy
+		// carried the same hole for a day longer (g5n).
+		return isSecretString(t.X, names)
 	case *ast.SelectorExpr:
 		pkg, ok := t.X.(*ast.Ident)
 		return ok && names[pkg.Name] && t.Sel.Name == "String"

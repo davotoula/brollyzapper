@@ -1569,52 +1569,80 @@ func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
 // LogValue on a test-only fixture type is unscanned. No such type exists today
 // and the redaction tests would still be the thing that caught it.
 //
-// IT COVERS FOUR RENDERING SEAMS and no others: LogValue, String, GoString and
-// Error (0vk.43 added the last three). They are one shape and one argument. All
-// four are pure rendering, all four are what %v, %s and %#v reach — %v takes an
-// error's Error() ahead of Stringer — and secret.String implements the rendering
-// ones precisely so a secret cannot print itself (internal/secret/secret.go).
-// Naming Reveal inside any of them is never legitimate, for any type, ever, which
-// is the property that makes this rule worth having and the property any widening
-// has to preserve.
+// IT COVERS FIVE RENDERING SEAMS and no others: LogValue, String, GoString,
+// Error (0vk.43 added those three) and Format (4on). They are one ARGUMENT, and
+// deliberately not one shape — Format takes (fmt.State, rune) and returns
+// nothing, where the other four are zero-arg. Shape is not the criterion;
+// "rendering, and never legitimate to reveal" is.
+//
+// FOUR OF THEM ARE WHAT fmt REACHES, and with Format the set is now closed
+// against fmt rather than a judgement about it: fmt has exactly these four
+// methods and no fifth. Measured, because the order decides which can bypass
+// which — Formatter wins for EVERY verb, %#v included; without one, %#v takes
+// GoString, and %v and %s take Error ahead of String. LogValue is the odd one
+// and is not reached by any verb: it is slog's seam, and the one this rule was
+// originally built for.
+//
+// secret.String implements the rendering ones precisely so a secret cannot print
+// itself (internal/secret/secret.go). Naming Reveal inside any of them is never
+// legitimate, for any type, ever, which is the property that makes this rule
+// worth having and the property any widening has to preserve.
 //
 // It matches the NAME, not the receiver's type: a Reveal on something unrelated
 // to secret.String inside a String() would be reported too. That is deliberate
 // and cheap today — secret.String.Reveal is the only Reveal in the non-generated
 // tree — and it is the same trade as matching the selector rather than the call.
 //
+// FORMAT WIDENS THAT SURFACE MOST, and knowingly. The other four names are
+// reserved by convention; "Format" is an ordinary English verb, and a
+// `func (m Msat) Format() string` that had nothing to do with fmt.Formatter would
+// be scanned all the same. It cannot fire unless that body ALSO names Reveal, so
+// it is inert today — but if it ever does fire on such a method, the message
+// below calls it "a rendering method", which would then be wrong: no fmt verb
+// reaches it. THE ANSWER IS NOT AN EXEMPTION and not a signature check. A
+// syntactic signature match would compare a rendered `fmt.State` against a
+// literal, which `import f "fmt"` defeats silently — the exact bug 0vk.46 spent a
+// bead removing, and internal/arch type-checks nothing (loadPackages parses
+// ImportsOnly). The answer is that a method named Format, fmt.Formatter or not,
+// still has no business naming Reveal; fix the body, and if the day comes that
+// one genuinely must, that is this rule's first real exemption and a decision to
+// take deliberately.
+//
 // Measured before widening: a String() returning p.Token.Reveal(), on a type with
 // a perfectly good redacting LogValue, passed this rule. So did a GoString().
 //
-// MarshalJSON, MarshalText AND Format ARE DELIBERATELY EXCLUDED, on a HEDGE
-// rather than on an example. No type here reveals through one today —
-// secret.String's own MarshalJSON returns Redacted and is the tree's only one
-// outside internal/lnd/lnrpc — so the ban would be green on day one, and an
-// earlier version of this argument cited internal/store/nwc.go as a
-// counterexample, which was WRONG: that code binds Reveal() as a raw SQL
-// argument, not through encoding/json. The real reason is an asymmetry of
-// purpose. LogValue, String and GoString exist for rendering alone, which §12
-// forbids secrets from reaching absolutely. Marshalling is also how a value is
-// exported, persisted or backed up, where revealing is sometimes exactly right —
-// so it is the first name in this rule that could ever need an exemption, and an
-// exemption list is what this rule exists not to have. A total ban on three names
-// is worth more than a table on six.
+// MarshalJSON AND MarshalText ARE DELIBERATELY EXCLUDED, on a HEDGE rather than
+// on an example. No type here reveals through one today — secret.String's own
+// MarshalJSON returns Redacted and is the tree's ONLY one, lnrpc included
+// (measured 6 Sep; earlier wordings said "outside internal/lnd/lnrpc", which
+// implied lnrpc had one and it has none) — so the ban would be green on day one.
+// An earlier version of this argument cited internal/store/nwc.go as a
+// counterexample, which was WRONG: that code binds Reveal() as a raw SQL argument, not through
+// encoding/json. The real reason is an asymmetry of purpose. The five seams above
+// exist for rendering alone, which §12 forbids secrets from reaching absolutely.
+// Marshalling is also how a value is exported, persisted or backed up, where
+// revealing is sometimes exactly right — so it is the first name in this rule that
+// could ever need an exemption, and an exemption list is what this rule exists not
+// to have. A total ban on five names is worth more than a table on seven.
 //
 // That exclusion is a TESTED property rather than a comment:
 // TestAMarshalMethodMayNameReveal plants one and requires it to pass.
 // renderingSeams are the method names this rule scans.
 //
-// Error IS ONE OF THEM, added on the rule's own stated criterion rather than on
-// the brief, which did not consider it: %v reaches an error's Error() ahead of
-// Stringer, so it is pure rendering by exactly the test that admitted String and
-// GoString — and a secret in an error message is precisely what §12 forbids.
-// Measured green: the two Error methods in the tree (config.VarError,
-// lnurl.Rejection) return plain fields.
+// HOW THE LIST GOT HERE. Error went in on the rule's own criterion rather than on
+// a brief, which had not considered it. Format went in on 4on, which is a PM
+// ruling REVERSING 0vk.43 — that bead had excluded Format alongside the two
+// marshallers, and the export argument above is true of the marshallers and says
+// nothing whatever about fmt.Formatter, which exports to nobody.
 //
-// FORMAT IS NOT, and that is a ruling this branch implements rather than agrees
-// with. See TestAFormatMethodMayNameReveal for the gap, stated and tested.
+// Measured green, and the two are not equally green: the tree's two Error methods
+// (config.VarError, lnurl.Rejection) return plain fields, so that seam is checked
+// against real bodies. The tree has NO fmt.Formatter at all, so Format's
+// whole-tree assertion is vacuously green and its plant below is the entirety of
+// its coverage. That is normal for a seam nothing implements yet; it is recorded
+// so the measurement is not read as more than it is.
 var renderingSeams = map[string]bool{
-	"LogValue": true, "String": true, "GoString": true, "Error": true,
+	"LogValue": true, "String": true, "GoString": true, "Error": true, "Format": true,
 }
 
 func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
@@ -1709,7 +1737,7 @@ func (s Server) LogValue() slog.Value {
 // the thing worth pinning is that each NAME is reached; the bodies differ so each
 // message can be read for the method it names. The exclusion test below DOES
 // loop, and that is the difference: there every case asserts the same nothing.
-func TestNoStringGoStringOrErrorBodyNamesReveal(t *testing.T) {
+func TestNoStringGoStringErrorOrFormatBodyNamesReveal(t *testing.T) {
 	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
 
 func (s Server) String() string {
@@ -1745,6 +1773,22 @@ func (s Server) LogValue() slog.Value {
 
 func (s Server) String() string { return s.AdminPassword.Reveal() }
 `)}), "Server.String names Reveal")
+
+	// Format, added by 4on. THE SAME PLANT AS BEFORE, with its sign changed: until
+	// 4on this exact source sat in a test of its own and asserted `clean`, pinning
+	// the 0vk.43 exclusion. Reversing the ruling moved the plant rather than
+	// deleting it, so the seam stays pinned — in the other direction, by identical
+	// source. That it is a REAL fmt.Formatter is load-bearing: an earlier version
+	// of that test used `Format() ([]byte, error)`, which is no fmt.Formatter at
+	// all, and so pinned a method the seam does not have.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+import "fmt"
+
+func (s Server) Format(f fmt.State, verb rune) {
+	fmt.Fprint(f, s.AdminPassword.Reveal())
+}
+`)}), "Server.Format names Reveal")
 }
 
 // The marshalling exclusion is a TESTED property, not a sentence in a comment.
@@ -1767,33 +1811,6 @@ func (s Server) `+method+`() ([]byte, error) {
 `)}))
 		})
 	}
-}
-
-// AND FORMAT IS A KNOWN GAP, recorded rather than hidden (BrollyZap-4on, filed on the
-// 0vk.43 branch).
-//
-// 0vk.43's ruling excludes MarshalJSON, MarshalText and Format together, on the
-// argument that marshalling is also how a value is legitimately exported. That
-// argument does not reach Format. fmt.Formatter is not a marshaller: it takes
-// precedence over Stringer, GoStringer AND error, so it is the most purely
-// rendering seam of the lot — the widening's own criterion admits it, and the
-// exclusion's reason does not cover it.
-//
-// The ruling is implemented as written, because a ruling is not this branch's to
-// overturn. What is NOT acceptable is pinning it with a plant that isn't the
-// thing: an earlier version of this test used `Format() ([]byte, error)`, which
-// is no fmt.Formatter at all, so it asserted the exclusion for a method the seam
-// does not have. This plant has the real signature, so the gap it documents is
-// the real one.
-func TestAFormatMethodMayNameReveal(t *testing.T) {
-	clean(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
-
-import "fmt"
-
-func (s Server) Format(f fmt.State, verb rune) {
-	fmt.Fprint(f, s.AdminPassword.Reveal())
-}
-`)}))
 }
 
 // secretNames, isSecretString, aliasesASecret and holdsASecret are ports
@@ -1822,9 +1839,9 @@ func (s Server) Format(f fmt.State, verb rune) {
 // is deliberate — holdsASecret here guards a nil Fields, which the model does not
 // bother with because the parser always sets it.
 //
-// THE TWO MUST AGREE ON WHAT A BEARER IS. After this bead they do, on every
-// shape: alias and dot imports, pointers, slices, arrays, maps (keys as well as
-// values), and a refusal to follow an alias or redefinition. The differences
+// THE TWO MUST AGREE ON WHAT A BEARER IS. After g5n they do, on every shape they
+// cover: alias and dot imports, pointers, slices, arrays, maps (keys as well as
+// values), PARENTHESES, and a refusal to follow an alias or redefinition. The differences
 // that remain are written down on secretBearingTypes' own comment in
 // internal/logging, which this bead updates.
 
@@ -1869,11 +1886,24 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 // container cases are here because they DO print their elements. If a rendering
 // path is ever added that walks a channel, this is the line to revisit.
 //
-// The ParenExpr case is a DIFFERENCE FROM THE MODEL in internal/logging, which
-// does not have it yet — see the differences list on secretBearingTypes there,
-// and BrollyZap-g5n is filed to close it. Two copies that must agree now disagree by one
-// case, which is exactly the drift this pair's comments warn about; it is
-// recorded rather than quietly tolerated.
+// TWO SHAPES ARE STILL UNCOVERED, both filed as BrollyZap-0vk.48 and both present in
+// this copy and internal/logging's alike. `Inner struct{ Token secret.String }`
+// is an *ast.StructType here and has no TypeSpec of its own, so neither the field
+// nor the inner type is ever seen and the CONTAINER escapes the LogValue
+// requirement — the ParenExpr class again, measured green on the whole tree.
+// `Token Box[secret.String]` is an *ast.IndexExpr (and `pkg.Pair[string,
+// secret.String]` an *ast.IndexListExpr); those are a chosen boundary
+// rather than an oversight, because `type Box[T any] struct{ n int }` never
+// stores its T and unwrapping the argument would report a struct holding no
+// secret at all. Note typeString already learned IndexExpr for generic
+// RECEIVERS (TestAGenericTypesLogValueIsCredited), which makes it easy to assume
+// field types followed; they did not.
+//
+// The ParenExpr case was for one day a DIFFERENCE FROM THE MODEL in
+// internal/logging, which 0vk.46 could not touch and g5n closed. The two copies
+// now agree on every spelling, which is the property this pair's comments exist
+// to keep true — see the differences list on secretBearingTypes there for what
+// separates them, which is no longer anything about how a field is written.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
