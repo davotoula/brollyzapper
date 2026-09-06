@@ -196,6 +196,10 @@ into a field called "maximum spend" means *do not spend*, and that is what it do
 per-payment limit must also stay at or below the 24-hour one, or the guard refuses the change:
 a per-payment limit above the window could never be reached.
 
+**Order matters when you tighten.** To lower the 24-hour limit below the per-payment one, lower
+the per-payment limit first — otherwise the guard refuses the change and says so. Tightening is
+the free direction (one click, no code), so the order is the only thing in the way.
+
 ---
 
 ## Deployment settings, which no page shows

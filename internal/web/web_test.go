@@ -372,3 +372,61 @@ func TestTheWalletRendersAnOutgoingZapsPayee(t *testing.T) {
 		t.Errorf("an outgoing zap row carries receipt wording:\n%s", out)
 	}
 }
+
+// 6zd: the Sending page names which limit to move first, not just that the two
+// are ordered.
+//
+// The hint said only that the per-payment limit cannot be above the 24-hour one.
+// True, and direction-free — so an operator lowering the 24-hour limit learned
+// the order from the REFUSAL, after they had already typed into the wrong box.
+// On the box (2026-09-02, the incident 8vj was filed on) that misreading ended
+// in a 24-hour ceiling ten times looser than intended, on the control whose
+// whole purpose is bounding loss. 8vj fixed what they are told after the
+// refusal; this is the half that stops some of them being refused at all.
+//
+// THE TIGHTENING DIRECTION IS THE ONE NAMED, and that is the asymmetry §6 is
+// built on: lowering either limit is the free direction — one click, no code —
+// so an ordering rule that obstructs it is the expensive kind of surprise. The
+// other direction needs a confirmation code anyway, and the paragraph above the
+// forms already explains that ceremony.
+//
+// THE PHRASE ASSERTED IS THE GUARD'S OWN REMEDY, word for word
+// (internal/guard/operator.go's checkCapPair, "lower the per-payment limit
+// first"). The hint and the refusal are read minutes apart by the same person,
+// and a test that accepted any wording would let them drift into two different
+// instructions for one action. It cannot be shared as a constant — the guard
+// composes it per control inside a switch, and the page is static prose above
+// both forms — so matching text is the only agreement available, and this is
+// what holds it.
+func TestTheSendingPageNamesWhichLimitToLowerFirst(t *testing.T) {
+	renderer := newRenderer(t)
+	var buf bytes.Buffer
+	// GuardReachable, because the caps panel and its hint are behind it: with the
+	// guard unreachable the page says only that the limits cannot be read, and
+	// this test would pass against a page that never rendered the sentence.
+	if err := renderer.Render(&buf, "sending", web.PageData{
+		Title:   "Sending",
+		Sending: web.SendingView{GuardReachable: true},
+	}); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	body := strings.Join(strings.Fields(strings.ToLower(buf.String())), " ")
+
+	if !strings.Contains(body, "lower the per-payment limit first") {
+		t.Error(`the Sending page does not say "lower the per-payment limit first"; without it ` +
+			`the hint states the constraint and leaves the operator to discover the order from ` +
+			`a refusal, which is BrollyZap-6zd`)
+	}
+	// The constraint itself is still there — the direction replaces nothing.
+	if !strings.Contains(body, "could never be reached") {
+		t.Error("the Sending page no longer explains WHY the two limits are ordered; the " +
+			"direction is an addition to that reason, not a replacement for it")
+	}
+	// ANTI-VACUITY: whitespace-normalising a page that failed to render would
+	// leave an empty string that contains nothing, and both checks above would
+	// fire for the wrong reason. This says the render produced the caps panel.
+	if !strings.Contains(body, "set the 24-hour limit") {
+		t.Fatal("the caps panel did not render at all, so the assertions above were not " +
+			"about the sentence they name")
+	}
+}

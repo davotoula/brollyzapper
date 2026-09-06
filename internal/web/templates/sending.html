@@ -120,7 +120,8 @@
     <button type="submit">Set the per-payment limit</button>
   </form>
   <p class="hint">A limit of 0 refuses every payment. The per-payment limit cannot be above the
-  24-hour one, because it could never be reached.</p>
+  24-hour one, because it could never be reached. To lower the 24-hour limit below the
+  per-payment one, lower the per-payment limit first.</p>
   {{if and .Sending.Authorisation.Pending (ne .Sending.Authorisation.Control "sending")}}
     {{template "authorisation" .}}
   {{end}}
