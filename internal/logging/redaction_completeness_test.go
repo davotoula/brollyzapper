@@ -405,6 +405,27 @@ const (
 // (0vk.49).
 func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) secretNaming {
 	if containsAnonymousStruct(ts.Type) {
+		// COLLECTION WITHOUT DIAGNOSIS (0vk.51). This family is deliberately
+		// undiagnosed — a named wrapper over an anonymous struct is neither a
+		// second name nor, under 0vk.50's ruling, a reported container — but
+		// refusing here used to mean isSecretString never ran on it at all, and the
+		// walk then fell through because ts.Type is an ArrayType or a MapType
+		// rather than a StructType. So 0vk.49's guarantee stopped at the wrapper:
+		// a node kind first written inside `type T []struct{...}` was never
+		// collected. Measured with the ChanType case dropped: the plain struct
+		// reported one unrecognised node and all three wrapper forms reported none.
+		//
+		// The bool is discarded, which is the whole point — collecting is not
+		// diagnosing, and the two are separate outputs precisely so one can happen
+		// without the other.
+		//
+		// ONLY FOR A WRAPPER. A bare `type T struct{...}` is descended by the walk
+		// itself, through holdsASecret, so running the predicate here as well would
+		// report every new node kind in it TWICE. The type assertion is what keeps
+		// the two paths disjoint, and it is planted.
+		if _, isBareStruct := ts.Type.(*ast.StructType); !isBareStruct {
+			_ = isSecretString(ts.Type, names, unknown)
+		}
 		return namesNoSecret
 	}
 	if !isSecretString(ts.Type, names, unknown) {
@@ -462,20 +483,20 @@ func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
 // namesASecret exactly as it behaved before 0vk.48. It subsumes the bare
 // `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
 //
-// The BROADER conflation is older than this bead and is left alone: `type T
-// []secret.String` and `type T *secret.String` are reported as second names
-// today and are not ones either. That is BrollyZap-0vk.50.
+// THE BROADER CONFLATION IS CLOSED (0vk.50). `type T []secret.String` and `type T
+// *secret.String` were reported as second names and are not ones; they are now
+// classified as containers and get a message that is true of one. That is why
+// namesASecret returns three answers rather than a bool, and why it is no longer
+// called aliasesASecret.
 //
-// ONE CONSEQUENCE FOR 0vk.49'S GUARANTEE, measured and filed as BrollyZap-0vk.51.
-// Refusing here happens BEFORE isSecretString is called, and the walk then falls
-// through because ts.Type is not a *ast.StructType — so for `type T
-// []struct{...}` and `type T map[string]struct{...}` the inner struct's fields
-// are never handed to the predicate at all, and a node kind first written in
-// there is never collected. With the ChanType case removed, a plain `type T
-// struct{ C chan secret.String }` reports one unrecognised node and the named
-// slice reports none. Collecting is not diagnosing, so it is fixable without
-// changing what is reported — but it is held behind 0vk.50, which owns whether
-// this family is reported at all and would move the same guard.
+// AND REFUSING HERE NO LONGER HIDES A NODE KIND (0vk.51). The refusal happens
+// before isSecretString is called, and the walk then falls through because
+// ts.Type is an ArrayType or a MapType rather than a StructType — so for `type T
+// []struct{...}` and the map forms the inner fields used to reach the predicate
+// never, and 0vk.49's guarantee stopped at the wrapper. namesASecret now runs the
+// predicate for the COLLECTOR's sake and discards the bool, for wrappers only:
+// a bare struct is descended by the walk itself, and running it here too would
+// report every new node kind in it twice. Both halves are planted.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {

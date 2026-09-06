@@ -1352,6 +1352,46 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		t.Errorf("namesASecret dropped the collector, so a new node kind first met in a "+
 			"TypeSpec would go unreported (%d collected)", len(unknown.nodes))
 	}
+	// 0vk.51: COLLECTION WITHOUT DIAGNOSIS, and the guard that stops it becoming
+	// double collection.
+	//
+	// Synthesised for the same reason as the plants above — an unrecognised node
+	// cannot be written in real Go — and it is the only way to pin this
+	// permanently: the property was measured by dropping the ChanType case, which
+	// is a mutation and leaves nothing behind.
+	inner := func() *ast.StructType {
+		return &ast.StructType{Fields: &ast.FieldList{List: []*ast.Field{{Type: &ast.BadExpr{}}}}}
+	}
+	for _, c := range []struct {
+		name string
+		typ  ast.Expr
+		want int
+	}{
+		// A WRAPPER: the walk cannot descend it, because ts.Type is not a
+		// StructType, so namesASecret has to collect on its behalf.
+		{"a named slice of an anonymous struct", &ast.ArrayType{Elt: inner()}, 1},
+		{"a named map valued by one", &ast.MapType{Key: ast.NewIdent("string"), Value: inner()}, 1},
+		{"a named map keyed by one", &ast.MapType{Key: inner(), Value: ast.NewIdent("bool")}, 1},
+		{"a named pointer to one", &ast.StarExpr{X: inner()}, 1},
+		// A BARE STRUCT: the walk descends this itself through holdsASecret, so
+		// collecting here as well would report the node twice. Nought is the whole
+		// assertion.
+		{"a bare anonymous struct, which the walk descends itself", inner(), 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			unknown := &unknownNodes{}
+			ts := &ast.TypeSpec{Name: ast.NewIdent("T"), Type: c.typ}
+			if got := namesASecret(ts, names, unknown); got != namesNoSecret {
+				t.Errorf("classified %v; a named wrapper over an anonymous struct is neither "+
+					"a second name nor a reported container (0vk.50's ruling)", got)
+			}
+			if len(unknown.nodes) != c.want {
+				t.Errorf("collected %d unrecognised nodes, want %d; 0vk.49's guarantee has to "+
+					"reach inside a wrapper, and must not report a bare struct's nodes twice",
+					len(unknown.nodes), c.want)
+			}
+		})
+	}
 }
 
 // §12: a struct that HOLDS a secret must be able to redact itself.
@@ -2291,6 +2331,27 @@ const (
 // (0vk.49).
 func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) secretNaming {
 	if containsAnonymousStruct(ts.Type) {
+		// COLLECTION WITHOUT DIAGNOSIS (0vk.51). This family is deliberately
+		// undiagnosed — a named wrapper over an anonymous struct is neither a
+		// second name nor, under 0vk.50's ruling, a reported container — but
+		// refusing here used to mean isSecretString never ran on it at all, and the
+		// walk then fell through because ts.Type is an ArrayType or a MapType
+		// rather than a StructType. So 0vk.49's guarantee stopped at the wrapper:
+		// a node kind first written inside `type T []struct{...}` was never
+		// collected. Measured with the ChanType case dropped: the plain struct
+		// reported one unrecognised node and all three wrapper forms reported none.
+		//
+		// The bool is discarded, which is the whole point — collecting is not
+		// diagnosing, and the two are separate outputs precisely so one can happen
+		// without the other.
+		//
+		// ONLY FOR A WRAPPER. A bare `type T struct{...}` is descended by the walk
+		// itself, through holdsASecret, so running the predicate here as well would
+		// report every new node kind in it TWICE. The type assertion is what keeps
+		// the two paths disjoint, and it is planted.
+		if _, isBareStruct := ts.Type.(*ast.StructType); !isBareStruct {
+			_ = isSecretString(ts.Type, names, unknown)
+		}
 		return namesNoSecret
 	}
 	if !isSecretString(ts.Type, names, unknown) {
@@ -2347,20 +2408,20 @@ func denotesSecretString(expr ast.Expr, names map[string]bool) bool {
 // namesASecret exactly as it behaved before 0vk.48. It subsumes the bare
 // `ts.Type.(*ast.StructType)` check it replaces, a bare struct containing itself.
 //
-// The BROADER conflation is older than this bead and is left alone: `type T
-// []secret.String` and `type T *secret.String` are reported as second names
-// today and are not ones either. That is BrollyZap-0vk.50.
+// THE BROADER CONFLATION IS CLOSED (0vk.50). `type T []secret.String` and `type T
+// *secret.String` were reported as second names and are not ones; they are now
+// classified as containers and get a message that is true of one. That is why
+// namesASecret returns three answers rather than a bool, and why it is no longer
+// called aliasesASecret.
 //
-// ONE CONSEQUENCE FOR 0vk.49'S GUARANTEE, measured and filed as BrollyZap-0vk.51.
-// Refusing here happens BEFORE isSecretString is called, and the walk then falls
-// through because ts.Type is not a *ast.StructType — so for `type T
-// []struct{...}` and `type T map[string]struct{...}` the inner struct's fields
-// are never handed to the predicate at all, and a node kind first written in
-// there is never collected. With the ChanType case removed, a plain `type T
-// struct{ C chan secret.String }` reports one unrecognised node and the named
-// slice reports none. Collecting is not diagnosing, so it is fixable without
-// changing what is reported — but it is held behind 0vk.50, which owns whether
-// this family is reported at all and would move the same guard.
+// AND REFUSING HERE NO LONGER HIDES A NODE KIND (0vk.51). The refusal happens
+// before isSecretString is called, and the walk then falls through because
+// ts.Type is an ArrayType or a MapType rather than a StructType — so for `type T
+// []struct{...}` and the map forms the inner fields used to reach the predicate
+// never, and 0vk.49's guarantee stopped at the wrapper. namesASecret now runs the
+// predicate for the COLLECTOR's sake and discards the bool, for wrappers only:
+// a bare struct is descended by the walk itself, and running it here too would
+// report every new node kind in it twice. Both halves are planted.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {

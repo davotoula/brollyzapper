@@ -494,4 +494,44 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		t.Errorf("namesASecret dropped the collector, so a new node kind first met in a "+
 			"TypeSpec would go unreported (%d collected)", len(unknown.nodes))
 	}
+	// 0vk.51: COLLECTION WITHOUT DIAGNOSIS, and the guard that stops it becoming
+	// double collection.
+	//
+	// Synthesised for the same reason as the plants above — an unrecognised node
+	// cannot be written in real Go — and it is the only way to pin this
+	// permanently: the property was measured by dropping the ChanType case, which
+	// is a mutation and leaves nothing behind.
+	inner := func() *ast.StructType {
+		return &ast.StructType{Fields: &ast.FieldList{List: []*ast.Field{{Type: &ast.BadExpr{}}}}}
+	}
+	for _, c := range []struct {
+		name string
+		typ  ast.Expr
+		want int
+	}{
+		// A WRAPPER: the walk cannot descend it, because ts.Type is not a
+		// StructType, so namesASecret has to collect on its behalf.
+		{"a named slice of an anonymous struct", &ast.ArrayType{Elt: inner()}, 1},
+		{"a named map valued by one", &ast.MapType{Key: ast.NewIdent("string"), Value: inner()}, 1},
+		{"a named map keyed by one", &ast.MapType{Key: inner(), Value: ast.NewIdent("bool")}, 1},
+		{"a named pointer to one", &ast.StarExpr{X: inner()}, 1},
+		// A BARE STRUCT: the walk descends this itself through holdsASecret, so
+		// collecting here as well would report the node twice. Nought is the whole
+		// assertion.
+		{"a bare anonymous struct, which the walk descends itself", inner(), 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			unknown := &unknownNodes{}
+			ts := &ast.TypeSpec{Name: ast.NewIdent("T"), Type: c.typ}
+			if got := namesASecret(ts, names, unknown); got != namesNoSecret {
+				t.Errorf("classified %v; a named wrapper over an anonymous struct is neither "+
+					"a second name nor a reported container (0vk.50's ruling)", got)
+			}
+			if len(unknown.nodes) != c.want {
+				t.Errorf("collected %d unrecognised nodes, want %d; 0vk.49's guarantee has to "+
+					"reach inside a wrapper, and must not report a bare struct's nodes twice",
+					len(unknown.nodes), c.want)
+			}
+		})
+	}
 }
