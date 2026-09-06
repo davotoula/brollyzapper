@@ -200,7 +200,17 @@ const markerPrefix = "//redaction:covers "
 //     arrays and maps including KEYS (holdsASecret), and refuse aliases and
 //     redefinitions outright rather than chase them (aliasesASecret). Both rules
 //     now agree on every one of those shapes, and both keep permanent plants for
-//     them. The code is duplicated rather than shared, because this file is
+//     them — with ONE difference, recorded here rather than tolerated quietly:
+//     internal/arch also unwraps a PARENTHESISED type, because `Token
+//     (secret.String)` is legal Go and is a secret.String with no container at
+//     all. A go-review plant showed it evading both rules. This walk does not
+//     have that case yet; the follow-up bead carries it, and until then arch is
+//     the stricter of the two by exactly one spelling.
+//     Neither treats `chan secret.String` as a bearer, and that is deliberate on
+//     both sides: a channel field renders as an address under slog.Any and %v, so
+//     it cannot spill its contents into a log line the way a slice or map can.
+//
+//     The code is duplicated rather than shared, because this file is
 //     `package logging_test` and a test file cannot be imported; if a third rule
 //     ever wants the predicate, that is the moment to give it a real home.
 //
@@ -215,11 +225,13 @@ const markerPrefix = "//redaction:covers "
 //     0vk.46; it now walks the whole file and subtracts the package-level
 //     declarations, so a struct inside a plain function, inside a method, inside
 //     a package-level func literal, and a function-local ALIAS are all seen. An
-//     earlier version of this branch walked only function BODIES and review
-//     measured that it still missed the last two. It reports such a type with a DIFFERENT message from this one's
-//     advice, and the difference is not cosmetic: Go does not allow a method on a
-//     type declared in a function body, so the remedy there is to hoist the type,
-//     not to add a LogValue to it.
+//     earlier version of this branch walked only function BODIES, and review
+//     measured that it still missed the last two.
+//
+//     arch reports such a type with a DIFFERENT message from this one's advice,
+//     because the remedy differs: Go does not allow a method on a type declared
+//     in a function body, so there the fix is to hoist the type rather than to
+//     give it a LogValue.
 func secretBearingTypes(t *testing.T, files []moduleFile) ([]secretBearer, []string) {
 	t.Helper()
 	var found []secretBearer
