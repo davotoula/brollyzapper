@@ -200,12 +200,9 @@ const markerPrefix = "//redaction:covers "
 //     arrays and maps including KEYS (holdsASecret), and refuse aliases and
 //     redefinitions outright rather than chase them (aliasesASecret). Both rules
 //     now agree on every one of those shapes, and both keep permanent plants for
-//     them — with ONE difference, recorded here rather than tolerated quietly:
-//     internal/arch also unwraps a PARENTHESISED type, because `Token
-//     (secret.String)` is legal Go and is a secret.String with no container at
-//     all. A go-review plant showed it evading both rules. This walk does not
-//     have that case yet; the follow-up bead carries it, and until then arch is
-//     the stricter of the two by exactly one spelling.
+//     them. A SEVENTH spelling — `Token (secret.String)`, where the parens are
+//     not a container but spelling — evaded both, was closed in arch by 0vk.46
+//     and here by g5n; the two copies now agree on every spelling there is.
 //     Neither treats `chan secret.String` as a bearer, and that is deliberate on
 //     both sides: a channel field renders as an address under slog.Any and %v, so
 //     it cannot spill its contents into a log line the way a slice or map can.
@@ -345,9 +342,17 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 }
 
 // isSecretString reports whether expr denotes a secret.String, through any number
-// of pointers, slices, arrays and maps. Map KEYS are unwrapped as well as values:
-// a secret is no less exposed for being on the left of the colon, and the cost of
-// checking is one recursive call.
+// of pointers, slices, arrays, maps and parentheses. Map KEYS are unwrapped as
+// well as values: a secret is no less exposed for being on the left of the colon,
+// and the cost of checking is one recursive call.
+//
+// A NAMED GAP, chosen rather than missed: `chan secret.String` is NOT a bearer.
+// internal/arch plants it and requires it to pass, and that is the intended
+// answer — a channel field renders as an address under slog.Any and under %v, so
+// unlike a slice or a map it cannot spill its contents into a log line. The other
+// container cases are here because they DO print their elements. If a rendering
+// path is ever added that walks a channel, this is the line to revisit, and it
+// should be revisited on that reason rather than by symmetry.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
@@ -356,6 +361,13 @@ func isSecretString(expr ast.Expr, names map[string]bool) bool {
 		return isSecretString(t.Elt, names)
 	case *ast.MapType:
 		return isSecretString(t.Key, names) || isSecretString(t.Value, names)
+	case *ast.ParenExpr:
+		// `Token (secret.String)` is legal Go and IS a secret.String — the parens
+		// are not a container, they are spelling, and gofmt keeps them. Found by
+		// the go-review pass on 0vk.46, which planted it in internal/arch and
+		// watched a secret-bearing struct with no LogValue pass clean; this copy
+		// carried the same hole for a day longer (g5n).
+		return isSecretString(t.X, names)
 	case *ast.SelectorExpr:
 		pkg, ok := t.X.(*ast.Ident)
 		return ok && names[pkg.Name] && t.Sel.Name == "String"

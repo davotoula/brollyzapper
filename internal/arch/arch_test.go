@@ -1749,12 +1749,12 @@ func (s Server) LogValue() slog.Value {
 func (s Server) String() string { return s.AdminPassword.Reveal() }
 `)}), "Server.String names Reveal")
 
-	// Format, added by 4on. THE SAME PLANT AS BEFORE, with its sign changed: it
-	// used to sit in TestAFormatMethodMayNameReveal and assert `clean`, pinning an
-	// exclusion. The exclusion is reversed, so the plant moves rather than being
-	// deleted — the seam stays pinned, in the other direction, by the identical
-	// source. It is a REAL fmt.Formatter, which matters: an earlier version of the
-	// exclusion test used `Format() ([]byte, error)`, which is no fmt.Formatter at
+	// Format, added by 4on. THE SAME PLANT AS BEFORE, with its sign changed: until
+	// 4on this exact source sat in a test of its own and asserted `clean`, pinning
+	// the 0vk.43 exclusion. Reversing the ruling moved the plant rather than
+	// deleting it, so the seam stays pinned — in the other direction, by identical
+	// source. That it is a REAL fmt.Formatter is load-bearing: an earlier version
+	// of that test used `Format() ([]byte, error)`, which is no fmt.Formatter at
 	// all, and so pinned a method the seam does not have.
 	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
 
@@ -1861,11 +1861,11 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 // container cases are here because they DO print their elements. If a rendering
 // path is ever added that walks a channel, this is the line to revisit.
 //
-// The ParenExpr case is a DIFFERENCE FROM THE MODEL in internal/logging, which
-// does not have it yet — see the differences list on secretBearingTypes there,
-// and BrollyZap-g5n is filed to close it. Two copies that must agree now disagree by one
-// case, which is exactly the drift this pair's comments warn about; it is
-// recorded rather than quietly tolerated.
+// The ParenExpr case was for one day a DIFFERENCE FROM THE MODEL in
+// internal/logging, which 0vk.46 could not touch and g5n closed. The two copies
+// now agree on every spelling, which is the property this pair's comments exist
+// to keep true — see the differences list on secretBearingTypes there for what
+// separates them, which is no longer anything about how a field is written.
 func isSecretString(expr ast.Expr, names map[string]bool) bool {
 	switch t := expr.(type) {
 	case *ast.StarExpr:
