@@ -489,41 +489,134 @@ func checkDeclarationStructAssertions(t *testing.T, rel string, src []byte) []st
 		t.Fatalf("parsing %s: %v", rel, err)
 	}
 	var found []string
+	report := func(pos token.Pos) {
+		found = append(found, fmt.Sprintf("%s:%d: a .Type is matched against *ast.StructType "+
+			"directly; that is false for a parenthesised type — `(struct{...})` — which is "+
+			"legal Go that gofmt keeps, and it is how 0vk.52 hid. Strip the parens first: "+
+			"declaredStruct for a declaration's type, stripParens for any other",
+			rel, fset.Position(pos).Line))
+	}
 	ast.Inspect(parsed, func(n ast.Node) bool {
-		asserted, ok := n.(*ast.TypeAssertExpr)
-		if !ok {
-			return true
+		switch node := n.(type) {
+		case *ast.TypeAssertExpr:
+			// A nil Type is the guard of a type SWITCH, `x.(type)`, which the case
+			// below handles as a whole statement. The /simplify pass removed this
+			// check as dead and was right at the time; the go-review pass made it
+			// live again by adding the type switch.
+			if node.Type == nil || !assertsAStructType(node.Type) || !isADotType(node.X) {
+				return true
+			}
+			report(node.Pos())
+		case *ast.TypeSwitchStmt:
+			// `switch st := ts.Type.(type) { case *ast.StructType: }` is the same
+			// decision written the other idiomatic way, and it evaded the first
+			// version of this rule. Found by the go-review pass, which observed that
+			// a type switch is at least as natural a spelling for the "sixth site,
+			// written next year" this rule exists to stop.
+			guard := typeSwitchSubject(node)
+			if guard == nil || !isADotType(guard) {
+				return true
+			}
+			for _, stmt := range node.Body.List {
+				clause, ok := stmt.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, typ := range clause.List {
+					if assertsAStructType(typ) {
+						report(node.Pos())
+						return true
+					}
+				}
+			}
 		}
-		star, ok := asserted.Type.(*ast.StarExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := star.X.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "StructType" {
-			return true
-		}
-		if pkg, isIdent := sel.X.(*ast.Ident); !isIdent || pkg.Name != "ast" {
-			return true
-		}
-		operand, ok := asserted.X.(*ast.SelectorExpr)
-		if !ok || operand.Sel.Name != "Type" {
-			return true
-		}
-		found = append(found, fmt.Sprintf("%s:%d: a declaration's type is asserted to be a "+
-			"*ast.StructType directly; that assertion is false for `type T (struct{...})`, "+
-			"which is legal Go that gofmt keeps, and it is how 0vk.52 hid. Ask "+
-			"declaredStruct instead", rel, fset.Position(asserted.Pos()).Line))
 		return true
 	})
 	return found
 }
 
+// assertsAStructType reports whether expr is the literal `*ast.StructType`.
+func assertsAStructType(expr ast.Expr) bool {
+	star, ok := expr.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := star.X.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "StructType" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "ast"
+}
+
+// isADotType reports whether expr selects a `.Type` field.
+//
+// IT DOES NOT ASK WHOSE, and that is deliberate rather than sloppy. The
+// go-review pass raised `field.Type.(*ast.StructType)` as a false positive,
+// since declaredStruct takes a *ast.TypeSpec and could not be the remedy there.
+// Measured: a field typed `(struct{ X int })` makes that assertion false too, so
+// the rule is RIGHT to fire and only the advice was wrong. The message now names
+// both remedies, and the rule keeps having no exemption list.
+func isADotType(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Type"
+}
+
+// typeSwitchSubject returns the expression a type switch switches on.
+func typeSwitchSubject(stmt *ast.TypeSwitchStmt) ast.Expr {
+	var guard ast.Expr
+	switch assign := stmt.Assign.(type) {
+	case *ast.ExprStmt: // switch x.(type)
+		guard = assign.X
+	case *ast.AssignStmt: // switch v := x.(type)
+		if len(assign.Rhs) != 1 {
+			return nil
+		}
+		guard = assign.Rhs[0]
+	default:
+		return nil
+	}
+	asserted, ok := guard.(*ast.TypeAssertExpr)
+	if !ok {
+		return nil
+	}
+	return asserted.X
+}
+
 // plantedFifthSite is the violation the rule above must catch: a new walk, added
 // without reading declaredStruct's comment, asking the question bare.
+//
+// TWO SPELLINGS, because Go has two and an author picks by habit. The type switch
+// was missed by the first version of this rule and was found by the go-review
+// pass, which pointed out that it is at least as natural a way to write the same
+// decision. Both are planted; neither is hypothetical.
 const plantedFifthSite = `package p
 
 func aFifthSite(ts *ast.TypeSpec) {
 	if st, ok := ts.Type.(*ast.StructType); ok {
+		_ = st
+	}
+}
+`
+
+const plantedTypeSwitchSite = `package p
+
+func aSixthSite(ts *ast.TypeSpec) {
+	switch st := ts.Type.(type) {
+	case *ast.StructType:
+		_ = st
+	}
+}
+`
+
+// plantedFieldSite is the shape the go-review pass raised as a false positive.
+// It is not one — a field typed `(struct{...})` defeats that assertion exactly as
+// a declaration does — so the rule must keep firing on it, and the message names
+// stripParens as well as declaredStruct.
+const plantedFieldSite = `package p
+
+func aFieldSite(field *ast.Field) {
+	if st, ok := field.Type.(*ast.StructType); ok {
 		_ = st
 	}
 }
@@ -558,9 +651,16 @@ func TestOnlyTheHelperAsksWhetherADeclarationIsAStruct(t *testing.T) {
 		t.Errorf("scanned %d files in internal/logging; the package has more than that, so "+
 			"this rule is reading the wrong thing", scanned)
 	}
-	if len(checkDeclarationStructAssertions(t, "planted.go", []byte(plantedFifthSite))) == 0 {
-		t.Error("the planted fifth site was NOT detected; this rule can no longer fail, " +
-			"which means it has been written rather than tested")
+	for _, plant := range []struct{ name, src string }{
+		{"a bare type assertion", plantedFifthSite},
+		{"a type switch, which is the same decision written the other way", plantedTypeSwitchSite},
+		{"a bare assertion on a FIELD's type, which is paren-blind too", plantedFieldSite},
+	} {
+		if len(checkDeclarationStructAssertions(t, "planted.go", []byte(plant.src))) == 0 {
+			t.Errorf("the planted violation (%s) was NOT detected; this rule can no longer "+
+				"fail for that spelling, which means it has been written rather than tested",
+				plant.name)
+		}
 	}
 }
 
