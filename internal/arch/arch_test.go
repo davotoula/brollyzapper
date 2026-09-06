@@ -1569,14 +1569,15 @@ func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
 // LogValue on a test-only fixture type is unscanned. No such type exists today
 // and the redaction tests would still be the thing that caught it.
 //
-// IT COVERS FOUR RENDERING SEAMS and no others: LogValue, String, GoString and
-// Error (0vk.43 added the last three). They are one shape and one argument. All
-// four are pure rendering, all four are what %v, %s and %#v reach — %v takes an
-// error's Error() ahead of Stringer — and secret.String implements the rendering
-// ones precisely so a secret cannot print itself (internal/secret/secret.go).
-// Naming Reveal inside any of them is never legitimate, for any type, ever, which
-// is the property that makes this rule worth having and the property any widening
-// has to preserve.
+// IT COVERS FIVE RENDERING SEAMS and no others: LogValue, String, GoString,
+// Error (0vk.43 added those three) and Format (4on). They are one shape and one
+// argument. All five are pure rendering, all five are what %v, %s and %#v reach,
+// and the fmt package resolves them in a fixed order — Formatter first, then
+// error, then Stringer — so each one in turn can bypass the ones below it.
+// secret.String implements the rendering ones precisely so a secret cannot print
+// itself (internal/secret/secret.go). Naming Reveal inside any of them is never
+// legitimate, for any type, ever, which is the property that makes this rule
+// worth having and the property any widening has to preserve.
 //
 // It matches the NAME, not the receiver's type: a Reveal on something unrelated
 // to secret.String inside a String() would be reported too. That is deliberate
@@ -1586,35 +1587,37 @@ func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
 // Measured before widening: a String() returning p.Token.Reveal(), on a type with
 // a perfectly good redacting LogValue, passed this rule. So did a GoString().
 //
-// MarshalJSON, MarshalText AND Format ARE DELIBERATELY EXCLUDED, on a HEDGE
-// rather than on an example. No type here reveals through one today —
-// secret.String's own MarshalJSON returns Redacted and is the tree's only one
-// outside internal/lnd/lnrpc — so the ban would be green on day one, and an
-// earlier version of this argument cited internal/store/nwc.go as a
-// counterexample, which was WRONG: that code binds Reveal() as a raw SQL
-// argument, not through encoding/json. The real reason is an asymmetry of
-// purpose. LogValue, String and GoString exist for rendering alone, which §12
-// forbids secrets from reaching absolutely. Marshalling is also how a value is
-// exported, persisted or backed up, where revealing is sometimes exactly right —
-// so it is the first name in this rule that could ever need an exemption, and an
-// exemption list is what this rule exists not to have. A total ban on three names
-// is worth more than a table on six.
+// MarshalJSON AND MarshalText ARE DELIBERATELY EXCLUDED, on a HEDGE rather than
+// on an example. No type here reveals through one today — secret.String's own
+// MarshalJSON returns Redacted and is the tree's only one outside
+// internal/lnd/lnrpc — so the ban would be green on day one, and an earlier
+// version of this argument cited internal/store/nwc.go as a counterexample, which
+// was WRONG: that code binds Reveal() as a raw SQL argument, not through
+// encoding/json. The real reason is an asymmetry of purpose. The five seams above
+// exist for rendering alone, which §12 forbids secrets from reaching absolutely.
+// Marshalling is also how a value is exported, persisted or backed up, where
+// revealing is sometimes exactly right — so it is the first name in this rule that
+// could ever need an exemption, and an exemption list is what this rule exists not
+// to have. A total ban on five names is worth more than a table on seven.
 //
 // That exclusion is a TESTED property rather than a comment:
 // TestAMarshalMethodMayNameReveal plants one and requires it to pass.
 // renderingSeams are the method names this rule scans.
 //
-// Error IS ONE OF THEM, added on the rule's own stated criterion rather than on
-// the brief, which did not consider it: %v reaches an error's Error() ahead of
-// Stringer, so it is pure rendering by exactly the test that admitted String and
-// GoString — and a secret in an error message is precisely what §12 forbids.
-// Measured green: the two Error methods in the tree (config.VarError,
-// lnurl.Rejection) return plain fields.
-//
-// FORMAT IS NOT, and that is a ruling this branch implements rather than agrees
-// with. See TestAFormatMethodMayNameReveal for the gap, stated and tested.
+// Error and Format were both added on the rule's own stated criterion rather than
+// on a brief that considered them. %v reaches an error's Error() ahead of
+// Stringer, and a secret in an error message is precisely what §12 forbids;
+// fmt.Formatter outranks Stringer, GoStringer AND error, so a type that has one
+// has its String() bypassed entirely and Format is the most purely rendering seam
+// of the five. 0vk.43 excluded Format alongside the two marshallers, and 4on
+// reversed that on the measurement: the marshalling argument — sometimes it is
+// right to export a value — is true of MarshalJSON and MarshalText and says
+// nothing whatever about fmt.Formatter, which exports to nobody. Measured green
+// on both: the two Error methods in the tree (config.VarError, lnurl.Rejection)
+// return plain fields, and the tree has no fmt.Formatter outside
+// internal/lnd/lnrpc.
 var renderingSeams = map[string]bool{
-	"LogValue": true, "String": true, "GoString": true, "Error": true,
+	"LogValue": true, "String": true, "GoString": true, "Error": true, "Format": true,
 }
 
 func checkLogValueBodiesNeverReveal(t *testing.T, files []sourceFile) []problem {
@@ -1709,7 +1712,7 @@ func (s Server) LogValue() slog.Value {
 // the thing worth pinning is that each NAME is reached; the bodies differ so each
 // message can be read for the method it names. The exclusion test below DOES
 // loop, and that is the difference: there every case asserts the same nothing.
-func TestNoStringGoStringOrErrorBodyNamesReveal(t *testing.T) {
+func TestNoStringGoStringErrorOrFormatBodyNamesReveal(t *testing.T) {
 	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
 
 func (s Server) String() string {
@@ -1745,6 +1748,22 @@ func (s Server) LogValue() slog.Value {
 
 func (s Server) String() string { return s.AdminPassword.Reveal() }
 `)}), "Server.String names Reveal")
+
+	// Format, added by 4on. THE SAME PLANT AS BEFORE, with its sign changed: it
+	// used to sit in TestAFormatMethodMayNameReveal and assert `clean`, pinning an
+	// exclusion. The exclusion is reversed, so the plant moves rather than being
+	// deleted — the seam stays pinned, in the other direction, by the identical
+	// source. It is a REAL fmt.Formatter, which matters: an earlier version of the
+	// exclusion test used `Format() ([]byte, error)`, which is no fmt.Formatter at
+	// all, and so pinned a method the seam does not have.
+	catches(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
+
+import "fmt"
+
+func (s Server) Format(f fmt.State, verb rune) {
+	fmt.Fprint(f, s.AdminPassword.Reveal())
+}
+`)}), "Server.Format names Reveal")
 }
 
 // The marshalling exclusion is a TESTED property, not a sentence in a comment.
@@ -1767,33 +1786,6 @@ func (s Server) `+method+`() ([]byte, error) {
 `)}))
 		})
 	}
-}
-
-// AND FORMAT IS A KNOWN GAP, recorded rather than hidden (BrollyZap-4on, filed on the
-// 0vk.43 branch).
-//
-// 0vk.43's ruling excludes MarshalJSON, MarshalText and Format together, on the
-// argument that marshalling is also how a value is legitimately exported. That
-// argument does not reach Format. fmt.Formatter is not a marshaller: it takes
-// precedence over Stringer, GoStringer AND error, so it is the most purely
-// rendering seam of the lot — the widening's own criterion admits it, and the
-// exclusion's reason does not cover it.
-//
-// The ruling is implemented as written, because a ruling is not this branch's to
-// overturn. What is NOT acceptable is pinning it with a plant that isn't the
-// thing: an earlier version of this test used `Format() ([]byte, error)`, which
-// is no fmt.Formatter at all, so it asserted the exclusion for a method the seam
-// does not have. This plant has the real signature, so the gap it documents is
-// the real one.
-func TestAFormatMethodMayNameReveal(t *testing.T) {
-	clean(t, checkLogValueBodiesNeverReveal(t, []sourceFile{planted("internal/config", `package config
-
-import "fmt"
-
-func (s Server) Format(f fmt.State, verb rune) {
-	fmt.Fprint(f, s.AdminPassword.Reveal())
-}
-`)}))
 }
 
 // secretNames, isSecretString, aliasesASecret and holdsASecret are ports
