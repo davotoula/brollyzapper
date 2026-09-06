@@ -231,7 +231,7 @@ type Plain struct {
 	}
 
 	// A second name for secret.String is refused rather than followed. See
-	// aliasesASecret for why forbidding beats resolving.
+	// namesASecret for why forbidding beats resolving.
 	for _, c := range []struct{ name, src, want string }{{
 		name: "an alias for secret.String",
 		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
@@ -248,7 +248,7 @@ type Plain struct {
 		want: "",
 	}, {
 		// A NAMED CONTAINER OF AN ANONYMOUS STRUCT IS NOT A SECOND NAME. 0vk.48
-		// taught isSecretString to see into an anonymous struct, and aliasesASecret
+		// taught isSecretString to see into an anonymous struct, and namesASecret
 		// reuses it, so without containsAnonymousStruct these three reported "gives
 		// secret.String a second name" — false about a named slice or map type,
 		// which drops nothing and names nothing. Measured against main, which
@@ -269,12 +269,40 @@ type Plain struct {
 		want: "",
 	}, {
 		// AND THE SHAPES THAT MUST KEEP REPORTING, so the narrowing above did not
-		// quietly turn aliasesASecret off. `type T []secret.String` is reported
-		// today and is not a second name either — an older conflation, left alone
-		// deliberately and filed as 0vk.50; pinned here so 0vk.50 has a before.
-		name: "a named slice of secret.String still reports (0vk.50 owns whether it should)",
+		// quietly turn the rule off. A named CONTAINER of secrets is reported, and
+		// since 0vk.50 with a message that is true of one: T is not a second name,
+		// and its elements keep every redaction they had.
+		name: "a named slice of secret.String is a container, not a second name",
 		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
 			"type T []secret.String\n",
+		want: "T is a named container of secret.String",
+	}, {
+		// The pointer form, which reported the same wrong thing and is the same
+		// answer. Added by 0vk.50; before it, both said "another name for
+		// secret.String … also drops LogValue, String, GoString and MarshalJSON",
+		// every clause of which is false of a named pointer type.
+		name: "a named pointer to secret.String is a container too",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T *secret.String\n",
+		want: "T is a named container of secret.String",
+	}, {
+		// And the identity shapes are UNCHANGED, which is the half a rewording can
+		// break silently: an alias and a redefinition really are second names.
+		name: "an alias is still a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T = secret.String\n",
+		want: "declares T as another name for secret.String",
+	}, {
+		name: "a redefinition is still a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T secret.String\n",
+		want: "declares T as another name for secret.String",
+	}, {
+		// Parenthesised identity is identity: the parens are spelling, as
+		// isSecretString has said since g5n.
+		name: "a parenthesised alias is still a second name",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type T = (secret.String)\n",
 		want: "declares T as another name for secret.String",
 	}, {
 		name: "a struct is not an alias",
@@ -450,18 +478,73 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		})
 	}
 
-	// Criterion 3: an unrecognised node in a TypeSpec is not a second name for
-	// secret.String. It falls out of the bool answer rather than needing a guard,
-	// and it is planted because the day someone changes that bool is the day
-	// aliasesASecret starts reporting "T gives secret.String a second name" about
-	// a node kind nobody has ever seen.
+	// Criterion 3: an unrecognised node in a TypeSpec is NEITHER a second name for
+	// secret.String NOR a container of one. It falls out of the answers rather
+	// than needing a guard, and it is planted because the day someone changes
+	// those answers is the day namesASecret starts making a claim about a node
+	// kind nobody has ever seen — and since 0vk.50 there are two claims it could
+	// make, so both are pinned.
 	unknown := &unknownNodes{}
 	ts := &ast.TypeSpec{Name: ast.NewIdent("T"), Type: &ast.BadExpr{}}
-	if aliasesASecret(ts, names, unknown) {
-		t.Error("an unrecognised node was reported as a second name for secret.String")
+	if got := namesASecret(ts, names, unknown); got != namesNoSecret {
+		t.Errorf("an unrecognised node was classified %v; it is neither a second name for "+
+			"secret.String nor a container of one", got)
 	}
 	if len(unknown.nodes) != 1 {
-		t.Errorf("aliasesASecret dropped the collector, so a new node kind first met in a "+
+		t.Errorf("namesASecret dropped the collector, so a new node kind first met in a "+
 			"TypeSpec would go unreported (%d collected)", len(unknown.nodes))
+	}
+	// 0vk.51: COLLECTION WITHOUT DIAGNOSIS, and the guard that stops it becoming
+	// double collection.
+	//
+	// Synthesised for the same reason as the plants above — an unrecognised node
+	// cannot be written in real Go — and it is the only way to pin this
+	// permanently: the property was measured by dropping the ChanType case, which
+	// is a mutation and leaves nothing behind.
+	inner := func() *ast.StructType {
+		return &ast.StructType{Fields: &ast.FieldList{List: []*ast.Field{{Type: &ast.BadExpr{}}}}}
+	}
+	for _, c := range []struct {
+		name string
+		typ  ast.Expr
+		want int
+	}{
+		// A WRAPPER: the walk cannot descend it, because ts.Type is not a
+		// StructType, so namesASecret has to collect on its behalf.
+		{"a named slice of an anonymous struct", &ast.ArrayType{Elt: inner()}, 1},
+		{"a named map valued by one", &ast.MapType{Key: ast.NewIdent("string"), Value: inner()}, 1},
+		{"a named map keyed by one", &ast.MapType{Key: inner(), Value: ast.NewIdent("bool")}, 1},
+		{"a named pointer to one", &ast.StarExpr{X: inner()}, 1},
+		// A WRAPPER HOLDING BOTH: a real secret AND an unrecognised node. The
+		// collector must still see the second, which is only true because
+		// holdsASecret visits every field rather than stopping at the first secret
+		// (0vk.49). Added on the go-review pass, which measured the behaviour as
+		// correct and observed that nothing pinned it — a change back to
+		// slices.ContainsFunc would regress this shape silently while every other
+		// row here stayed green.
+		{"a wrapper holding a secret AND an unrecognised node", &ast.ArrayType{Elt: &ast.StructType{
+			Fields: &ast.FieldList{List: []*ast.Field{
+				{Type: &ast.SelectorExpr{X: ast.NewIdent("secret"), Sel: ast.NewIdent("String")}},
+				{Type: &ast.BadExpr{}},
+			}},
+		}}, 1},
+		// A BARE STRUCT: the walk descends this itself through holdsASecret, so
+		// collecting here as well would report the node twice. Nought is the whole
+		// assertion.
+		{"a bare anonymous struct, which the walk descends itself", inner(), 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			unknown := &unknownNodes{}
+			ts := &ast.TypeSpec{Name: ast.NewIdent("T"), Type: c.typ}
+			if got := namesASecret(ts, names, unknown); got != namesNoSecret {
+				t.Errorf("classified %v; a named wrapper over an anonymous struct is neither "+
+					"a second name nor a reported container (0vk.50's ruling)", got)
+			}
+			if len(unknown.nodes) != c.want {
+				t.Errorf("collected %d unrecognised nodes, want %d; 0vk.49's guarantee has to "+
+					"reach inside a wrapper, and must not report a bare struct's nodes twice",
+					len(unknown.nodes), c.want)
+			}
+		})
 	}
 }
