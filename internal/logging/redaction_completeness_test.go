@@ -357,7 +357,8 @@ func holdsASecret(st *ast.StructType, names map[string]bool) bool {
 // an *ast.StructType here and has no TypeSpec of its own, so neither the field
 // nor the inner type is ever seen and the CONTAINER escapes the LogValue
 // requirement — the ParenExpr class again, measured green on the whole tree.
-// `Token Box[secret.String]` is an *ast.IndexExpr; that one is a chosen boundary
+// `Token Box[secret.String]` is an *ast.IndexExpr (and `pkg.Pair[string,
+// secret.String]` an *ast.IndexListExpr); those are a chosen boundary
 // rather than an oversight, because `type Box[T any] struct{ n int }` never
 // stores its T and unwrapping the argument would report a struct holding no
 // secret at all.

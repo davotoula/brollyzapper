@@ -76,9 +76,16 @@ type Plain struct {
 			"module's types", in)
 	}
 
-	// The four spellings that left BOTH this rule and internal/arch green on
-	// 2026-09-05, each with no LogValue anywhere. Every one of them is an
+	// Spellings that left BOTH this rule and internal/arch green with no LogValue
+	// anywhere, plus two controls that must NOT be read as bearers. Every one is an
 	// ordinary thing to write.
+	//
+	// DELIBERATELY NOT COUNTED HERE. The enumeration is split three ways — the
+	// pointer and the slice are in the fixture above, the alias and the
+	// redefinition in the loop below, the rest here — so a number in this comment
+	// is a fourth statement of a list and goes stale on any edit to any of them. It
+	// already had: the header said "four" while the loop held three of them. The
+	// authoritative list is the first bullet on secretBearingTypes.
 	for _, c := range []struct{ name, src, want string }{{
 		name: "the package imported under an alias",
 		src: "package store\n\nimport sec \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
@@ -111,6 +118,28 @@ type Plain struct {
 		src: "package store\n\nimport _ \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
 			"type Pairing struct {\n\tToken String\n}\n",
 		want: "",
+	}, {
+		// THE BOUNDARY THE PAREN CASE MUST NOT CROSS. Parens unwrap SPELLING, and
+		// the shapes deliberately excluded stay excluded when they are wrapped in
+		// them — a parenthesised channel is still a channel. Kept because the
+		// go-review pass had to establish it by hand, and a property established by
+		// hand is one nobody can re-establish after a refactor.
+		name: "a parenthesised chan is still a chan",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tToken (chan secret.String)\n}\n",
+		want: "",
+	}, {
+		name: "a parenthesised func is still a func",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tToken (func() secret.String)\n}\n",
+		want: "",
+	}, {
+		// And it composes with the containers rather than shadowing them: parens
+		// around a pointer, and parens around parens, are both still the secret.
+		name: "a parenthesised pointer, and parens around parens",
+		src: "package store\n\nimport \"github.com/davotoula/brollyzapper/internal/secret\"\n\n" +
+			"type Pairing struct {\n\tOne (*secret.String)\n\tTwo ((secret.String))\n}\n",
+		want: "store.Pairing",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			got, _ := secretBearingTypes(t, []moduleFile{planted("internal/store",

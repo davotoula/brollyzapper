@@ -1593,6 +1593,21 @@ func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
 // and cheap today — secret.String.Reveal is the only Reveal in the non-generated
 // tree — and it is the same trade as matching the selector rather than the call.
 //
+// FORMAT WIDENS THAT SURFACE MOST, and knowingly. The other four names are
+// reserved by convention; "Format" is an ordinary English verb, and a
+// `func (m Msat) Format() string` that had nothing to do with fmt.Formatter would
+// be scanned all the same. It cannot fire unless that body ALSO names Reveal, so
+// it is inert today — but if it ever does fire on such a method, the message
+// below calls it "a rendering method", which would then be wrong: no fmt verb
+// reaches it. THE ANSWER IS NOT AN EXEMPTION and not a signature check. A
+// syntactic signature match would compare a rendered `fmt.State` against a
+// literal, which `import f "fmt"` defeats silently — the exact bug 0vk.46 spent a
+// bead removing, and internal/arch type-checks nothing (loadPackages parses
+// ImportsOnly). The answer is that a method named Format, fmt.Formatter or not,
+// still has no business naming Reveal; fix the body, and if the day comes that
+// one genuinely must, that is this rule's first real exemption and a decision to
+// take deliberately.
+//
 // Measured before widening: a String() returning p.Token.Reveal(), on a type with
 // a perfectly good redacting LogValue, passed this rule. So did a GoString().
 //
@@ -1877,7 +1892,8 @@ func secretNames(file *ast.File, dir string) map[string]bool {
 // is an *ast.StructType here and has no TypeSpec of its own, so neither the field
 // nor the inner type is ever seen and the CONTAINER escapes the LogValue
 // requirement — the ParenExpr class again, measured green on the whole tree.
-// `Token Box[secret.String]` is an *ast.IndexExpr; that one is a chosen boundary
+// `Token Box[secret.String]` is an *ast.IndexExpr (and `pkg.Pair[string,
+// secret.String]` an *ast.IndexListExpr); those are a chosen boundary
 // rather than an oversight, because `type Box[T any] struct{ n int }` never
 // stores its T and unwrapping the argument would report a struct holding no
 // secret at all. Note typeString already learned IndexExpr for generic
