@@ -211,9 +211,12 @@ const markerPrefix = "//redaction:covers "
 //     lndtest. A directory a rule refuses to look in is a place a type can sit
 //     unrendered, so this walk still has no skip list at all.
 //
-//   - BOTH NOW SEE LOCAL STRUCTS. arch read file.Decls until 0vk.46, so a struct
-//     declared inside a function was invisible to it; it walks function bodies
-//     now. It reports such a type with a DIFFERENT message from this one's
+//   - BOTH NOW SEE LOCAL TYPES, by the same method. arch read file.Decls until
+//     0vk.46; it now walks the whole file and subtracts the package-level
+//     declarations, so a struct inside a plain function, inside a method, inside
+//     a package-level func literal, and a function-local ALIAS are all seen. An
+//     earlier version of this branch walked only function BODIES and review
+//     measured that it still missed the last two. It reports such a type with a DIFFERENT message from this one's
 //     advice, and the difference is not cosmetic: Go does not allow a method on a
 //     type declared in a function body, so the remedy there is to hoist the type,
 //     not to add a LogValue to it.
