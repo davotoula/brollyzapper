@@ -157,6 +157,7 @@ need_sqlite() {
 sql() { docker run --rm -v "$DBVOL:/data" "$SQLITE_IMAGE" -readonly /data/brollyzapper.db "$@"; }
 
 say "0. baseline"
+[ -d "$LNDDIR" ] || die "$LNDDIR is not here: this suite bind-mounts a host path under $(pwd)/data, so it must run from the tree the stack was brought up in"
 # Every log search below is scoped to this run. The first version was not, and
 # on the second run it matched the FIRST run's macaroon.rotate line, reported a
 # pass, and then computed the settling delay from a timestamp minutes in the

@@ -209,6 +209,7 @@ say "0. setup"
 command -v docker >/dev/null || die "docker is not on PATH"
 command -v jq >/dev/null || die "jq is not on PATH"
 docker compose ps -q guard >/dev/null 2>&1 || die "the regtest stack is not up (docker compose up -d)"
+[ -f data/lnd/tls.cert ] || die "regtest/data/lnd/tls.cert is not here: this suite bind-mounts a host path under $(pwd)/data, so it must run from the tree the stack was brought up in"
 case "$(docker run --rm "$TOOL_IMAGE" uname -m)" in
   aarch64|arm64) GOARCH=arm64 ;;
   x86_64|amd64)  GOARCH=amd64 ;;
