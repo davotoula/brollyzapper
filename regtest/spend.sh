@@ -28,7 +28,27 @@ LND_IMAGE="${LND_IMAGE:-lightninglabs/lnd:v0.21.1-beta}"
 TOOL_IMAGE="${TOOL_IMAGE:-alpine:3.20}"
 CRED_VOLUME="${CRED_VOLUME:-brollyregtest_credentials}"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# Set once this run has turned sending on; read by the EXIT trap.
+SENDING_TOUCHED=""
+
+# PUT SENDING BACK OFF WHATEVER HAPPENS. §6 already ends with the revoke, but
+# only on the happy path, so an abort anywhere between §2's bake and there left
+# the stack SENDING-ON with a live spend macaroon — the one state this whole
+# suite exists to say an install should not sit in, and the next suite finds it.
+# cap.sh's cleanup() is the precedent and authorise.sh gained the same shape in
+# c8q; this is that shape, for the state this script actually moves.
+#
+# It restores what THIS RUN FOUND: §0 normalises a leftover spend macaroon away
+# before BEFORE_IDS is captured, so "found" is sending off, and revoke-spend is
+# what puts it back. Best effort and silent — a trap that dies hides the failure
+# it was called for, and §6's own assertion is what REPORTS a bad restore.
+cleanup() {
+  local status=$?
+  [ -z "$SENDING_TOUCHED" ] || guardctl revoke-spend >/dev/null 2>&1 || true
+  rm -rf "$WORK"
+  return $status
+}
+trap cleanup EXIT
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '   \033[32mok\033[0m   %s\n' "$*"; }
@@ -132,6 +152,7 @@ say "0. setup"
 command -v docker >/dev/null || die "docker is not on PATH"
 command -v jq >/dev/null || die "jq is not on PATH"
 docker compose ps -q guard >/dev/null 2>&1 || die "the regtest stack is not up (docker compose up -d)"
+[ -f data/lnd/tls.cert ] || die "regtest/data/lnd/tls.cert is not here: this suite bind-mounts a host path under $(pwd)/data, so it must run from the tree the stack was brought up in"
 # The container's architecture, not the host's: the tool runs in the container.
 case "$(docker run --rm "$TOOL_IMAGE" uname -m)" in
   aarch64|arm64) GOARCH=arm64 ;;
@@ -174,6 +195,8 @@ ok "routerrpc refuses the receive macaroon — $(last "$OUT")"
 say "2. bake the spend macaroon THROUGH THE GUARD"
 # The operator permits sending first (`06v`): a fresh install's latch is off,
 # and the guard refuses to bake without it whatever the environment says.
+# From here sending can be on, so the trap owns turning it back off.
+SENDING_TOUCHED=yes
 permit_sending
 guardctl bake-spend || die "the guard refused to bake the spend macaroon"
 cred_exists spend.macaroon || die "no spend.macaroon appeared in the credential volume"

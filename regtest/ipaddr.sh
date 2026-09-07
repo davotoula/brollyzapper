@@ -82,6 +82,7 @@ must_refuse() { accepted "$1" && die "$2"; return 0; }
 say "0. setup"
 command -v docker >/dev/null || die "docker is not on PATH"
 docker compose ps -q lnd >/dev/null 2>&1 || die "the regtest stack is not up (docker compose up -d)"
+[ -f data/lnd/tls.cert ] || die "regtest/data/lnd/tls.cert is not here: this suite bind-mounts a host path under $(pwd)/data, so it must run from the tree the stack was brought up in"
 go build -o "$WORK/mactool" ./tools/mactool || die "could not build tools/mactool"
 ok "mactool built — it adds the one caveat lncli cannot"
 
