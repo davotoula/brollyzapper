@@ -25,7 +25,37 @@ GUARD_DATA_VOLUME="${GUARD_DATA_VOLUME:-brollyregtest_guard-data}"
 # empty string and an assertion built on one inspects nothing.
 SERVER_SERVICE="${SERVER_SERVICE:-brollyzapper}"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+
+# The caps this run moved, and what they were. Read by the EXIT trap.
+CAPS_TOUCHED=""
+BEFORE=""
+PAYMENT_ORIGINAL=""
+
+# PUT THE CAPS BACK WHATEVER HAPPENS. cap.sh's cleanup() is the precedent and the
+# reason is the same, but this script needed it more and did not have it: §6
+# halves the window and §§6-8 restore it only on the happy path, so every ABORTED
+# run left the window at half of what it found. Measured while planting this
+# bead — three aborted runs walked a 100,000-sat window down to 25,000 — and the
+# cost lands on the NEXT suite rather than this one: with the per-payment cap
+# above the window, §6's own first assertion is refused, and cap.sh pays
+# AMOUNT_SATS=20000 against a cap it cannot reach and dies saying that proves
+# nothing about the window.
+#
+# It restores what THIS RUN FOUND, not docker-compose.yml's numbers. "Leave it as
+# you found it" is a contract a script can keep; resetting to the configured
+# values would quietly repair a stack somebody else was midway through.
+cleanup() {
+  local status=$?
+  if [ -n "$CAPS_TOUCHED" ]; then
+    [ -z "$BEFORE" ] || restore_cap spend_cap "$((BEFORE / 1000))" \
+      || printf '   \033[31m..\033[0m   could not put the 24-hour limit back to %s msat\n' "$BEFORE" >&2
+    [ -z "$PAYMENT_ORIGINAL" ] || restore_cap payment_cap "$((PAYMENT_ORIGINAL / 1000))" \
+      || printf '   \033[31m..\033[0m   could not put the per-payment cap back to %s msat\n' "$PAYMENT_ORIGINAL" >&2
+  fi
+  rm -rf "$WORK"
+  return $status
+}
+trap cleanup EXIT
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '   \033[32mok\033[0m   %s\n' "$*"; }
@@ -50,16 +80,30 @@ pending()  { guardctl status | jq -r '.authorisation_pending // false'; }
 window()   { guardctl status | jq -r '.spend_limit_msat // 0'; }
 payment()  { guardctl status | jq -r '.max_payment_msat // 0'; }
 
-# restore_cap <control> <sats> — the ceremony, for TEARDOWN only.
+# restore_cap <control> <sats> — the ceremony, for TEARDOWN only. Returns
+# non-zero rather than dying, because the EXIT trap calls it too and a trap that
+# exits is a trap that hides the failure it was called for.
 #
 # §§1-7 write the three steps out on purpose: the ceremony is this script's
 # subject and they assert between them. §8 asserts only the end state, and once
 # it had two caps to put back it was carrying the triple twice.
+#
+# IDEMPOTENT, and it has to be: the trap runs on the happy path as well, after §8
+# has already put both caps back. RequestAuthorisation has no `alreadyHas`
+# short-circuit the way ApplyChange does, so asking to raise a cap to the value
+# it already holds is refused outright as "not a loosening" — a teardown helper
+# that could not be called twice would turn every clean run red.
 restore_cap() {
-  guardctl authorise "$1" "$2" >/dev/null || die "could not re-authorise $1 to $2 sats"
-  local code
-  code=$(guardctl_op read-code) || die "no code to restore $1 with"
-  guardctl apply "$1" "$2" "$code" || die "could not restore $1 to $2 sats"
+  local control="$1" sats="$2" current code
+  case "$control" in
+    spend_cap)   current=$(window) ;;
+    payment_cap) current=$(payment) ;;
+    *) return 1 ;;
+  esac
+  [ "$current" = "$((sats * 1000))" ] && return 0
+  guardctl authorise "$control" "$sats" >/dev/null || return 1
+  code=$(guardctl_op read-code) || return 1
+  guardctl apply "$control" "$sats" "$code" >/dev/null || return 1
 }
 
 say "0. setup"
@@ -175,6 +219,10 @@ say "6. tightening is free and loosening is not — on the CAPS"
 # that never enabled sending.
 BEFORE=$(window)
 [ "$BEFORE" -gt 0 ] || die "the window cap is $BEFORE msat; this stack sets one, so something is wrong before the assertion starts"
+PAYMENT_ORIGINAL=$(payment)
+[ "$PAYMENT_ORIGINAL" -gt 0 ] || die "the per-payment cap is $PAYMENT_ORIGINAL msat; this stack sets one"
+# From here the caps move, so the trap owns putting them back.
+CAPS_TOUCHED=yes
 LOWER=$((BEFORE / 2))
 guardctl apply spend_cap $((LOWER / 1000)) \
   || die "lowering the 24-hour limit was refused; tightening must cost the operator nothing"
@@ -209,8 +257,6 @@ say "7. the two caps must stay consistent, and the refusal says which to move"
 # section that hardcoded the compose values would assert against a state the
 # script itself had just changed — and would go quietly wrong the day §6 moves.
 WINDOW_NOW=$(window)
-PAYMENT_ORIGINAL=$(payment)
-[ "$PAYMENT_ORIGINAL" -gt 0 ] || die "the per-payment cap is $PAYMENT_ORIGINAL msat; this stack sets one"
 PAYMENT_SATS=$((PAYMENT_ORIGINAL / 1000))
 
 # (1) TIGHTENING the window below the per-payment cap. Refused — and the remedy
@@ -221,9 +267,14 @@ PAYMENT_SATS=$((PAYMENT_ORIGINAL / 1000))
 # is a loosening, refused for want of a code, and the assertion below would fail
 # on the wrong message). Halving satisfies both without a magic number.
 BELOW=$((PAYMENT_SATS / 2))
-# The floor claim 3 drops the per-payment cap to, named once because four lines
-# and a comment read it — one of them used to premultiply it into msat by hand.
-FLOOR=10000
+# THE FLOOR IS DERIVED TOO. It was 10,000 — a constant, in a section whose whole
+# design is that the numbers come from status — and the invariant claims 3 and 4
+# need, that the floor leaves room for a raise under a $BELOW-sat window, was
+# asserted nowhere. On the shipped caps the margin was 12,500 against 10,000 and
+# nobody had written that 25% down; halving GUARD_MAX_PAYMENT_MSAT would have
+# broken this section on a pristine stack, with a message blaming the wrong rule.
+FLOOR=$((BELOW / 2))
+[ "$FLOOR" -lt "$((BELOW - 1))" ] || die "the per-payment cap is only $PAYMENT_SATS sats: a floor of $FLOOR leaves no room for a raise under a $BELOW-sat window"
 [ "$BELOW" -gt 0 ] || die "the per-payment cap is only $PAYMENT_SATS sats; this claim needs room beneath it"
 [ "$BELOW" -lt "$((WINDOW_NOW / 1000))" ] || die "the window is $((WINDOW_NOW / 1000)) sats and this claim needs to TIGHTEN it to $BELOW; a raise would be refused for want of a code, not by the cap pair"
 # THE TEXT AND NOT THE EXIT, because the exit was already non-zero before `8vj`:
@@ -256,9 +307,12 @@ ABOVE=$((WINDOW_NOW / 1000 + 50000))
 # discards outright (`grant.Change != change` -> discardAuthorisation, which
 # clears the file). Asserted rather than assumed: that is two sections away and
 # one edit from being untrue.
-if guardctl_op read-code >/dev/null 2>&1; then
-  die "an authorisation file exists before the refused request; the no-file assertion below would prove nothing"
-fi
+BASELINE_ERR=$(guardctl_op read-code 2>&1) \
+  && die "an authorisation file exists before the refused request; the no-file assertion below would prove nothing"
+case "$BASELINE_ERR" in
+  *"no such file"*) ;;
+  *) die "read-code failed for a reason other than the file's absence, so neither this check nor the one below is about the file: $BASELINE_ERR" ;;
+esac
 # THE COMMAND IS THE ASSERTION. It must be `authorise`, not `apply`: before `pou`
 # the guard checked the cap pair only at ApplyChange, so this REQUEST succeeded,
 # wrote the file and spent the audit budget, and the operator learnt the ordering
@@ -273,13 +327,21 @@ case "$LOOSEN_ERR" in
   *) die "an operator RAISING the per-payment cap was told to move the wrong control (8vj): $LOOSEN_ERR" ;;
 esac
 [ "$(pending)" = "false" ] || die "a refused request left an authorisation outstanding; there is nothing for the operator to redeem"
-if guardctl_op read-code >/dev/null 2>&1; then
-  die "a refused request wrote an authorisation file; the operator was sent to read a code for a change that can never be applied"
-fi
+NOFILE_ERR=$(guardctl_op read-code 2>&1) \
+  && die "a refused request wrote an authorisation file; the operator was sent to read a code for a change that can never be applied"
+case "$NOFILE_ERR" in
+  *"no such file"*) ;;
+  *) die "read-code failed for a reason other than the file's absence, so this proves nothing about pou: $NOFILE_ERR" ;;
+esac
 ok "the loosening is refused at the request: no file, nothing pending, and the remedy names the window"
 
 # (3) THE RIGHT ORDER WORKS, which is what makes the refusal a remedy rather
 # than a wall: do what the message said, and the change goes through.
+# IT HAS TO BE A REAL TIGHTENING. ApplyChange checks state.alreadyHas FIRST and
+# returns nil without doing anything, so if the cap were already at the floor —
+# which an aborted run used to leave behind — this would "succeed" and the
+# assertion below would "confirm" a change that never happened.
+[ "$(payment)" -gt "$((FLOOR * 1000))" ] || die "the per-payment cap is already $(payment) msat, at or below the $((FLOOR * 1000))-msat floor; this claim would pass without changing anything"
 guardctl apply payment_cap "$FLOOR" \
   || die "lowering the per-payment cap to $FLOOR sats was refused; tightening must cost nothing"
 [ "$(payment)" = "$((FLOOR * 1000))" ] || die "the per-payment cap is $(payment) msat after lowering it to $FLOOR sats"
@@ -288,11 +350,21 @@ guardctl apply spend_cap "$BELOW" \
 [ "$(window)" = "$((BELOW * 1000))" ] || die "the window is $(window) msat, want $((BELOW * 1000))"
 ok "doing what the remedy says works: lower the per-payment limit, then the window"
 
-# AND THE REFUSAL SPENT NO CEREMONY BUDGET. `pou` returns before
-# auditAuthorisation precisely so a refused request cannot exhaust a bound an
-# attacker never held a code for; a valid request afterwards proves it, and the
-# two tightenings in between cost no ceremony, so nothing has consumed the budget
-# except — if the bug were back — the refusal itself.
+# AND THE REFUSAL LEFT NOTHING WEDGED: a valid request afterwards still issues a
+# code, and the code still redeems.
+#
+# IT DOES NOT PROVE THE AUDIT BUDGET IS UNSPENT, and an earlier version of this
+# comment claimed it did. That claim could not fail. auditAuthorisation returns
+# NOTHING — on an exhausted authoriseBudget it downgrades to a log-only line and
+# RequestAuthorisation still returns nil — so a request succeeds whether the
+# budget was spent or not, and this step would pass with `pou` reverted. The
+# budget half is proved in-process instead, by
+# TestARequestThatCouldNeverBeAppliedIsRefusedBeforeAnyCodeExists reading
+# resp.Events; asserting it here would need guardctl to relay them, a production
+# change this bead rules out. Found by the go-review pass.
+#
+# What IS proved here is the half a container can see: the refusal left no grant,
+# no file, and nothing wedged behind it.
 #
 # IT RUNS HERE, AFTER CLAIM 3, AND NOT DIRECTLY AFTER THE REFUSAL, because it
 # needs headroom the cap pair allows: a request for the CURRENT value is refused
@@ -304,12 +376,12 @@ ok "doing what the remedy says works: lower the per-payment limit, then the wind
 # had left the window low — measured, twice, while planting.
 NUDGE=$(( FLOOR + (BELOW - FLOOR) / 2 ))
 guardctl authorise payment_cap "$NUDGE" >/dev/null \
-  || die "a valid request for $NUDGE sats was refused after an invalid one; the refusal spent ceremony budget it must not touch"
+  || die "a valid request for $NUDGE sats was refused after an invalid one; the refusal left the ceremony wedged"
 NUDGE_CODE=$(guardctl_op read-code) || die "no readable code for the valid request after the refusal"
 guardctl apply payment_cap "$NUDGE" "$NUDGE_CODE" \
   || die "the code for the valid request would not apply"
 [ "$(payment)" = "$((NUDGE * 1000))" ] || die "the per-payment cap is $(payment) msat, want $((NUDGE * 1000))"
-ok "a valid request afterwards still gets a code, and it redeems: the refusal spent no budget"
+ok "a valid request afterwards still gets a code, and it redeems: the refusal wedged nothing"
 
 # ---------------------------------------------------------------------------
 say "8. put the stack back"
@@ -317,7 +389,7 @@ say "8. put the stack back"
 # beneath the window, and raising it back while the window is still low is the
 # very pair the guard refuses. Restoring in the other order would fail on the
 # rule this script just spent a section proving.
-restore_cap spend_cap $((BEFORE / 1000))
+restore_cap spend_cap $((BEFORE / 1000)) || die "could not restore the 24-hour limit"
 [ "$(window)" = "$BEFORE" ] || die "the cap is $(window) msat, want the original $BEFORE"
 
 # THEN THE PER-PAYMENT CAP, which is a loosening too and so is its own ceremony.
@@ -329,7 +401,7 @@ restore_cap spend_cap $((BEFORE / 1000))
 # nwc_connections, the per-connection cap, with no bearing on the guard's. A
 # suite that leaves the caps where it found them is the only kind that can be run
 # in any order.
-restore_cap payment_cap $((PAYMENT_ORIGINAL / 1000))
+restore_cap payment_cap $((PAYMENT_ORIGINAL / 1000)) || die "could not restore the per-payment cap"
 [ "$(payment)" = "$PAYMENT_ORIGINAL" ] || die "the per-payment cap is $(payment) msat, want the original $PAYMENT_ORIGINAL"
 [ "$(pending)" = "false" ] || die "an authorisation is still outstanding; the next suite would find the stack mid-ceremony"
 guardctl revoke-spend >/dev/null 2>&1 || true
