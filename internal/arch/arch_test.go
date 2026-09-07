@@ -1285,6 +1285,21 @@ func checkSecretBearingFields(t *testing.T, files []sourceFile) []problem {
 }
 
 func TestSecretBearingFieldsUseTheRedactingType(t *testing.T) {
+	// A PARENTHESISED FIELD TYPE, which walked past this rule until 0vk.52.
+	// typeString had no ParenExpr case, so `AdminPassword (string)` rendered as
+	// "*ast.ParenExpr", matched none of the carriers, and the rule stayed green on
+	// a plain-string password. Found by that bead's inventory, not by its brief:
+	// the same family as g5n and 0vk.52 itself, at a third decision point.
+	t.Run("a parenthesised field type", func(t *testing.T) {
+		catches(t, checkSecretBearingFields(t, []sourceFile{planted("internal/api", `package api
+
+type creds struct {
+	AdminPassword (string)
+	MacaroonBytes ([]byte)
+}
+`)}), "must be secret.String")
+	})
+
 	clean(t, checkSecretBearingFields(t, sourceFiles(t,
 		"internal/lnd/lnrpc", "internal/lnd/lndtest", "internal/secret")))
 	catches(t, checkSecretBearingFields(t, []sourceFile{planted("internal/api", `package api
@@ -1390,6 +1405,21 @@ func TestAnUnrecognisedNodeIsReportedAndNotDiagnosed(t *testing.T) {
 		// collecting here as well would report the node twice. Nought is the whole
 		// assertion.
 		{"a bare anonymous struct, which the walk descends itself", inner(), 0},
+		// AND A PARENTHESISED BARE STRUCT IS A BARE STRUCT (0vk.52). Before that bead
+		// the walk could not descend it — ts.Type was a ParenExpr — and this guard did
+		// not exit early either, an accidental asymmetry that happened to collect once.
+		// The walk descends it through declaredStruct now, so the guard must exit
+		// through declaredStruct too, or the node is reported TWICE.
+		//
+		// THIS PAIR IS THE ONLY BEHAVIOURAL COVER FOR THE GUARD'S SITE. Measured
+		// while checking criterion 2: without these rows, reverting namesASecret's
+		// first line to a bare assertion turned NOTHING red here, while every other
+		// site had a plant. The model already carried the equivalent rows; this copy
+		// did not. TestOnlyTheHelperAsksWhetherADeclarationIsAStruct now catches that
+		// revert too, but it catches the SPELLING; only these rows say what the
+		// behaviour must be, which is that the node is collected once and not twice.
+		{"a parenthesised bare struct", &ast.ParenExpr{X: inner()}, 0},
+		{"a doubly parenthesised bare struct", &ast.ParenExpr{X: &ast.ParenExpr{X: inner()}}, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			unknown := &unknownNodes{}
@@ -1496,6 +1526,27 @@ type pairing struct {
 	Name   string
 	Tokens []secret.String
 }
+`},
+		// PARENS AROUND THE DECLARATION, a different site from parens around a FIELD
+		// type below: g5n taught the PREDICATE that field parens are spelling, and
+		// 0vk.52 teaches the WALKS the same about a declaration. This exercises the
+		// top-level file.Decls loop.
+		{"a parenthesised struct declaration", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing (struct {
+	Name  string
+	Token secret.String
+})
+`},
+		{"a doubly parenthesised struct declaration", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+type pairing ((struct {
+	Token secret.String
+}))
 `},
 		{"a parenthesised type, which is spelling and not a container", `package store
 
@@ -1772,6 +1823,17 @@ func (S) save() {
 	_ = row{}
 }
 `, "cannot have a LogValue at all"},
+		// The LOCAL-TYPE walk, its own site and its own message: inside a function the
+		// remedy is still to hoist.
+		{"a parenthesised struct declaration inside a function", `package store
+
+import "github.com/davotoula/brollyzapper/internal/secret"
+
+func save() {
+	type row (struct{ Token secret.String })
+	_ = row{}
+}
+`, "cannot have a LogValue at all"},
 		{"an alias declared inside a function", `package store
 
 import "github.com/davotoula/brollyzapper/internal/secret"
@@ -1824,6 +1886,10 @@ type pairing struct {
 }
 
 func (p pairing) LogValue() slog.Value { return slog.StringValue("redacted") }
+
+type parenthesised (struct{ Token sec.String })
+
+func (p parenthesised) LogValue() slog.Value { return slog.StringValue("redacted") }
 `)}))
 	})
 }
@@ -2133,12 +2199,19 @@ func (s Server) `+method+`() ([]byte, error) {
 // "file, line and %T" half of the claim is pinned on the model's side only.
 //
 // NOTHING DETECTS DRIFT between the copies but the names, so the names are kept
-// identical on purpose (secretNames, isSecretString, namesASecret,
-// secretNaming and its three constants and its String, secretIsAtTheRoot,
-// containsAnonymousStruct, holdsASecret): `grep -rn 'func isSecretString'` finds
-// both. The one difference
-// is deliberate — holdsASecret here guards a nil Fields, which the model does not
-// bother with because the parser always sets it.
+// identical on purpose (secretNames, isSecretString, namesASecret, secretNaming
+// and its three constants and its String, secretIsAtTheRoot,
+// containsAnonymousStruct, holdsASecret, and since 0vk.52 stripParens,
+// declaredStruct, checkDeclarationStructAssertions, plantedFifthSite and
+// TestOnlyTheHelperAsksWhetherADeclarationIsAStruct): `grep -rn 'func
+// isSecretString'` finds both. KEEP THIS LIST FED — it is the whole detector, and
+// the /simplify pass on 0vk.52 found it had not learned that bead's five names.
+//
+// The differences are deliberate and there are two. holdsASecret here guards a
+// nil Fields, which the model does not bother with because the parser always sets
+// it. And the self-check's TEST BODY differs, because each package finds its own
+// files differently — arch reads the directory, the model filters moduleGoFiles —
+// while the SCANNER it calls is byte-identical like everything else.
 //
 // THE TWO MUST AGREE ON WHAT A BEARER IS, and after 0vk.49 that is checkable
 // rather than merely intended: both switches enumerate the same node kinds, and a
@@ -2214,7 +2287,18 @@ func unrecognisedNode(expr ast.Expr) string {
 // `default: return false`, the CONTAINER stopped being a bearer, and the whole
 // tree stayed green. The missing case differed each time; the mechanism never did.
 // So the family does not close because anyone promised to stop looking. It closes
-// because the fifth spelling now announces itself.
+// because the fifth spelling now announces itself — and, since 0vk.52, because a
+// sixth CALLER cannot be added bare either.
+//
+// AND IT COVERS THE PREDICATE, NOT ITS CALLERS — the one sentence this guarantee
+// was missing, and 0vk.52 is the case that proves it. That bead's escape,
+// `type T (struct{ Token secret.String })`, was never seen by this default at
+// all: a ParenExpr is RECOGNISED here, and what failed was each walk's decision
+// to descend, a bare `ts.Type.(*ast.StructType)` that is false for it. No default
+// inside a predicate can see a caller declining to call it. The callers were
+// given one door instead — declaredStruct — and
+// TestOnlyTheHelperAsksWhetherADeclarationIsAStruct keeps it the only one, which
+// is the callers' half of this guarantee and closes the family on both sides.
 //
 // FAILING CLOSED IS NOT `default: return true`, and that distinction is the whole
 // bead. Answering true would report an unrecognised node as "holds a secret.String
@@ -2375,7 +2459,7 @@ func (n secretNaming) String() string {
 //     and after identity has been decided, because it is only about what to
 //     REPORT.
 func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes) secretNaming {
-	if _, isBareStruct := ts.Type.(*ast.StructType); isBareStruct {
+	if _, isBareStruct := declaredStruct(ts); isBareStruct {
 		return namesNoSecret
 	}
 	if !isSecretString(ts.Type, names, unknown) {
@@ -2388,6 +2472,278 @@ func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes
 		return namesNoSecret
 	}
 	return namesAContainerOfSecrets
+}
+
+// checkDeclarationStructAssertions finds a bare `X.Type.(*ast.StructType)` — the
+// question declaredStruct exists to be the only asker of.
+//
+// THE RULE THAT KEEPS 0vk.52 FIXED. FIVE sites in this file pair each decided
+// whether a declaration was a struct with that assertion, and every one was false
+// for `type T (struct{...})` — legal Go that gofmt preserves, so it reaches main.
+// Routing them through declaredStruct fixes the five that exist; this fixes the
+// sixth, written next year by someone who has not read that helper's comment, and
+// it scans the whole PACKAGE rather than this file, because a new walk is at
+// least as likely to arrive in a new file. (The brief counted four; the
+// bare-struct guard exists in BOTH copies, and each needed its own plant.)
+//
+// IT IS THE CALLERS' HALF OF 0vk.49'S GUARANTEE. Fail closed covers the
+// PREDICATE — a node kind isSecretString does not recognise. A ParenExpr is
+// recognised; what failed was a caller's decision to descend, which no default
+// inside the predicate can see.
+//
+// NO EXEMPTION LIST, and that is deliberate: declaredStruct itself asserts on the
+// result of a CALL, stripParens(ts.Type), so it does not match its own rule. The
+// one place allowed to ask is the one place the rule cannot see.
+//
+// MATCHED ON THE AST, not on the file's bytes. The several comments in this file
+// that quote the forbidden spelling in prose are therefore not violations, nor is
+// the const below that holds a whole planted violation as a string — a byte grep
+// would fire on every one of them, and the count changes with each bead, which is
+// why this does not count them. A real violation cannot hide behind a line break
+// or a renamed receiver. It CAN hide behind a local alias — `d := ts.Type` then
+// `d.(*ast.StructType)` — which the /simplify pass planted and confirmed; widening
+// to catch that is dataflow, and the plants are what cover it. An assertion on a
+// plain node — `n.(*ast.StructType)`, which containsAnonymousStruct and the field
+// walk both make — is not a declaration's type and is not this rule's business.
+func checkDeclarationStructAssertions(t *testing.T, rel string, src []byte) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, rel, src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", rel, err)
+	}
+	var found []string
+	report := func(pos token.Pos) {
+		found = append(found, fmt.Sprintf("%s:%d: a .Type is matched against *ast.StructType "+
+			"directly; that is false for a parenthesised type — `(struct{...})` — which is "+
+			"legal Go that gofmt keeps, and it is how 0vk.52 hid. Strip the parens first: "+
+			"declaredStruct for a declaration's type, stripParens for any other",
+			rel, fset.Position(pos).Line))
+	}
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.TypeAssertExpr:
+			// A nil Type is the guard of a type SWITCH, `x.(type)`, which the case
+			// below handles as a whole statement. The /simplify pass removed this
+			// check as dead and was right at the time; the go-review pass made it
+			// live again by adding the type switch.
+			if node.Type == nil || !assertsAStructType(node.Type) || !isADotType(node.X) {
+				return true
+			}
+			report(node.Pos())
+		case *ast.TypeSwitchStmt:
+			// `switch st := ts.Type.(type) { case *ast.StructType: }` is the same
+			// decision written the other idiomatic way, and it evaded the first
+			// version of this rule. Found by the go-review pass, which observed that
+			// a type switch is at least as natural a spelling for the "sixth site,
+			// written next year" this rule exists to stop.
+			guard := typeSwitchSubject(node)
+			if guard == nil || !isADotType(guard) {
+				return true
+			}
+			for _, stmt := range node.Body.List {
+				clause, ok := stmt.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, typ := range clause.List {
+					if assertsAStructType(typ) {
+						report(node.Pos())
+						return true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// assertsAStructType reports whether expr is the literal `*ast.StructType`.
+func assertsAStructType(expr ast.Expr) bool {
+	star, ok := expr.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := star.X.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "StructType" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "ast"
+}
+
+// isADotType reports whether expr selects a `.Type` field.
+//
+// IT DOES NOT ASK WHOSE, and that is deliberate rather than sloppy. The
+// go-review pass raised `field.Type.(*ast.StructType)` as a false positive,
+// since declaredStruct takes a *ast.TypeSpec and could not be the remedy there.
+// Measured: a field typed `(struct{ X int })` makes that assertion false too, so
+// the rule is RIGHT to fire and only the advice was wrong. The message now names
+// both remedies, and the rule keeps having no exemption list.
+func isADotType(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Type"
+}
+
+// typeSwitchSubject returns the expression a type switch switches on.
+func typeSwitchSubject(stmt *ast.TypeSwitchStmt) ast.Expr {
+	var guard ast.Expr
+	switch assign := stmt.Assign.(type) {
+	case *ast.ExprStmt: // switch x.(type)
+		guard = assign.X
+	case *ast.AssignStmt: // switch v := x.(type)
+		if len(assign.Rhs) != 1 {
+			return nil
+		}
+		guard = assign.Rhs[0]
+	default:
+		return nil
+	}
+	asserted, ok := guard.(*ast.TypeAssertExpr)
+	if !ok {
+		return nil
+	}
+	return asserted.X
+}
+
+// plantedFifthSite is the violation the rule above must catch: a new walk, added
+// without reading declaredStruct's comment, asking the question bare.
+//
+// TWO SPELLINGS, because Go has two and an author picks by habit. The type switch
+// was missed by the first version of this rule and was found by the go-review
+// pass, which pointed out that it is at least as natural a way to write the same
+// decision. Both are planted; neither is hypothetical.
+const plantedFifthSite = `package p
+
+func aFifthSite(ts *ast.TypeSpec) {
+	if st, ok := ts.Type.(*ast.StructType); ok {
+		_ = st
+	}
+}
+`
+
+const plantedTypeSwitchSite = `package p
+
+func aSixthSite(ts *ast.TypeSpec) {
+	switch st := ts.Type.(type) {
+	case *ast.StructType:
+		_ = st
+	}
+}
+`
+
+// plantedFieldSite is the shape the go-review pass raised as a false positive.
+// It is not one — a field typed `(struct{...})` defeats that assertion exactly as
+// a declaration does — so the rule must keep firing on it, and the message names
+// stripParens as well as declaredStruct.
+const plantedFieldSite = `package p
+
+func aFieldSite(field *ast.Field) {
+	if st, ok := field.Type.(*ast.StructType); ok {
+		_ = st
+	}
+}
+`
+
+// Verified by planting the violation: a rule that has only ever passed has been
+// written rather than tested, and this one guards an edit nobody will remember
+// to look for.
+func TestOnlyTheHelperAsksWhetherADeclarationIsAStruct(t *testing.T) {
+	// THE WHOLE PACKAGE, not this file. An earlier version read only
+	// arch_test.go, and the /simplify pass proved the hole by adding a bare
+	// assertion to a sibling file in this package and watching the rule stay
+	// green — which is exactly the "sixth site, written next year" the rule
+	// claims to stop. A new walk is at least as likely to arrive in a new file
+	// as in this one.
+	//
+	// PACKAGE AND NOT MODULE, deliberately. These predicates live in two
+	// packages; a module-wide scan would parse 250-odd files, including the
+	// generated lnrpc tree, to police code that has no TypeSpec walk in it. The
+	// model does the same for the same reason.
+	dir := filepath.Join(moduleRoot(t), "internal/arch")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading this rule's own package: %v", err)
+	}
+	scanned := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		scanned++
+		for _, p := range checkDeclarationStructAssertions(t, "internal/arch/"+e.Name(), src) {
+			t.Error(p)
+		}
+	}
+	// A self-check that reads nothing passes silently, which is the one failure
+	// this rule cannot afford.
+	if scanned < 2 {
+		t.Errorf("scanned %d files in internal/arch; the package has more than that, so "+
+			"this rule is reading the wrong thing", scanned)
+	}
+	for _, plant := range []struct{ name, src string }{
+		{"a bare type assertion", plantedFifthSite},
+		{"a type switch, which is the same decision written the other way", plantedTypeSwitchSite},
+		{"a bare assertion on a FIELD's type, which is paren-blind too", plantedFieldSite},
+	} {
+		if len(checkDeclarationStructAssertions(t, "planted.go", []byte(plant.src))) == 0 {
+			t.Errorf("the planted violation (%s) was NOT detected; this rule can no longer "+
+				"fail for that spelling, which means it has been written rather than tested",
+				plant.name)
+		}
+	}
+}
+
+// stripParens removes any number of parentheses from a type expression.
+//
+// Parens are SPELLING, not structure, and gofmt keeps the ones a person writes
+// around a FIELD type or a DECLARATION's type — measured 6 Sep, which is why g5n
+// and 0vk.52 both exist. Around a RECEIVER gofmt removes them, so that one
+// spelling cannot reach main at all.
+//
+// The distinction is per QUESTION, not per function: internal/arch's typeString
+// is asked about receivers AND about field types, and it needed a ParenExpr case
+// for the second even though the first can never need one. An earlier draft of
+// this sentence said it needed none, having generalised the receiver measurement;
+// the reasoning now lives at typeString itself, in the copy that has one.
+//
+// ANY NUMBER, not one. gofmt collapses `((struct{...}))` to a single pair, so the
+// doubly parenthesised form cannot reach main through a file — but it reaches
+// these predicates through a parsed plant, and a loop costs nothing over an `if`.
+func stripParens(expr ast.Expr) ast.Expr {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			return expr
+		}
+		expr = paren.X
+	}
+}
+
+// declaredStruct reports the struct a type declaration declares, through any
+// number of parentheses.
+//
+// THE ONE PLACE THAT ASKS "IS THIS DECLARATION A STRUCT", and
+// TestOnlyTheHelperAsksWhetherADeclarationIsAStruct requires it to stay the only
+// one. Every walk used to ask with a bare `ts.Type.(*ast.StructType)`, false for
+// a *ast.ParenExpr, so `type T (struct{ Token secret.String })` took none of the
+// descents and the whole tree stayed green with no LogValue anywhere (0vk.52).
+//
+// namesASecret's bare-struct guard asks the same question for a different reason
+// — so a bare struct's fields are not handed to the predicate twice (0vk.51) —
+// and goes through here too, on the PM's ruling of 6 Sep: a parenthesised struct
+// declaration is a struct declaration EVERYWHERE. Before that it took neither the
+// descents nor the early exit, an accidental asymmetry that happened to collect
+// once and would have become a double report the moment the walks learned to
+// descend. Both halves are planted.
+func declaredStruct(ts *ast.TypeSpec) (*ast.StructType, bool) {
+	st, ok := stripParens(ts.Type).(*ast.StructType)
+	return st, ok
 }
 
 // secretIsAtTheRoot reports whether the secret isSecretString just found is the
@@ -2409,14 +2765,7 @@ func namesASecret(ts *ast.TypeSpec, names map[string]bool, unknown *unknownNodes
 // isSecretString has held since g5n, so `type T = (secret.String)` is as much an
 // alias as the unparenthesised form.
 func secretIsAtTheRoot(expr ast.Expr) bool {
-	for {
-		paren, ok := expr.(*ast.ParenExpr)
-		if !ok {
-			break
-		}
-		expr = paren.X
-	}
-	switch expr.(type) {
+	switch stripParens(expr).(type) {
 	case *ast.SelectorExpr, *ast.Ident:
 		return true
 	default:
@@ -2459,21 +2808,18 @@ func secretIsAtTheRoot(expr ast.Expr) bool {
 // at all, and 0vk.49's guarantee stopped at the wrapper. namesASecret now runs
 // isSecretString before this refusal is consulted, so the collection happens and
 // only the REPORT is withheld. A bare struct leaves before that, because the walk
-// descends it itself. Both halves are planted.//
-// A GAP THE FAIL-CLOSED DEFAULT DOES NOT COVER, filed as BrollyZap-0vk.52 and
-// pre-existing. `type T (struct{ Token secret.String })` — parentheses around the
-// STRUCT in a type declaration — is legal Go, gofmt keeps them, and with no
-// LogValue anywhere the whole tree stays green; the unparenthesised form is caught
-// at once. isSecretString sees the secret perfectly well, having handled ParenExpr
-// since g5n. What misses is every WALK's `ts.Type.(*ast.StructType)` assertion,
-// which is false for a ParenExpr, so the struct is never handed to holdsASecret.
+// descends it itself. Both halves are planted.
 //
-// 0vk.49's default reports a node kind the predicate does not RECOGNISE; a
-// ParenExpr is recognised, and what fails is a caller's decision to descend. Fail
-// closed covers the predicate, not its callers — worth knowing next to the
-// guarantee. Note the first line of namesASecret makes the same assertion for a
-// different reason, so a parenthesised struct declaration does NOT take that early
-// return, which is why its inner fields still reach the predicate today.
+// THAT GAP IS CLOSED (0vk.52), and the shape is worth keeping written down
+// because it is the one this predicate could never have caught.
+// `type T (struct{ Token secret.String })` — parentheses around the STRUCT in a
+// type declaration — is legal Go that gofmt KEEPS, and with no LogValue anywhere
+// the whole tree stayed green while the unparenthesised form was caught at once.
+// isSecretString saw the secret perfectly well, having handled ParenExpr since
+// g5n; what missed was every WALK's `ts.Type.(*ast.StructType)`, false for a
+// ParenExpr, so the struct was never handed to holdsASecret. All five such sites
+// now go through declaredStruct, namesASecret's bare-struct guard among them, and
+// a rule keeps them the only asker.
 func containsAnonymousStruct(expr ast.Expr) bool {
 	found := false
 	ast.Inspect(expr, func(n ast.Node) bool {
@@ -2591,7 +2937,7 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 								"the field", ts.Name.Name, ts.Name.Name)})
 						continue
 					}
-					st, ok := ts.Type.(*ast.StructType)
+					st, ok := declaredStruct(ts)
 					if !ok {
 						continue
 					}
@@ -2635,7 +2981,7 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 				return true
 			}
 			line := fset.Position(ts.Pos()).Line
-			if st, isStruct := ts.Type.(*ast.StructType); isStruct {
+			if st, isStruct := declaredStruct(ts); isStruct {
 				if holdsASecret(st, names, unknown) {
 					found = append(found, problem{f.rel, line, fmt.Sprintf(
 						"%s holds a secret and is declared inside a function; a type declared "+
@@ -2685,6 +3031,21 @@ func checkSecretBearingStructsRedact(t *testing.T, files []sourceFile) []problem
 
 // typeString renders a field's type well enough to compare against
 // "secret.String"; anything more exotic is reported as-is and fails.
+//
+// RECEIVERS NEED NO ParenExpr CASE — measured 6 Sep 2026, not assumed, and
+// written here so the next reader does not measure it again. `func (s (Server))
+// LogValue()` is legal Go that gofmt REWRITES to `func (s Server)`, and
+// `gofmt -l` is a gate step, so that spelling cannot reach main.
+//
+// FIELDS ARE THE OPPOSITE, and the case below exists for them. gofmt KEEPS the
+// parens a person writes around a field type or a declaration's type — which is
+// why isSecretString has a ParenExpr case (g5n) and why declaredStruct exists
+// (0vk.52). This function has a field caller too: checkSecretBearingFields
+// compares typeString(field.Type) against "string", "[]byte" and "[]string", and
+// `AdminPassword (string)` rendered as "*ast.ParenExpr", matched no carrier, and
+// walked past the rule. Planted and measured on the 0vk.52 branch, which is where
+// an earlier draft of this very comment said no case was needed at all — it had
+// generalised the receiver measurement to every caller.
 func typeString(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:
@@ -2695,6 +3056,12 @@ func typeString(expr ast.Expr) string {
 		return "*" + typeString(t.X)
 	case *ast.ArrayType:
 		return "[]" + typeString(t.Elt)
+	case *ast.ParenExpr:
+		// Parens are spelling, not structure, and gofmt keeps them around a field
+		// type. Same monotone argument as the two generic cases below: the string
+		// this case used to produce, "*ast.ParenExpr", appears in no comparison
+		// literal anywhere in this file, so resolving it can only ADD a match.
+		return typeString(t.X)
 	case *ast.IndexExpr:
 		// A generic type with one parameter — Holder[T]. The BASE NAME, without
 		// the parameter, because that is the name a TypeSpec declares and the
@@ -4062,6 +4429,26 @@ func bake() {
 	_ = m
 }
 `)}), "entity:action pair")
+
+	// A PARENTHESISED CALLEE, which is legal Go that gofmt KEEPS — measured, unlike
+	// a parenthesised receiver, which it rewrites. This rule renders the callee
+	// through typeString, so before 0vk.52 gave that a ParenExpr case the call
+	// rendered as "*ast.ParenExpr", matched no name, and a §6 credential mint
+	// walked past this rule entirely.
+	//
+	// Planted here rather than left as an incidental fix. The go-review pass on
+	// 0vk.52 noticed the improvement and observed that nothing pinned it; on a rule
+	// about who may mint a macaroon, an unpinned improvement is one refactor away
+	// from being an unnoticed regression.
+	t.Run("a parenthesised callee, which gofmt keeps", func(t *testing.T) {
+		catches(t, checkCredentialMintingCallSites(t, []sourceFile{planted("internal/api", `package api
+
+func mint() {
+	m, _ := (node.BakeMacaroon)(ctx, lnd.URIPermissions(perms), 1)
+	_ = m
+}
+`)}), "only the guard holds")
+	})
 }
 
 // §6, d24.1: nothing under regtest/ speaks the socket API in its own words.
