@@ -184,13 +184,32 @@ func TestLoadGuardRejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestGuardRejectsAPerPaymentCapAboveTheWindowCap(t *testing.T) {
+// The start-up refusal speaks the vocabulary every other surface speaks (`eht`).
+//
+// "Window cap" appeared here and nowhere else: not in the guard's own cap-pair
+// refusal, not on the Sending page, not in MANUAL.html or OPERATING.md, all of
+// which say "24-hour limit". A deployer who hit this had to map
+// GUARD_MAX_SPEND_MSAT to a phrase they had never seen and that phrase to the
+// limit they had, with nothing connecting them.
+//
+// THE PHRASE IS PINNED, not merely the variable names, because a wording nobody
+// asserts is a wording that drifts back — this one survived 8vj precisely
+// because that brief ruled LoadGuard out of scope and nothing held it.
+func TestGuardRejectsAPerPaymentCapAboveThe24HourLimit(t *testing.T) {
 	t.Parallel()
 	env := validGuardEnv()
 	env["GUARD_MAX_PAYMENT_MSAT"] = "200000000"
 	err := mustFail(t, func() (any, error) { return config.LoadGuard(lookup(env)) })
 	assertNamesVariable(t, err, "GUARD_MAX_PAYMENT_MSAT")
 	assertNamesVariable(t, err, "GUARD_MAX_SPEND_MSAT")
+	if !strings.Contains(err.Error(), "24-hour limit") {
+		t.Errorf("the refusal reads %q; it has to name the limit in the words every other "+
+			"surface uses, or the deployer is left translating", err)
+	}
+	if strings.Contains(err.Error(), "window cap") {
+		t.Errorf("the refusal reads %q and still says \"window cap\", a phrase in nobody "+
+			"else's vocabulary", err)
+	}
 }
 
 func TestServerDefaults(t *testing.T) {
