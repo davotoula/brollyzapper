@@ -2,6 +2,56 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.20 — 2026-09-08
+
+Mostly what an operator sees when a limit change is refused, plus three corrections in the
+zap-receipt publish path that were found by review after 0.1.19 shipped. Tripped twice on the
+reference box as `0.1.20-rc1` and `0.1.20-rc2`: everything under **Fixed** that touches the
+Sending page was confirmed there, and the first real zap through rc2 published its receipt to
+five of five relays in **924 ms**, inside the band 0.1.19's relay work predicted.
+
+### Fixed
+
+- **A refused limit change now says which limit to move, on the page.** The per-payment limit
+  cannot sit above the 24-hour one, so lowering the 24-hour limit below it, or raising the
+  per-payment limit above it, is refused — and the refusal used to reach only the log, while the
+  page said a confirmation code was not accepted, for a change that involved no code. The page
+  now names the limit to move first: lower the per-payment limit, or raise the 24-hour limit. Any
+  other refusal that involved no code says the change was refused and points at the log.
+- **A per-payment limit that could never apply is refused before a code is issued**, not after
+  you have fetched and typed one.
+- **The guard's own refusal names the control you are not editing**, in the log and the audit
+  trail, where it used to name the one you had just typed into.
+- **A confirmation code you never use is cleared when it expires**, file and record together, at
+  the guard's next look. Before, the file stayed on disk indefinitely.
+- **A zap receipt is only counted as accepted when a relay says so.** A relay that took the event
+  and then dropped the socket used to read as accepted; it is now `no_answer`, and a pending
+  receipt's last error names the relay.
+- **No relay waits for another when a receipt is published.** Each relay is dialled and sent to on
+  its own, so one dead relay no longer delays the live ones by the whole connect budget — the case
+  that made a wallet's NWC response miss its window when one paired relay was down.
+- **A concurrent subscribe and publish to one relay can no longer leak a socket.** Both now go
+  through the app's one dial, so a torn relay-map write, and the unclosable connection it left
+  behind, has no path.
+- **A Settings save that is missing a field is refused whole**, instead of silently blanking the
+  fields it did not carry. Browsers always send the whole form; this closes the hand-crafted case.
+- **An unusable log level is refused on save**, with a message, rather than stored and ignored.
+- **A refused Settings value is no longer echoed into the log.** The log says which key and why.
+
+### Changed
+
+- **The Sending page names the order the two limits move in**, in the hint above the cap fields.
+- The start-up refusal for a per-payment limit above the 24-hour one in the compose environment
+  says "24-hour limit", the phrase every other surface uses.
+- Dependencies current (pure-Go sqlite 1.58.0, `golang.org/x/crypto` 0.56.0). A large test-only
+  hardening of the log-redaction rules ships no behaviour change, and the gate now checks that
+  `go.mod`'s toolchain floor matches the Go the pinned base images ship.
+
+### Upgrading
+
+**Nothing to do.** No migration (schema stays 15), no setting changes, no key baked or revoked by
+the update. An in-place update recreates both containers; about 40 s with the app down.
+
 ## 0.1.19 — 2026-09-03
 
 Three changes, all in the zap-receipt publish path, and all measured on the reference box with
