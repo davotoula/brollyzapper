@@ -364,32 +364,16 @@ func TestTheCeremonyIsAuditedAndTheCodeIsNever(t *testing.T) {
 	}
 }
 
-// §6's outer bound holds over the STORED values, not only over the environment.
+// TestThePerPaymentCapCanNeverBeLeftAboveTheWindowCap STOOD HERE (`l4g`).
 //
-// config.LoadGuard makes this check at load. It has to be made here too, because
-// the operator changes one cap at a time: lowering the window below the
-// per-payment cap would leave a per-payment limit that can never be reached — a
-// number on the page that means nothing, which is worse than a refusal saying
-// why.
-func TestThePerPaymentCapCanNeverBeLeftAboveTheWindowCap(t *testing.T) {
-	node := lndtest.Start(t)
-	d := guardDirs(t, node)
-	g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
-
-	// A LOWERING, so it needs no code — and it must still be refused. The
-	// monotonic split is about who may ask; it is not a licence to write an
-	// inconsistent pair.
-	err := g.ApplyChange(t.Context(),
-		guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}, "")
-
-	if err == nil {
-		t.Fatal("the 24-hour cap was lowered below the per-payment cap; the per-payment limit " +
-			"can now never be reached, and the page states a number that means nothing")
-	}
-	if got := spendLimit(t, g); got != 100_000 {
-		t.Errorf("the window cap is %d msat after a refused change, want 100000", got)
-	}
-}
+// Its fixture and its change were identical to the first case of
+// TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing below; only the
+// assertion differed, and that assertion is now a per-case field of that table,
+// made in BOTH directions rather than only the tightening one. The name is left
+// in this comment on purpose: it states the invariant — §6's outer bound holds
+// over the STORED values, not only over the environment — and it was a grep
+// target, so a reader who comes looking for it should find where it went rather
+// than an absence.
 
 // The stored caps are what the MIDDLEWARE enforces, not the environment ones.
 //
@@ -439,6 +423,18 @@ func render(t *testing.T, v any) string {
 
 // spendLimit reads the window cap back through the guard's own Status, which is
 // the only account of it the rest of the system ever sees.
+// storedCaps is the PAIR the guard has stored, which is the unit §6's outer
+// bound is about — spendLimit alone cannot see a refusal that moved the other
+// one.
+func storedCaps(t *testing.T, g *guard.Guard) caps {
+	t.Helper()
+	status, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	return caps{window: status.SpendLimitMsat, payment: status.MaxPaymentMsat}
+}
+
 func spendLimit(t *testing.T, g *guard.Guard) int64 {
 	t.Helper()
 	status, err := g.Status(t.Context())
@@ -493,22 +489,31 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 		change  guard.Change
 		want    string
 		notWant string
+		// NOTHING MOVED (`l4g`). The refusal is only half the guarantee: a guard
+		// that said the right sentence and wrote the change anyway would leave
+		// the very pair this check exists to prevent. Stated per case rather
+		// than once, so a row added with a different fixture has to say what it
+		// expects instead of inheriting an assertion about someone else's
+		// numbers.
+		unchanged caps
 	}{{
 		// TIGHTENING, and the case from the box. It needs no code, and it is
 		// refused anyway — correctly — so the message is the operator's only
 		// signal about what to do next.
-		name:    "lowering the 24-hour window below the standing per-payment cap",
-		change:  guard.Change{Control: guard.ControlSpendCap, Msat: 40_000},
-		want:    "a per-payment limit of 50 sats is above the 24-hour limit of 40 sats, so it could never be reached; lower the per-payment limit first",
-		notWant: "24-hour limit first",
+		name:      "lowering the 24-hour window below the standing per-payment cap",
+		change:    guard.Change{Control: guard.ControlSpendCap, Msat: 40_000},
+		want:      "a per-payment limit of 50 sats is above the 24-hour limit of 40 sats, so it could never be reached; lower the per-payment limit first",
+		notWant:   "24-hour limit first",
+		unchanged: caps{window: 100_000, payment: 50_000},
 	}, {
 		// LOOSENING, and the direction the old message was written for. It is
 		// refused by the cap-pair check BEFORE the authorisation check, which is
 		// why an empty code reaches this error rather than errAuthorisationRequired.
-		name:    "raising the per-payment cap above the standing 24-hour window",
-		change:  guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
-		want:    "a per-payment limit of 150 sats is above the 24-hour limit of 100 sats, so it could never be reached; raise the 24-hour limit first",
-		notWant: "per-payment limit first",
+		name:      "raising the per-payment cap above the standing 24-hour window",
+		change:    guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
+		want:      "a per-payment limit of 150 sats is above the 24-hour limit of 100 sats, so it could never be reached; raise the 24-hour limit first",
+		notWant:   "per-payment limit first",
+		unchanged: caps{window: 100_000, payment: 50_000},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
@@ -527,6 +532,14 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 			if strings.Contains(got, tc.notWant) {
 				t.Errorf("the refusal reads\n  %s\nand names %q — the control the operator is "+
 					"already editing, which is the whole of 8vj", got, tc.notWant)
+			}
+			// BOTH CAPS, not only the one being edited: a refusal that moved the
+			// OTHER control would leave exactly the inconsistent pair §6's outer
+			// bound exists to forbid, and checking one number cannot see it.
+			if stored := storedCaps(t, g); stored != tc.unchanged {
+				t.Errorf("the caps are %+v after a REFUSED change, want %+v; the guard said no "+
+					"and wrote anyway, so the per-payment limit can never be reached and the "+
+					"page states a number that means nothing", stored, tc.unchanged)
 			}
 		})
 	}
