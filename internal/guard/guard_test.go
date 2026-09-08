@@ -1102,3 +1102,48 @@ func TestSpendCaveatsAreVerifiedBeforeAMacaroonIsAccepted(t *testing.T) {
 		t.Error("a spend macaroon with no time-before caveat was accepted")
 	}
 }
+
+// The error kinds are exactly this list, for the reason Ops is (`0vk.53`).
+//
+// ErrorKind exists so the server can say something DIFFERENT about a refusal
+// without repeating the guard's sentence, and the value of that is entirely in
+// the set staying small: a token nobody has written copy for renders as the
+// generic refusal, which is the message it replaced. So a second kind is a
+// decision about what the page says, and it fails here rather than arriving as a
+// field somebody widened.
+//
+// AND EVERY KIND MUST BE REACHABLE, which is the half a list alone does not
+// give: a token no refusal ever carries is copy the operator can never be shown,
+// and this repo has already shipped two flash messages nothing could trigger.
+func TestTheErrorKindsAreExactlyThese(t *testing.T) {
+	if got := guard.ErrorKinds; !slices.Equal(got, []guard.ErrorKind{guard.KindCapPair}) {
+		t.Errorf("guard.ErrorKinds = %v, want just %v", got, guard.KindCapPair)
+	}
+
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+	raised := map[guard.ErrorKind]bool{}
+	// The cap pair, from BOTH operations that check it: ApplyChange, and the
+	// request-time refusal `pou` added. A kind that reached the wire from one and
+	// not the other would leave the page's message depending on which half of the
+	// ceremony the operator was in.
+	for _, resp := range []guard.Response{
+		g.Handle(t.Context(), guard.Request{Op: guard.OpApplyChange,
+			Change: &guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}}),
+		g.Handle(t.Context(), guard.Request{Op: guard.OpRequestAuthorisation,
+			Change: &guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000}}),
+	} {
+		if resp.Error == "" {
+			t.Fatalf("a cap-pair violation was accepted: %+v", resp)
+		}
+		raised[resp.ErrorKind] = true
+	}
+	for _, kind := range guard.ErrorKinds {
+		if !raised[kind] {
+			t.Errorf("no refusal in this test carries kind %q; the server holds copy for a "+
+				"case that cannot happen, or this rule has stopped reaching the case that "+
+				"raises it", kind)
+		}
+	}
+}

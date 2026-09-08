@@ -424,12 +424,24 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 	}
 	if payment > window {
 		// IN SATS, because this string is read by an operator on a page §9 says
-		// renders whole sats. It reaches them through the flash copy, and a
-		// number in msat there is three orders of magnitude away from the one in
-		// the box they just typed into. Found by review.
-		return fmt.Errorf("guard: a per-payment limit of %s is above the 24-hour limit of %s, "+
-			"so it could never be reached; %s",
-			msatSentence(payment), msatSentence(window), remedy)
+		// renders whole sats, and a number in msat here is three orders of
+		// magnitude away from the one in the box they just typed into. Found by
+		// review.
+		//
+		// IT REACHES THEM THROUGH THE LOG AND THE TRAIL, NOT THE FLASH. This
+		// comment used to claim the flash carried it, and that was false for as
+		// long as it stood: moveGuardControl deliberately does not relay guard
+		// text to the page, so every refusal there read as "that code was not
+		// accepted" — including this one, which involves no code at all. The
+		// 0.1.20-rc1 box trip found it and `0vk.53` fixed it, by sending the
+		// KIND across and letting internal/api choose one of its own tested
+		// messages. So this sentence is read by an operator or a supporter in
+		// `docker logs` and on the Security page, and the remedy below is the one
+		// internal/arch holds the page's copy to.
+		return &Refusal{Kind: KindCapPair, Err: fmt.Errorf(
+			"guard: a per-payment limit of %s is above the 24-hour limit of %s, "+
+				"so it could never be reached; %s",
+			msatSentence(payment), msatSentence(window), remedy)}
 	}
 	return nil
 }

@@ -5712,10 +5712,24 @@ func TestTheGenericAppNamesNoDeploymentRoute(t *testing.T) {
 // able to name. Anything else is a handler reaching past the socket, which is
 // the one thing the two-container split exists to prevent.
 func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []problem {
+	// THE REFUSAL KIND JOINED THE LIST IN `0vk.53`, and it is admitted on the
+	// rule's own stated grounds rather than as an exception to them: it is a
+	// closed set the guard owns, which the server cannot learn through
+	// lnd.BrokerStatus and must not hold a second copy of. The page has to tell a
+	// cap-pair refusal — which involves no code at all — from a code that was not
+	// accepted, and the alternative was relaying the guard's SENTENCE to the URL,
+	// which is the thing moveGuardControl's comment exists to forbid.
+	//
+	// It is two names, deliberately: the predicate and the one token the server
+	// has separate copy for. guard.Refusal and guard.ErrorKind stay out, because
+	// a handler that named the type would be building refusals rather than
+	// reading them — and nothing in internal/api should be authoring the guard's
+	// verdicts.
 	allowed := map[string]bool{
 		"Change": true, "Control": true,
 		"ControlSending": true, "ControlSpendCap": true, "ControlPaymentCap": true,
 		"Controls": true,
+		"KindOf":   true, "KindCapPair": true,
 	}
 	reference := regexp.MustCompile(`\bguard\.([A-Z]\w*)`)
 
@@ -5765,6 +5779,18 @@ func broker(path string) *guard.SocketClient {
 	return guard.NewSocketClient(path, nil)
 }
 `)}), "reachable only through the socket")
+
+	// And the one the `0vk.53` widening makes plausible: having been allowed to
+	// READ a refusal's kind, a handler builds one. The two names admitted above
+	// are a predicate and a token; the type is not among them, because a server
+	// that can construct guard.Refusal can put any verdict in front of the
+	// operator without the guard having reached that verdict.
+	catches(t, checkAPINamesOnlyTheGuardsVocabulary(t, []sourceFile{planted("internal/api", `package api
+
+func refuse(err error) error {
+	return &guard.Refusal{Kind: guard.KindCapPair, Err: err}
+}
+`)}), "names guard.Refusal")
 }
 
 // A generic type's LogValue is credited to it, and its absence is still reported.

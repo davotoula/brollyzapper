@@ -161,13 +161,54 @@ func (s *Server) moveGuardControl(w http.ResponseWriter, r *http.Request, change
 		// step, and the flash says it. The specific reason is in the guard's log
 		// and in the durable trail, where an operator looking for it can find it
 		// and an attacker cannot put it. Found by review.
+		//
+		// WHAT IS RELAYED IS THE KIND, NOT THE TEXT (`0vk.53`). A fixed token
+		// from the guard's closed set picks one of THIS package's own tested
+		// messages; the guard's sentence still goes only to the log and the
+		// trail. That keeps both halves of the paragraph above true and still
+		// lets the page tell a cap-pair refusal — which involves no code at all —
+		// from a code that was not accepted.
 		s.Log.Warn("the guard would not move an operator control",
 			"control", string(change.Control), "error", err.Error())
-		http.Redirect(w, r, "/sending?flash=code_refused", http.StatusSeeOther)
+		http.Redirect(w, r, "/sending?flash="+refusalFlash(err, change.Control),
+			http.StatusSeeOther)
 		return
 	}
 	s.forgetBrokerStatus()
 	then(ctx)
+}
+
+// capPairFlashes is what the page says when §6's cap-pair invariant refuses a
+// change, keyed by the control the operator was EDITING.
+//
+// KEYED ON WHAT THEY TYPED INTO, because the remedy is the OTHER control (`8vj`)
+// and the operator has just been refused mid-task. An operator lowering the
+// 24-hour limit cannot act on "raise the 24-hour limit", so one message for both
+// directions puts back the misdirection 8vj removed.
+//
+// The copy lives in flashMessages with every other message; this map only
+// chooses. internal/arch's cap-pair rule is what keeps each of these two
+// messages naming the same control to move as the guard's own remedy does — the
+// guard decides WHAT the refusal is, this package writes what the operator
+// reads, and neither may drift into contradicting the other.
+var capPairFlashes = map[guard.Control]string{
+	guard.ControlSpendCap:   "cap_pair_lower_payment",
+	guard.ControlPaymentCap: "cap_pair_raise_window",
+}
+
+// refusalFlash picks the marker for a change the guard would not make.
+//
+// code_refused UNLESS the guard named a kind this build has separate copy for,
+// which is the conservative direction: a kind added to the guard and not yet
+// mapped here, or a control with no cap-pair message, falls back to the message
+// the ceremony has always shown rather than to a marker that renders blank.
+func refusalFlash(err error, control guard.Control) string {
+	if guard.KindOf(err) == guard.KindCapPair {
+		if marker, ok := capPairFlashes[control]; ok {
+			return marker
+		}
+	}
+	return "code_refused"
 }
 
 // enableSending performs the ceremony, bakes the spend macaroon and records the

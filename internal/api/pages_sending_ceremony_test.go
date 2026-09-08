@@ -330,3 +330,105 @@ func TestDisablingSendingDropsTheLatchWithNoCode(t *testing.T) {
 		t.Errorf("the macaroon was revoked %d times, want 1", g.revoked)
 	}
 }
+
+// The cap-pair refusal reaches the OPERATOR, on the page, naming the control to
+// move (`0vk.53`).
+//
+// `8vj` made the guard's remedy name the control the operator is not editing,
+// and the 0.1.20-rc1 box trip found that remedy reaching `docker logs` and the
+// audit trail and nowhere else: every ApplyChange failure redirected with
+// `code_refused`, so an operator lowering the 24-hour limit — a TIGHTENING,
+// which involves no code at all — was told "That code was not accepted". That is
+// not merely unhelpful, it is wrong about what happened, and it points at a
+// remedy (ask for a new code) that cannot work.
+//
+// BOTH DIRECTIONS IN ONE TABLE, for the reason 8vj's own table gives: the defect
+// they share is one message for two cases, and a test asserting one direction
+// passes against it. Each case also refuses the OTHER's remedy, so a flash
+// offering both at once — which reads like a kindness and is not — fails here.
+//
+// The guard's error is built by hand rather than driven through a real guard:
+// this asserts what the SERVER does with a kinded refusal, and internal/arch's
+// cap-pair rule is what keeps this copy and the guard's remedy in step.
+func TestACapPairRefusalTellsTheOperatorWhichLimitToMove(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		control string
+		want    string
+		notWant string
+	}{{
+		name:    "lowering the 24-hour limit below the standing per-payment cap",
+		control: "spend_cap",
+		want:    "lower the per-payment limit first",
+		notWant: "raise the 24-hour limit first",
+	}, {
+		name:    "raising the per-payment cap above the standing 24-hour limit",
+		control: "payment_cap",
+		want:    "raise the 24-hour limit first",
+		notWant: "lower the per-payment limit first",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			refusal := &guard.Refusal{
+				Kind: guard.KindCapPair,
+				Err: errors.New("guard: a per-payment limit of 50 sats is above the 24-hour " +
+					"limit of 40 sats, so it could never be reached; " + tc.want),
+			}
+			g := &fakeGuard{
+				authoriseErr: errors.New("guard: that is not a loosening"),
+				applyErr:     refusal,
+			}
+			h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) { opts.Guard = g })
+			cookie := h.login(t)
+
+			rec := h.postForm(t, "/sending/caps", cookie, url.Values{
+				"control": {tc.control}, "sats": {"40000"},
+			})
+
+			location := rec.Header().Get("Location")
+			marker := location[strings.Index(location, "flash=")+len("flash="):]
+			flash := api.FlashMessage(marker)
+			if flash == "" {
+				t.Fatalf("the redirect is %q, whose marker renders no message at all; the "+
+					"operator is shown a page that says nothing happened", location)
+			}
+			if !strings.Contains(flash, tc.want) {
+				t.Errorf("the page says\n  %s\nwant it to name the remedy %q — the guard's "+
+					"corrected remedy (8vj) reaches the log and the trail, and this is the "+
+					"only surface the operator is looking at", flash, tc.want)
+			}
+			if strings.Contains(flash, tc.notWant) {
+				t.Errorf("the page says\n  %s\nand offers %q, which is the control the "+
+					"operator is already editing; that is the misdirection 8vj removed",
+					flash, tc.notWant)
+			}
+			if strings.Contains(flash, "code was not accepted") {
+				t.Errorf("the page says\n  %s\nbut no code was involved: this refusal is the "+
+					"cap-pair invariant, and telling the operator to ask for a new code "+
+					"sends them somewhere that cannot help", flash)
+			}
+		})
+	}
+}
+
+// A genuine bad code still says a code was not accepted (`0vk.53`).
+//
+// The anti-vacuity half: a fix that redirected every refusal to the new cap-pair
+// flash would satisfy the test above and lose the message the ceremony actually
+// needs.
+func TestARefusalWithNoKindStillShowsTheCodeMessage(t *testing.T) {
+	g := &fakeGuard{
+		authoriseErr: errors.New("guard: that is not a loosening"),
+		applyErr:     errors.New("guard: that code is not the one that was written"),
+	}
+	h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) { opts.Guard = g })
+	cookie := h.login(t)
+
+	rec := h.postForm(t, "/sending/caps", cookie, url.Values{
+		"control": {"spend_cap"}, "sats": {"40000"}, "code": {"123456"},
+	})
+
+	if location := rec.Header().Get("Location"); !strings.Contains(location, "flash=code_refused") {
+		t.Errorf("the redirect is %q, want code_refused; a mistyped code is still the "+
+			"commonest way this ceremony fails and the page has to say so", location)
+	}
+}

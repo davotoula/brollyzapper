@@ -2,6 +2,7 @@ package guard_test
 
 import (
 	"encoding/json"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -635,5 +636,109 @@ func TestAPairMadeInconsistentAfterTheRequestIsStillRefusedAtApply(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "raise the 24-hour limit first") {
 		t.Errorf("the refusal reads %q, want the cap-pair remedy", err)
+	}
+}
+
+// The cap-pair refusal carries its KIND across the socket (`0vk.53`).
+//
+// 8vj's remedy is correct and reached only the log and the trail, because the
+// wire carries a message and the server must not repeat a guard-authored one:
+// every ApplyChange failure looked the same to the page, so a tightening refused
+// by the cap-pair check was reported as a code that was not accepted. The kind
+// is what lets the server tell them apart without ever rendering the guard's
+// sentence — and it has to survive the socket, because in production the server
+// never holds the guard's error, only a copy rebuilt from JSON.
+//
+// BOTH SIDES OF THE SEAM, and the direct call is not the interesting half: a
+// kind that worked in-process and was dropped by the encoder would pass any test
+// that called ApplyChange directly, and fail on every box.
+//
+// THE BAD CODE IS ASSERTED TOO, because a KindOf that returned cap_pair for
+// everything would satisfy the first half and put the cap-pair message in front
+// of an operator who really did mistype a code.
+func TestTheCapPairRefusalCarriesItsKindOverTheSocket(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+	ctx := t.Context()
+
+	direct := g.ApplyChange(ctx, guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}, "")
+	if got := guard.KindOf(direct); got != guard.KindCapPair {
+		t.Errorf("the guard's own error carries kind %q, want %q (%v)",
+			got, guard.KindCapPair, direct)
+	}
+
+	client := serveGuard(t, g)
+	relayed := client.ApplyChange(ctx, guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}, "")
+	if relayed == nil {
+		t.Fatal("the cap pair was left inconsistent across the socket")
+	}
+	if got := guard.KindOf(relayed); got != guard.KindCapPair {
+		t.Errorf("the relayed error carries kind %q, want %q; the page cannot tell this "+
+			"refusal from a bad code, which is the whole of 0vk.53 (%v)",
+			got, guard.KindCapPair, relayed)
+	}
+	// The text still crosses, because the LOG and the trail are where it belongs.
+	if !strings.Contains(relayed.Error(), "lower the per-payment limit first") {
+		t.Errorf("the relayed refusal reads %q; the guard's reason is what the operator's "+
+			"support path reads out of docker logs", relayed)
+	}
+
+	// A refusal with no kind stays kindless over the same socket.
+	loosening := guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}
+	if err := client.RequestAuthorisation(ctx, loosening); err != nil {
+		t.Fatalf("requesting an authorisation for a legitimate loosening: %v", err)
+	}
+	badCode := client.ApplyChange(ctx, loosening, "000000")
+	if badCode == nil {
+		t.Fatal("a wrong code applied a loosening")
+	}
+	if got := guard.KindOf(badCode); got != "" {
+		t.Errorf("a wrong code carries kind %q, want none; it is exactly the case the "+
+			"ceremony's own message is written for", got)
+	}
+}
+
+// An error kind this build does not know reads as NO kind.
+//
+// The forward-compatibility case, and the reason it is not merely tidy: a guard
+// newer than the server can name a kind the server has no copy for. Passed
+// through, that token reaches a map lookup, misses, and — before the fallback
+// was written — would render a blank flash: a page that says nothing happened
+// when something did. Read as no kind, it renders the generic refusal, which is
+// what the server showed before this field existed.
+//
+// A HAND-WRITTEN SERVER, because no real guard can produce the token: this
+// asserts what the CLIENT does with one, which is the half that has to hold when
+// the two containers are different versions.
+func TestAnUnknownErrorKindReadsAsNoKind(t *testing.T) {
+	socket := socketPath(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listening on %s: %v", socket, err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = json.NewEncoder(conn).Encode(guard.Response{
+				Error:     "guard: a refusal from a later build",
+				ErrorKind: "invented_in_a_later_build",
+			})
+			_ = conn.Close()
+		}
+	}()
+
+	client := guard.NewSocketClient(socket, guard.DiscardEvents)
+	err = client.ApplyChange(t.Context(), guard.Change{Control: guard.ControlSpendCap}, "")
+	if err == nil {
+		t.Fatal("a refusal was read as a success")
+	}
+	if got := guard.KindOf(err); got != "" {
+		t.Errorf("an unknown token was admitted as kind %q; it would pick no message and the "+
+			"page would render a blank flash", got)
 	}
 }
