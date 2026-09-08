@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -112,4 +113,105 @@ func (f *fakeSettings) SetSetting(_ context.Context, key, value string) error {
 	}
 	f.values[key] = value
 	return nil
+}
+
+// §12, the per-type half for AuthOptions: that the one fact it emits is TRUE,
+// not merely present (BrollyZap-0vk.47).
+//
+// WHY THIS EXISTS WHEN THE REDACTION TABLE ALREADY COVERS api.AuthOptions.
+// The table (internal/logging) asserts no secret bytes escape. That is a
+// different question from whether the summary is accurate, and the gap is
+// demonstrable: flipping the negation in AuthOptions.LogValue leaves
+// `go test ./...` green. A summary that reports the opposite of the truth leaks
+// nothing and misleads every operator who reads it — config.Server got this
+// assertion in 0vk.33 and api.Auth in 0vk.36; AuthOptions had neither.
+//
+// WHY BOTH DIRECTIONS. umbrel_managed is a boolean, so a test that only pins
+// the true case passes against `slog.Bool("umbrel_managed", true)` — a constant.
+// Asserting both is what makes the field's INPUT matter, and it is the pair that
+// the flipped negation cannot satisfy.
+//
+//redaction:covers api.AuthOptions
+func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
+	t.Parallel()
+
+	// Distinctive, and not shared with the redaction table's own sentinels: a
+	// value that appears nowhere else cannot be matched by accident. Plain
+	// ASCII, so JSON encoding is the identity function and "absent from the
+	// bytes" is the whole question rather than half of it.
+	const (
+		appPassword   = "app-password-sentinel-0vk47"
+		sessionSecret = "session-secret-sentinel-0vk47"
+	)
+
+	for _, tc := range []struct {
+		name        string
+		options     AuthOptions
+		wantManaged bool
+		// The secrets this case's fixture actually carries, by field name. The
+		// no-AppPassword case carries one, which is the point of that case:
+		// there is no app password to leak because there is none at all.
+		secrets map[string]string
+	}{
+		{
+			name: "an app password from Umbrel is reported as managed",
+			options: AuthOptions{
+				AppPassword:   secret.New(appPassword),
+				SessionSecret: secret.New(sessionSecret),
+			},
+			wantManaged: true,
+			secrets:     map[string]string{"AppPassword": appPassword, "SessionSecret": sessionSecret},
+		},
+		{
+			name:        "no app password is reported as not managed",
+			options:     AuthOptions{SessionSecret: secret.New(sessionSecret)},
+			wantManaged: false,
+			secrets:     map[string]string{"SessionSecret": sessionSecret},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The fixture must carry what this case says it carries, or the
+			// leak half below is a test of a value that had nothing to leak.
+			for field, want := range tc.secrets {
+				var got string
+				switch field {
+				case "AppPassword":
+					got = tc.options.AppPassword.Reveal()
+				case "SessionSecret":
+					got = tc.options.SessionSecret.Reveal()
+				}
+				if got != want {
+					t.Fatalf("the fixture does not carry %s; the leak assertions below "+
+						"would pass vacuously (got %q)", field, got)
+				}
+			}
+
+			var buf bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&buf, nil))
+			log.Info("auth options", "options", tc.options)
+			record := buf.String()
+
+			for field, value := range tc.secrets {
+				if !strings.Contains(record, value) {
+					continue
+				}
+				// Masked: a test that proves a secret escaped by printing it
+				// again into CI output has not finished the job.
+				t.Errorf("logged AuthOptions carry %s's value; §11 and §12 say they must "+
+					"not. Record, with the value masked:\n%s", field,
+					strings.ReplaceAll(record, value, "<"+field+">"))
+			}
+
+			// The fact itself. slog's JSON handler renders a bool group member
+			// unquoted, so this distinguishes true from false without parsing.
+			want := `"umbrel_managed":` + strconv.FormatBool(tc.wantManaged)
+			if !strings.Contains(record, want) {
+				t.Errorf("the redacted AuthOptions do not report %s. An operator reading this "+
+					"line is told the opposite of the truth, which is worse than silence:\n%s",
+					want, record)
+			}
+		})
+	}
 }
