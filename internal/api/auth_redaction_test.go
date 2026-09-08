@@ -71,19 +71,10 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	log.Info("auth", "auth", auth)
 	record := buf.String()
 
-	for _, s := range []struct{ name, value string }{
-		{"sessionSecret", sessionSecret},
-		{"generatedPassword", generated},
-	} {
-		if !strings.Contains(record, s.value) {
-			continue
-		}
-		// Masked: a test that proves a secret escaped by printing it again into
-		// CI output has not finished the job.
-		t.Errorf("a logged Auth carries %s's value; §11 and §12 say it must not. Record, "+
-			"with the value masked:\n%s", s.name,
-			strings.ReplaceAll(record, s.value, "<"+s.name+">"))
-	}
+	assertNoSecretInRecord(t, record, map[string]string{
+		"sessionSecret":     sessionSecret,
+		"generatedPassword": generated,
+	})
 
 	// Absence alone is satisfied by `return slog.GroupValue()` — a summary that
 	// leaks nothing because it says nothing — and that mutation passes every
@@ -119,26 +110,31 @@ func (f *fakeSettings) SetSetting(_ context.Context, key, value string) error {
 // not merely present (BrollyZap-0vk.47).
 //
 // WHY THIS EXISTS WHEN THE REDACTION TABLE ALREADY COVERS api.AuthOptions.
-// The table (internal/logging) asserts no secret bytes escape. That is a
-// different question from whether the summary is accurate, and the gap is
+// The table (internal/logging) asserts no secret bytes escape, and does it more
+// thoroughly than this test does — four levels, both slog call shapes. That is
+// a different question from whether the summary is ACCURATE, and the gap is
 // demonstrable: flipping the negation in AuthOptions.LogValue leaves
-// `go test ./...` green. A summary that reports the opposite of the truth leaks
-// nothing and misleads every operator who reads it — config.Server got this
+// `go test ./...` green. A summary reporting the opposite of the truth leaks
+// nothing and misleads every operator who reads it. config.Server got this
 // assertion in 0vk.33 and api.Auth in 0vk.36; AuthOptions had neither.
 //
-// WHY BOTH DIRECTIONS. umbrel_managed is a boolean, so a test that only pins
-// the true case passes against `slog.Bool("umbrel_managed", true)` — a constant.
-// Asserting both is what makes the field's INPUT matter, and it is the pair that
-// the flipped negation cannot satisfy.
+// NO //redaction:covers MARKER, deliberately. The completeness rule takes the
+// table entry first and never reaches a marker for a type that has one, so a
+// marker here would assert coverage it is not providing — and would silently
+// become the only coverage if the table entry were ever removed as duplicative.
+// The entry is the coverage; this is the facts.
 //
-//redaction:covers api.AuthOptions
+// WHY BOTH DIRECTIONS. umbrel_managed is a boolean, so a test pinning only the
+// true case also passes against `slog.Bool("umbrel_managed", true)` — a
+// constant. Asserting both is what makes the field's INPUT matter, and the pair
+// is what the flipped negation cannot satisfy.
 func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 	t.Parallel()
 
 	// Distinctive, and not shared with the redaction table's own sentinels: a
-	// value that appears nowhere else cannot be matched by accident. Plain
-	// ASCII, so JSON encoding is the identity function and "absent from the
-	// bytes" is the whole question rather than half of it.
+	// value appearing nowhere else cannot be matched by accident. Plain ASCII,
+	// so JSON encoding is the identity function and "absent from the bytes" is
+	// the whole question rather than half of it.
 	const (
 		appPassword   = "app-password-sentinel-0vk47"
 		sessionSecret = "session-secret-sentinel-0vk47"
@@ -148,9 +144,17 @@ func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 		name        string
 		options     AuthOptions
 		wantManaged bool
-		// The secrets this case's fixture actually carries, by field name. The
-		// no-AppPassword case carries one, which is the point of that case:
-		// there is no app password to leak because there is none at all.
+		// The secrets this case's fixture carries. The not-managed case carries
+		// one, which is that case's point: there is no app password to leak
+		// because there is none at all.
+		//
+		// NO FIXTURE-CARRIES GUARD beside this, where config.Server and api.Auth
+		// both have one. Theirs read the secret back out of a value some
+		// CONSTRUCTOR produced — LoadServer, NewAuth — which can stop carrying
+		// it. This literal is the fixture, so a read-back would only prove
+		// secret.New and Reveal round-trip, which is the secret package's own
+		// test. What guards this pair against going vacuous is wantManaged:
+		// delete AppPassword from the managed case and that assertion fails.
 		secrets map[string]string
 	}{
 		{
@@ -172,40 +176,15 @@ func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// The fixture must carry what this case says it carries, or the
-			// leak half below is a test of a value that had nothing to leak.
-			for field, want := range tc.secrets {
-				var got string
-				switch field {
-				case "AppPassword":
-					got = tc.options.AppPassword.Reveal()
-				case "SessionSecret":
-					got = tc.options.SessionSecret.Reveal()
-				}
-				if got != want {
-					t.Fatalf("the fixture does not carry %s; the leak assertions below "+
-						"would pass vacuously (got %q)", field, got)
-				}
-			}
-
 			var buf bytes.Buffer
 			log := slog.New(slog.NewJSONHandler(&buf, nil))
 			log.Info("auth options", "options", tc.options)
 			record := buf.String()
 
-			for field, value := range tc.secrets {
-				if !strings.Contains(record, value) {
-					continue
-				}
-				// Masked: a test that proves a secret escaped by printing it
-				// again into CI output has not finished the job.
-				t.Errorf("logged AuthOptions carry %s's value; §11 and §12 say they must "+
-					"not. Record, with the value masked:\n%s", field,
-					strings.ReplaceAll(record, value, "<"+field+">"))
-			}
+			assertNoSecretInRecord(t, record, tc.secrets)
 
-			// The fact itself. slog's JSON handler renders a bool group member
-			// unquoted, so this distinguishes true from false without parsing.
+			// The fact itself. slog's JSON handler renders a bool unquoted, so
+			// this separates true from false without parsing.
 			want := `"umbrel_managed":` + strconv.FormatBool(tc.wantManaged)
 			if !strings.Contains(record, want) {
 				t.Errorf("the redacted AuthOptions do not report %s. An operator reading this "+
@@ -213,5 +192,24 @@ func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 					want, record)
 			}
 		})
+	}
+}
+
+// assertNoSecretInRecord fails for every secret whose value appears in the
+// rendered log line, naming the field and MASKING the value.
+//
+// The masking is the reason this is a helper rather than three copies: a test
+// that proves a secret escaped by printing it again into CI output has not
+// finished the job, and that policy should be stated once. Both tests in this
+// file had the loop verbatim, comment included.
+func assertNoSecretInRecord(t *testing.T, record string, secrets map[string]string) {
+	t.Helper()
+	for name, value := range secrets {
+		if !strings.Contains(record, value) {
+			continue
+		}
+		t.Errorf("the logged value carries %s; §11 and §12 say it must not. Record, with "+
+			"the value masked:\n%s", name,
+			strings.ReplaceAll(record, value, "<"+name+">"))
 	}
 }

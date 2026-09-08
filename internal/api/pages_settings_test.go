@@ -121,9 +121,9 @@ func TestAFreshInstallDoesNotSubmitDebug(t *testing.T) {
 	// fail this. The rest of the form's round-trip is
 	// TestEverySettingsFieldRoundTrips' job, not this test's.
 	submitted := whatTheBrowserWouldSubmit(t, page)
-	form := fullSettingsForm()
-	form.Set(api.SettingLogLevel, submitted)
-	if rec := h.postForm(t, "/settings", cookie, form); rec.Code != http.StatusSeeOther {
+	if rec := h.saveSettings(t, cookie, url.Values{
+		api.SettingLogLevel: {submitted},
+	}); rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /settings = %d, want a redirect (%s)", rec.Code, rec.Body)
 	}
 	stored, ok, err := h.store.Setting(t.Context(), api.SettingLogLevel)
@@ -287,9 +287,10 @@ func TestTheSettingsPageOffersTheLevelsTheHandlerExports(t *testing.T) {
 func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	form := fullSettingsForm()
-	form.Set(api.SettingLogLevel, "verbose")
-	got := h.postForm(t, "/settings", cookie, form)
+	got := h.saveSettings(t, cookie, url.Values{
+		api.SettingDomain:   {"kept.example"},
+		api.SettingLogLevel: {"verbose"},
+	})
 
 	if got.Code != http.StatusSeeOther ||
 		!strings.Contains(got.Header().Get("Location"), "bad_log_level") {
@@ -307,41 +308,20 @@ func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
 	}
 }
 
-// fullSettingsForm is every key the Settings page submits, which is what a
-// browser always sends: the page renders all of them, so all of them come back.
-// Tests that care about ONE key's absence build from this and delete that key,
-// rather than posting a lone field — a lone field is now a refusal in its own
-// right (BrollyZap-1pd) and would mask what the test meant to ask.
-func fullSettingsForm() url.Values {
-	return url.Values{
-		api.SettingDomain:                {"kept.example"},
-		api.SettingAddressName:           {"name"},
-		api.SettingTrustedProxies:        {""},
-		api.SettingLogLevel:              {"info"},
-		api.SettingPublicRateLimitMinute: {"60"},
-		api.SettingPublicRateLimitHour:   {"600"},
-		api.SettingMaxFeePPM:             {"10000"},
-		api.SettingMaxFeeFloorMsat:       {"10000"},
-		api.SettingRelays:                {""},
-	}
-}
-
 // An ABSENT log_level is not a refusal. Several callers post the settings form
 // without log_level at all; refusing that would reject a save for a field the
 // operator never touched. It is also not what the ruling asks for — an empty row
 // is the fresh-install case 497 handles on purpose. This is the boundary a
 // failing test drew, so it is pinned.
 //
-// THE FIXTURE IS THE FULL FORM MINUS log_level, where this test once posted
-// `domain` alone. That lone POST was 1pd's evidence rather than its subject: it
-// blanked eight keys and nothing objected, and under 1pd's ruling it is now
-// refused for the eight, which would make this test pass for the wrong reason —
-// or fail while log_level's exemption was working perfectly. Narrowing the
-// fixture to the one absence it is about is what keeps it able to fail.
+// THE FIXTURE IS THE FULL FORM MINUS log_level. This test once posted `domain`
+// alone, which was 1pd's evidence rather than its subject: under that ruling the
+// lone POST is refused for the eight keys it omitted, so it could no longer fail
+// for the reason this test is about.
 func TestASettingsSaveWithNoLogLevelFieldIsNotRefused(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	form := fullSettingsForm()
+	form := h.browserForm(t, cookie, url.Values{api.SettingDomain: {"kept.example"}})
 	form.Del(api.SettingLogLevel)
 	got := h.postForm(t, "/settings", cookie, form)
 
@@ -420,11 +400,10 @@ func TestASettingsSaveMissingAKeyIsRefusedAndWritesNothing(t *testing.T) {
 // An EMPTY value that WAS submitted is a deliberate blank and stays legal
 // (BrollyZap-1pd's ruling, second half).
 //
-// This is the outcome a wrong mechanism produces, pinned so it cannot be
-// reached by accident: testing `r.PostFormValue(key) == ""` instead of
-// presence in r.PostForm would refuse an operator clearing relays or
-// trusted_proxies — which works today and must keep working. Relays is the
-// sharper of the two, since clearing it is a thing an operator does on purpose.
+// This is the outcome a wrong mechanism produces, pinned so it cannot be reached
+// by accident — see saveSettings' presence check for which mechanism and why.
+// Relays is the sharper case, since clearing it is a thing an operator does on
+// purpose.
 func TestASettingsSaveWithAnEmptyRelaysFieldStoresTheBlank(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
@@ -432,9 +411,7 @@ func TestASettingsSaveWithAnEmptyRelaysFieldStoresTheBlank(t *testing.T) {
 		t.Fatalf("seeding relays: %v", err)
 	}
 
-	form := fullSettingsForm()
-	form.Set(api.SettingRelays, "")
-	got := h.postForm(t, "/settings", cookie, form)
+	got := h.saveSettings(t, cookie, url.Values{api.SettingRelays: {""}})
 
 	if location := got.Header().Get("Location"); !strings.Contains(location, "flash=saved") {
 		t.Errorf("clearing relays was not accepted (%q); a submitted empty value is a "+

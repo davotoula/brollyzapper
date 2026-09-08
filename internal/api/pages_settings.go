@@ -64,14 +64,16 @@ type settingField struct {
 	// refused is the flash marker shown when validate says no. Required
 	// whenever validate is set.
 	refused string
-	// optional allows the key to be ABSENT from the POST. Every other key
-	// missing from the form refuses the whole save (BrollyZap-1pd): writing
-	// only what arrived would make a truncated request indistinguishable from
-	// a deliberate one, and blanking the rest is the bug.
+	// optional allows the key to be ABSENT from the POST, where every other
+	// missing key refuses the whole save (BrollyZap-1pd). Absence only: a
+	// submitted blank is legal for every key, optional or not.
 	//
-	// This is about ABSENCE, never emptiness. A key that was submitted with an
-	// empty value is a deliberate blank — clearing relays or trusted_proxies —
-	// and stays legal whatever this flag says.
+	// It says THAT a key may be absent, not why, and the two exemptions in this
+	// file have different reasons — log_level's absence is a legitimate empty
+	// row, credit_received's is HTML's checkbox rule. Only the first is
+	// expressible here; the second is why credit_received sits outside
+	// settingsForm entirely. A third exemption with a third reason is the point
+	// at which this wants to carry the reason instead of the permission.
 	optional bool
 }
 
@@ -82,10 +84,15 @@ var settingsForm = []settingField{
 	{key: SettingDomain},
 	{key: SettingAddressName},
 	{key: SettingTrustedProxies, validate: validTrustedProxies, refused: "refused"},
-	// OPTIONAL, keeping 0vk.38's exemption: several callers post this form
-	// without log_level, and an absent one is the empty row 497 handles on
-	// purpose by falling back to the level in force. It is the only key whose
-	// absence means something other than a truncated request.
+	// OPTIONAL, keeping 0vk.38's exemption: an absent log_level is the empty
+	// row 497 handles on purpose, by falling back to the level in force. It is
+	// the only key whose absence means something other than a truncated
+	// request.
+	//
+	// 0vk.38 also justified this by "several callers post the form without it",
+	// which THIS commit retired — a caller omitting anything else is now
+	// refused, and the page's <select> always submits. The exemption survives
+	// on the 497 reason alone, which was always the load-bearing half.
 	{key: SettingLogLevel, validate: validLogLevel, refused: "bad_log_level", optional: true},
 	{key: SettingPublicRateLimitMinute},
 	{key: SettingPublicRateLimitHour},
@@ -373,9 +380,7 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// already saved — a partial save the operator was told nothing about, and
 	// the Settings page has no way to show which half took.
 	for _, field := range settingsForm {
-		// PRESENCE FIRST, and in this loop rather than the write loop below for
-		// the reason that loop's own comment gives: a check that refused half
-		// way through would leave the keys before it already saved.
+		// PRESENCE FIRST, in this loop for the reason the block above gives.
 		//
 		// r.PostForm, not r.PostFormValue: the question is whether the operator
 		// SENT the key, and PostFormValue answers "" for both an absent key and

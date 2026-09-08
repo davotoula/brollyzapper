@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -30,10 +31,10 @@ func TestAPastedURLBecomesABareAddressAndAHashAWalletCanReproduce(t *testing.T) 
 	h := newLNURLHarness(t)
 	cookie := h.login(t)
 
-	form := fullSettingsForm()
-	form.Set(api.SettingDomain, "https://zap.example.com/")
-	form.Set(api.SettingAddressName, "bob")
-	rec := h.postForm(t, "/settings", cookie, form)
+	rec := h.saveSettings(t, cookie, url.Values{
+		api.SettingDomain:      {"https://zap.example.com/"},
+		api.SettingAddressName: {"bob"},
+	})
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /settings = %d %q, want 303", rec.Code, rec.Body)
 	}
@@ -107,10 +108,10 @@ func TestReSavingTheBareHostKeepsAPlainHTTPAddressOnPlainHTTP(t *testing.T) {
 
 	save := func(domain string) {
 		t.Helper()
-		form := fullSettingsForm()
-		form.Set(api.SettingDomain, domain)
-		form.Set(api.SettingAddressName, "bob")
-		rec := h.postForm(t, "/settings", cookie, form)
+		rec := h.saveSettings(t, cookie, url.Values{
+			api.SettingDomain:      {domain},
+			api.SettingAddressName: {"bob"},
+		})
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("POST /settings %q = %d %q", domain, rec.Code, rec.Body)
 		}
@@ -219,10 +220,10 @@ func TestChangingTheHostResetsTheSchemeAndReSavingTheSameHostDoesNot(t *testing.
 
 	save := func(domain string) {
 		t.Helper()
-		form := fullSettingsForm()
-		form.Set(api.SettingDomain, domain)
-		form.Set(api.SettingAddressName, "bob")
-		rec := h.postForm(t, "/settings", cookie, form)
+		rec := h.saveSettings(t, cookie, url.Values{
+			api.SettingDomain:      {domain},
+			api.SettingAddressName: {"bob"},
+		})
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("POST /settings %q = %d %q", domain, rec.Code, rec.Body)
 		}
