@@ -6019,3 +6019,120 @@ const (
 	leadInWindow    = 96
 	minSharedClause = 40
 )
+
+// checkOperatorFileWritesHoldTheStateLock reports a write to or removal of the
+// operator's authorisation file that happens outside a state-store update.
+func checkOperatorFileWritesHoldTheStateLock(t *testing.T, files []sourceFile) []problem {
+	fileOps := map[string]bool{"writeAuthorisationFile": true, "clearAuthorisationFile": true}
+	fset := token.NewFileSet()
+	var found []problem
+	for _, f := range files {
+		if f.dir != "internal/guard" {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, f.path, f.src, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		// The stack of enclosing function literals that are arguments to
+		// g.state.update / g.state.updateIf. Anything called while one of these
+		// is open runs with stateStore.mu held.
+		locked := 0
+		var walk func(ast.Node) bool
+		walk = func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "update" || sel.Sel.Name == "updateIf" {
+					for _, arg := range call.Args {
+						if lit, ok := arg.(*ast.FuncLit); ok {
+							locked++
+							ast.Inspect(lit.Body, walk)
+							locked--
+							return false
+						}
+					}
+				}
+				// The declaration itself is not a call site.
+				if fileOps[sel.Sel.Name] && locked == 0 {
+					found = append(found, problem{f.rel, fset.Position(call.Pos()).Line,
+						fmt.Sprintf("calls %s outside a state-store update. The operator's "+
+							"authorisation file and the grant's row have to move together: "+
+							"a delete that runs once the lock is released can land on a "+
+							"file another connection has just written, leaving a LIVE row "+
+							"with no file — \"a code nobody can read, which is a dead end "+
+							"they cannot diagnose\", which is exactly what "+
+							"RequestAuthorisation's file-first ordering exists to prevent "+
+							"(`0vk.54`)", sel.Sel.Name)})
+				}
+			}
+			return true
+		}
+		ast.Inspect(parsed, walk)
+	}
+	return found
+}
+
+// The operator's code file is written and removed only while the state lock is
+// held (`0vk.54`).
+//
+// THE ORDERING INSIDE ONE CALL WAS NEVER THE PROBLEM. RequestAuthorisation
+// writes the file before the row on purpose — "a file with no grant behind it is
+// a code that does not work, which the operator retries; a grant with no file is
+// a code nobody can read, which is a dead end they cannot diagnose" — and that
+// argument holds perfectly against itself. It held nothing against ANOTHER
+// connection: the guard serves one goroutine per socket connection, and while
+// the sweep's and redeem's deletes ran outside the lock, a write on one and a
+// delete on the other could interleave into precisely the dead end the ordering
+// forbids. Two ways round, each a few milliseconds wide.
+//
+// A RULE RATHER THAN A TEST, and that is the finding behind the finding. The
+// first attempt was a concurrent test asserting the invariant over two hundred
+// iterations; it passed against a planted defect with the window deliberately
+// widened, because the scheduler served the two goroutines in the safe order
+// every single time. A race a plant cannot make fail is a race the test cannot
+// see, and shipping it would have been a green light with nothing behind it. The
+// property is structural — these calls belong inside the closure that holds the
+// lock — so it is enforced where structure is enforced.
+func TestTheOperatorFileMovesOnlyUnderTheStateLock(t *testing.T) {
+	clean(t, checkOperatorFileWritesHoldTheStateLock(t, sourceFiles(t)))
+
+	// The shape that shipped and was sent back: the row goes under the lock and
+	// the file follows once it is released.
+	catches(t, checkOperatorFileWritesHoldTheStateLock(t, []sourceFile{
+		planted("internal/guard", `package guard
+
+func (g *Guard) sweep() {
+	_ = g.state.update(func(st *State) { st.Authorisation = nil })
+	g.clearAuthorisationFile()
+}
+`)}), "outside a state-store update")
+
+	// And the other half: the request path writing its file before it takes the
+	// lock at all.
+	catches(t, checkOperatorFileWritesHoldTheStateLock(t, []sourceFile{
+		planted("internal/guard", `package guard
+
+func (g *Guard) request(grant *Authorisation) error {
+	if err := g.writeAuthorisationFile(grant, g.rotation.clock()); err != nil {
+		return err
+	}
+	return g.state.update(func(st *State) { st.Authorisation = grant })
+}
+`)}), "outside a state-store update")
+
+	// The rule must not fire on the compliant form, or it says nothing about the
+	// difference between the two.
+	clean(t, checkOperatorFileWritesHoldTheStateLock(t, []sourceFile{
+		planted("internal/guard", `package guard
+
+func (g *Guard) sweep() error {
+	return g.state.update(func(st *State) {
+		g.clearAuthorisationFile()
+		st.Authorisation = nil
+	})
+}
+`)}))
+}

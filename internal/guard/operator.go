@@ -301,11 +301,34 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// The FILE first, then the state. A file with no grant behind it is a code
 	// that does not work, which the operator retries; a grant with no file is a
 	// code nobody can read, which is a dead end they cannot diagnose.
-	if err := g.writeAuthorisationFile(grant, now); err != nil {
+	//
+	// BOTH UNDER THE STORE'S LOCK, because the ordering above only protects this
+	// call against itself. Against another connection it protected nothing: the
+	// sweep and redeem both delete the operator file, and while that delete ran
+	// outside the lock the two could interleave into precisely the dead end this
+	// ordering exists to prevent — this writes file2, the sweep takes the lock,
+	// sees the still-expired row1, clears it and deletes what is now file2, and
+	// then this writes row2. A live row, no file. The lock is the only thing that
+	// orders a write on one connection against a delete on another.
+	//
+	// EXPIRY CONDITION: this holds stateStore.mu across one small file write, so
+	// the payment path's cap check waits behind it. That is acceptable only
+	// because the ceremony is operator-paced — a handful of calls a day against a
+	// lock the payment path takes per request. If anything ever puts a
+	// credential-sized write or a network call in here, this is the line to move
+	// back out and solve differently.
+	var wrote error
+	if err := g.state.updateIf(func(st *State) bool {
+		if wrote = g.writeAuthorisationFile(grant, now); wrote != nil {
+			return false
+		}
+		st.Authorisation = grant
+		return true
+	}); err != nil {
 		return err
 	}
-	if err := g.state.update(func(st *State) { st.Authorisation = grant }); err != nil {
-		return err
+	if wrote != nil {
+		return wrote
 	}
 	// Audited: an authorisation request is the app asking for more authority
 	// than it has, which is worth a durable row whether or not it is redeemed.
@@ -604,6 +627,11 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		}
 		change := current.Change
 		swept = &change
+		// Inside the lock, beside the row it belongs to — see
+		// consumeAuthorisation, which this deliberately mirrors rather than
+		// calls: that one clears unconditionally, and this one has just decided,
+		// under this same lock, that the grant it is looking at is expired.
+		g.clearAuthorisationFile()
 		st.Authorisation = nil
 		return true
 	})
@@ -616,7 +644,6 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		// Nothing was discarded here, so nothing is said about it.
 		return state
 	}
-	g.clearAuthorisationFile()
 	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded",
 		*swept, discarded("expired"))
 	state.Authorisation = nil
@@ -631,12 +658,27 @@ func (g *Guard) discardAuthorisation(ctx context.Context, change Change, why str
 	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded", change, discarded(why))
 }
 
+// consumeAuthorisation ends the stored grant, file and row together.
+//
+// THE FILE IS REMOVED INSIDE THE STORE'S LOCK, and that is the whole point of
+// doing it here rather than after the update returns. A delete that runs once
+// the lock is released can land on a file some other connection has written in
+// the meantime: this clears row1, RequestAuthorisation writes file2 and row2,
+// and then this deletes file2 — leaving a LIVE row with no file, which is "a
+// code nobody can read, which is a dead end they cannot diagnose", the exact
+// outcome RequestAuthorisation's own file-first comment exists to prevent.
+// RequestAuthorisation writes its file under the same lock for the same reason,
+// so a write and a delete can no longer overlap at all. Found by review, twice:
+// the row half in the go-review, this half in David's.
+//
+// BEFORE THE SAVE, not after, so the ordering that survives a crash is still the
+// safe one — a file with no grant behind it is a code that does not work, which
+// the operator retries; a grant with no file is the dead end above.
 func (g *Guard) consumeAuthorisation() error {
-	if err := g.state.update(func(st *State) { st.Authorisation = nil }); err != nil {
-		return err
-	}
-	g.clearAuthorisationFile()
-	return nil
+	return g.state.update(func(st *State) {
+		g.clearAuthorisationFile()
+		st.Authorisation = nil
+	})
 }
 
 // auditAuthorisationBound is how much of the guard's 32-slot ring one burst of
