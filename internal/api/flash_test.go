@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/davotoula/brollyzapper/internal/guard"
 )
 
 // Every flash marker a handler redirects with must have a message, and every
@@ -70,11 +73,26 @@ func TestEveryFlashMarkerHasAMessageAndEveryMessageAMarker(t *testing.T) {
 	// the failure this whole rule exists for. settingsForm can sit below because
 	// TestEveryValidatedFieldCanSayWhyItRefused covers its forward direction;
 	// nothing else covers this one.
-	for _, marker := range capPairFlashes {
-		found[marker] = append(found[marker], "capPairFlashes")
+	//
+	// ENUMERATED FROM THE CLOSED SETS THEMSELVES rather than listed: every kind
+	// the guard may name, against every control this route may move, both with a
+	// code typed and without. That is every marker refusalFlash can return, and a
+	// kind added to ErrorKinds with no copy behind it fails the forward check
+	// below without anyone remembering to extend this loop (`0vk.55`).
+	for _, kind := range guard.ErrorKinds {
+		refusal := &guard.Refusal{Kind: kind, Err: errors.New("a refusal from the guard")}
+		for _, control := range capControls {
+			for _, typed := range []bool{false, true} {
+				marker := refusalFlash(refusal, control, typed)
+				found[marker] = append(found[marker], "refusalFlash")
+			}
+		}
 	}
-	fallback := refusalFlash(nil, "")
-	found[fallback] = append(found[fallback], "refusalFlash")
+	// And the kindless refusal, which is where the two defaults live.
+	for _, typed := range []bool{false, true} {
+		marker := refusalFlash(errors.New("a refusal carrying no kind"), "", typed)
+		found[marker] = append(found[marker], "refusalFlash")
+	}
 	for name, files := range found {
 		if FlashMessage(name) == "" {
 			t.Errorf("%s redirects with ?flash=%s and nothing translates it, so the page "+

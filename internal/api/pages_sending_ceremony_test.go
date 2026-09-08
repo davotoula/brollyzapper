@@ -435,3 +435,84 @@ func TestARefusalWithNoKindStillShowsTheCodeMessage(t *testing.T) {
 			"commonest way this ceremony fails and the page has to say so", location)
 	}
 }
+
+// A refusal the operator typed no code for does not claim a code was refused
+// (`0vk.55`).
+//
+// `0vk.53` fixed this class for exactly one kind, the cap pair. Every OTHER
+// failure reached with an empty code — an LND outage, a guard state-write
+// failure, a transport error — still rendered "That code was not accepted, so
+// nothing has changed", to an operator who typed nothing. The tightening path is
+// the one that gets there: a tightening needs no ceremony, so it falls through
+// RequestAuthorisation and applies with an empty code.
+//
+// THE THREE ROWS OF THE RULING IN ONE TABLE, because the defect is one message
+// standing in for three different next steps, and a test asserting one row
+// passes against the version that collapses them.
+func TestARefusalIsToldApartByWhetherACodeWasTyped(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		code     string
+		applyErr error
+		want     string
+		notWant  string
+	}{{
+		// The bead's case: no code typed, and nothing about the failure says a
+		// code was involved.
+		name:     "no code typed and the guard refused for its own reasons",
+		applyErr: errors.New("guard: lnd is not answering"),
+		want:     "refused",
+		notWant:  "code was not accepted",
+	}, {
+		// The commonest codeless failure, and the reason "if code == \"\" then
+		// refused" was the wrong one-liner: sending this operator to the log
+		// hides a remedy the app can simply state.
+		name: "no code typed and the guard says the change needs one",
+		applyErr: &guard.Refusal{Kind: guard.KindAuthorisationRequired,
+			Err: errors.New("guard: this change needs an authorisation code")},
+		want:    "authorisation_required",
+		notWant: "code was not accepted",
+	}, {
+		// Unchanged, and the anti-vacuity row: the ceremony's own message is
+		// still the commonest thing this page has to say.
+		name:     "a code was typed and refused",
+		code:     "123456",
+		applyErr: errors.New("guard: that code is not the one that was written"),
+		want:     "code_refused",
+		notWant:  "see the log for why",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &fakeGuard{
+				authoriseErr: errors.New("guard: that is not a loosening"),
+				applyErr:     tc.applyErr,
+			}
+			h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) { opts.Guard = g })
+			cookie := h.login(t)
+
+			form := url.Values{"control": {"spend_cap"}, "sats": {"40000"}}
+			if tc.code != "" {
+				form.Set("code", tc.code)
+			}
+			rec := h.postForm(t, "/sending/caps", cookie, form)
+
+			location := rec.Header().Get("Location")
+			redirect, err := url.Parse(location)
+			if err != nil {
+				t.Fatalf("the redirect %q does not parse: %v", location, err)
+			}
+			marker := redirect.Query().Get("flash")
+			if marker != tc.want {
+				t.Errorf("the redirect carries flash=%q, want %q", marker, tc.want)
+			}
+			flash := api.FlashMessage(marker)
+			if flash == "" {
+				t.Fatalf("flash=%q renders no message at all, so the page says nothing "+
+					"happened when something did", marker)
+			}
+			if strings.Contains(flash, tc.notWant) {
+				t.Errorf("the page says\n  %s\nwhich contains %q — the wrong next step for "+
+					"this refusal", flash, tc.notWant)
+			}
+		})
+	}
+}

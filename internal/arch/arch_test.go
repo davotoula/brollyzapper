@@ -5720,16 +5720,23 @@ func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []pr
 	// accepted, and the alternative was relaying the guard's SENTENCE to the URL,
 	// which is the thing moveGuardControl's comment exists to forbid.
 	//
-	// It is two names, deliberately: the predicate and the one token the server
-	// has separate copy for. guard.Refusal and guard.ErrorKind stay out, because
-	// a handler that named the type would be building refusals rather than
-	// reading them — and nothing in internal/api should be authoring the guard's
-	// verdicts.
+	// It is the predicate plus ONE NAME PER TOKEN the server has separate copy
+	// for — KindAuthorisationRequired joined KindCapPair in `0vk.55`, on the same
+	// grounds: a loosening with no live grant is a different thing to say to the
+	// operator, and the alternative was the server reading the guard's prose.
+	// That is the bound on this list growing, and it is the same one ErrorKind's
+	// own doc states: a kind nobody has written copy for does not belong in
+	// either place.
+	//
+	// guard.Refusal and guard.ErrorKind stay out, because a handler that named
+	// the type would be building refusals rather than reading them — and nothing
+	// in internal/api should be authoring the guard's verdicts. That half has its
+	// own plant below; keep it red.
 	allowed := map[string]bool{
 		"Change": true, "Control": true,
 		"ControlSending": true, "ControlSpendCap": true, "ControlPaymentCap": true,
 		"Controls": true,
-		"KindOf":   true, "KindCapPair": true,
+		"KindOf":   true, "KindCapPair": true, "KindAuthorisationRequired": true,
 	}
 	reference := regexp.MustCompile(`\bguard\.([A-Z]\w*)`)
 

@@ -203,20 +203,24 @@ func (st *State) apply(c Change) {
 //
 // UNEXPORTED, and it is the same reasoning errSpendRefused carries: this error
 // crosses the socket, where `dispatch` flattens it to a string and
-// SocketClient.call rebuilds one from that string — so nothing on the server
-// side can ever errors.Is it, by construction. An exported name would read as a
-// contract, and the next handler wanting to tell "needs a code" from "wrong
-// code" would write a match that compiles, never fires, and fails silently.
-// What survives is the TEXT, which is why the text says what to do. Found by
-// review.
+// SocketClient.call rebuilds one from that string, so sentinel IDENTITY does not
+// survive — nothing on the server side can ever errors.Is it, by construction.
+// An exported name would read as a contract that holds in tests and never in
+// production. Found by review.
 //
-// WHAT DOES CROSS IS A KIND (`0vk.53`), and it is the answer to that next
-// handler: the rebuilt error is a *Refusal, so errors.As finds the fixed token
-// the guard set, and ErrorKinds is the closed set of them. Sentinel IDENTITY
-// still does not survive — the wrapped error is a fresh one built from the
-// string — so telling "needs a code" from "wrong code" means giving each a kind
-// here, not exporting this variable.
-var errAuthorisationRequired = errors.New("guard: this change needs an authorisation code")
+// WHAT CROSSES IS ITS KIND (`0vk.55`), and that is what the server acts on. The
+// comment here used to end by saying that telling "needs a code" from "wrong
+// code" would mean giving each one a kind rather than exporting this variable;
+// this is that, done. A loosening that arrives with no live grant is the
+// commonest way this page refuses without a code being involved, and the page
+// now says "ask for one" rather than sending the operator to a log.
+//
+// THE TEXT STILL MATTERS, because it is what the guard's log and §12's trail
+// carry — the kind is a token for the server to choose copy with, not a message.
+var errAuthorisationRequired error = &Refusal{
+	Kind: KindAuthorisationRequired,
+	Err:  errors.New("guard: this change needs an authorisation code"),
+}
 
 // RequestAuthorisation issues a one-time grant for a loosening and writes it
 // where only the operator can read it.

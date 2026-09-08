@@ -170,7 +170,7 @@ func (s *Server) moveGuardControl(w http.ResponseWriter, r *http.Request, change
 		// from a code that was not accepted.
 		s.Log.Warn("the guard would not move an operator control",
 			"control", string(change.Control), "error", err.Error())
-		http.Redirect(w, r, "/sending?flash="+refusalFlash(err, change.Control),
+		http.Redirect(w, r, "/sending?flash="+refusalFlash(err, change.Control, code != ""),
 			http.StatusSeeOther)
 		return
 	}
@@ -199,17 +199,45 @@ var capPairFlashes = map[guard.Control]string{
 
 // refusalFlash picks the marker for a change the guard would not make.
 //
-// code_refused UNLESS the guard named a kind this build has separate copy for,
-// which is the conservative direction: a kind added to the guard and not yet
-// mapped here, or a control with no cap-pair message, falls back to the message
-// the ceremony has always shown rather than to a marker that renders blank.
-func refusalFlash(err error, control guard.Control) string {
+// WHETHER A CODE WAS TYPED IS THE FIRST THING THAT MATTERS (`0vk.55`), and it is
+// the half `0vk.53` left. code_refused says a code was mistyped, expired or
+// already used; shown to an operator who typed none it is a false account of
+// what happened AND a next step that cannot work. A tightening reaches here with
+// an empty code as a matter of course — it needs no ceremony, so it falls
+// through RequestAuthorisation and applies — so this was the common path, not
+// the edge.
+//
+// THE ORDER OF THE THREE TESTS IS THE RULING, and each is here for its own case:
+//
+//  1. The cap pair, either way round, because its remedy is a control rather
+//     than a code and holds whether or not one was typed (`0vk.53`).
+//  2. A code was typed and refused: the ceremony's own message, unchanged, and
+//     still the commonest thing this page has to say.
+//  3. No code, and the guard says the change needs one: the app states the
+//     remedy instead of sending the operator to a log for it.
+//
+// The fallback is the generic refusal rather than code_refused, which is the
+// conservative direction now that a code being typed is checked first: a kind
+// this build has no copy for, or a control with no cap-pair message, says that
+// the change was refused and where to look — never that a code was.
+//
+// codeTyped IS A BOOL, NOT THE CODE. This function needs to know only whether
+// there was one, and a function that took the string would be one refactor away
+// from putting it in a log line or a URL — which §11 forbids and this page's own
+// design goes to some length to prevent.
+func refusalFlash(err error, control guard.Control, codeTyped bool) string {
 	if guard.KindOf(err) == guard.KindCapPair {
 		if marker, ok := capPairFlashes[control]; ok {
 			return marker
 		}
 	}
-	return "code_refused"
+	if codeTyped {
+		return "code_refused"
+	}
+	if guard.KindOf(err) == guard.KindAuthorisationRequired {
+		return "authorisation_required"
+	}
+	return "refused"
 }
 
 // enableSending performs the ceremony, bakes the spend macaroon and records the

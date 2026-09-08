@@ -684,6 +684,26 @@ func TestTheCapPairRefusalCarriesItsKindOverTheSocket(t *testing.T) {
 			"support path reads out of docker logs", relayed)
 	}
 
+	// AND THE SECOND KIND OVER THE SAME SOCKET (`0vk.55`): a loosening that
+	// arrives with nothing to redeem. 80k sats clears the 100k window and is
+	// above the standing 50k per-payment cap, so it passes the cap pair, counts
+	// as a loosening, and reaches redeem with no grant.
+	//
+	// ACROSS THE SOCKET RATHER THAN IN PROCESS, for the reason the cap pair is:
+	// errAuthorisationRequired is a package-level *Refusal, so a direct call
+	// returns the very pointer the guard holds and errors.As would find its kind
+	// even if nothing were ever encoded. Only the relayed copy proves the wire.
+	needsCode := client.ApplyChange(ctx,
+		guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}, "")
+	if needsCode == nil {
+		t.Fatal("a loosening applied with no code and no grant")
+	}
+	if got := guard.KindOf(needsCode); got != guard.KindAuthorisationRequired {
+		t.Errorf("the relayed refusal carries kind %q, want %q; the page cannot tell "+
+			"'this needs a code' from 'that code was wrong' (%v)",
+			got, guard.KindAuthorisationRequired, needsCode)
+	}
+
 	// A refusal with no kind stays kindless over the same socket.
 	loosening := guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}
 	if err := client.RequestAuthorisation(ctx, loosening); err != nil {
