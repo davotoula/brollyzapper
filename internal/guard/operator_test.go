@@ -979,6 +979,12 @@ func TestASweepThatCannotWriteClaimsNothing(t *testing.T) {
 	if err := os.Chmod(d.data, 0o500); err != nil {
 		t.Fatal(err)
 	}
+	// PAIRED WITH A CLEANUP, not with the restore three lines down. A t.Fatal or
+	// a panic between the two would leave the directory at 0500, and t.TempDir's
+	// RemoveAll cannot unlink through it — so the real failure would be buried
+	// under a confusing cleanup error, and the temp directory would leak. Found
+	// by review.
+	t.Cleanup(func() { _ = os.Chmod(d.data, 0o700) })
 	g.SweepExpiredAuthorisation(t.Context())
 	if err := os.Chmod(d.data, 0o700); err != nil {
 		t.Fatal(err)

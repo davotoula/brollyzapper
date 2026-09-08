@@ -571,19 +571,54 @@ func (g *Guard) SweepExpiredAuthorisation(ctx context.Context) {
 // to clear was not discarded, and the trail should not say it was. Found by
 // review.
 //
+// THE DECISION IS MADE UNDER THE STORE'S LOCK, against the grant that is
+// CURRENTLY stored, and the caller's `state` is only a cheap way to skip the
+// lock when there is obviously nothing to do. That is not caution: the first
+// version composed the caller's load() with consumeAuthorisation's independent
+// update(), which is precisely the lost update stateStore's own doc warns about
+// — "the guard serves one goroutine per socket connection". A Status poll that
+// had loaded state holding an expired grant, and then lost the CPU while the
+// operator asked for a new code, came back and cleared the REPLACEMENT: state
+// row and code file both, for a grant it had never seen. The operator's code
+// stopped working within milliseconds of being written, and the redeem told them
+// to ask for another. Found by review; the sequence is driven by hand in
+// TestASweepOnAStaleSnapshotLeavesTheCurrentGrantAlone.
+//
+// The same re-check is what stops two concurrent Status polls both discarding
+// one grant and spending two of the eight audit rows an hour on it.
+//
 // IDEMPOTENT AND SILENT when there is nothing to sweep — no state write, no
 // audit row, no log line — which is what lets it sit on the polled path.
 func (g *Guard) sweepExpired(ctx context.Context, state State) State {
-	grant := state.Authorisation
-	if grant == nil || !grant.expired(g.rotation.clock()) {
+	if grant := state.Authorisation; grant == nil || !grant.expired(g.rotation.clock()) {
 		return state
 	}
-	if err := g.consumeAuthorisation(); err != nil {
+	// swept is the CURRENT grant's change, captured inside the lock, because the
+	// row has to name what was actually discarded rather than what the caller's
+	// snapshot happened to hold.
+	var swept *Change
+	err := g.state.updateIf(func(st *State) bool {
+		current := st.Authorisation
+		if current == nil || !current.expired(g.rotation.clock()) {
+			return false
+		}
+		change := current.Change
+		swept = &change
+		st.Authorisation = nil
+		return true
+	})
+	if err != nil {
 		g.log.Warn("could not clear an expired authorisation", "error", err.Error())
 		return state
 	}
+	if swept == nil {
+		// Somebody else got there first, or replaced the grant with a live one.
+		// Nothing was discarded here, so nothing is said about it.
+		return state
+	}
+	g.clearAuthorisationFile()
 	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded",
-		grant.Change, discarded("expired"))
+		*swept, discarded("expired"))
 	state.Authorisation = nil
 	return state
 }

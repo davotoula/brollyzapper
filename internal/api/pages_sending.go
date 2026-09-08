@@ -235,6 +235,15 @@ func refusalFlash(err error, control guard.Control, codeTyped bool) string {
 	if codeTyped {
 		return "code_refused"
 	}
+	// THE ORDER PUTS ONE CELL OUT OF REACH ON PURPOSE: a code typed against a
+	// grant that has been swept, consumed or superseded is KindAuthorisationRequired
+	// AND codeTyped, and it lands above rather than here. That is right —
+	// code_refused already says "expired, already used, or written for a
+	// different change — ask for a new one", which is exactly what happened —
+	// and telling someone who has just typed a code that the change "needs a
+	// confirmation code" would be the mirror of the defect `0vk.55` removed.
+	// Pinned by the fourth row of TestARefusalIsToldApartByWhetherACodeWasTyped,
+	// so moving this branch up fails rather than reading as a tidy-up.
 	if kind == guard.KindAuthorisationRequired {
 		return "authorisation_required"
 	}
