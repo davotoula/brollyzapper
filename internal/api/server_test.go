@@ -380,6 +380,50 @@ func formFieldNames(page string) []string {
 // valueFor invents a value each field will accept: the numeric settings parse
 // as integers, trusted_proxies must be a CIDR list or the save is refused, and
 // log_level must be one the LevelVar understands.
+// browserForm is what a browser would submit for the Settings form: every field
+// the page RENDERS, each carrying a value it will accept, with the caller's
+// overrides applied on top.
+//
+// READ OFF THE PAGE, not listed here, and that is the whole point. Since
+// BrollyZap-1pd a form missing any key is refused wholesale, so every test that
+// saves settings needs the full set — and a hand-kept copy of that set would be
+// the third list of the same fact, after settingsForm and settings.html.
+// TestEverySettingsFieldRoundTrips already refused to keep one, for the reason
+// it states: "a hand-kept list in the test cannot catch it, because it is the
+// same hand keeping both." Deriving it means a tenth setting costs these tests
+// nothing.
+//
+// The GET is free: postForm already fetches this page for the CSRF token.
+func (h *harness) browserForm(t *testing.T, cookie *http.Cookie, overrides url.Values) url.Values {
+	t.Helper()
+	names := formFieldNames(h.get(t, "/settings", cookie).Body.String())
+	if len(names) == 0 {
+		t.Fatal("the settings form rendered no fields; every test built on this would be " +
+			"posting an empty form and asserting over nothing")
+	}
+	form := url.Values{}
+	for _, name := range names {
+		form.Set(name, valueFor(name))
+	}
+	for key, values := range overrides {
+		// COPIED, not aliased. Assigning the caller's slice would leave two
+		// maps sharing one backing array, which is harmless today — form is
+		// freshly allocated and postForm only ever Sets csrf_token — and a trap
+		// the moment a table-driven settings test shares one overrides literal
+		// across parallel subtests. Cheaper to not have.
+		form[key] = slices.Clone(values)
+	}
+	return form
+}
+
+// saveSettings posts a complete settings form with the caller's overrides. Most
+// tests want exactly this; the ones asking what happens when a key is ABSENT
+// build with browserForm and delete it.
+func (h *harness) saveSettings(t *testing.T, cookie *http.Cookie, overrides url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	return h.postForm(t, "/settings", cookie, h.browserForm(t, cookie, overrides))
+}
+
 func valueFor(name string) string {
 	switch name {
 	case api.SettingTrustedProxies:
@@ -408,7 +452,7 @@ func TestChangingTheLogLevelAppliesWithoutARestart(t *testing.T) {
 		t.Fatalf("level starts at %v, want info", h.level.Level())
 	}
 
-	got := h.postForm(t, "/settings", cookie, url.Values{"log_level": {"debug"}})
+	got := h.saveSettings(t, cookie, url.Values{api.SettingLogLevel: {"debug"}})
 	if got.Code != http.StatusSeeOther {
 		t.Fatalf("saving = %d, want a redirect", got.Code)
 	}
@@ -430,7 +474,9 @@ func TestTheTrustedProxiesSettingChangesWhoIsBelieved(t *testing.T) {
 		t.Fatalf("client IP = %s before the setting, want the peer", got)
 	}
 
-	if got := h.postForm(t, "/settings", cookie, url.Values{"trusted_proxies": {"10.21.0.0/16"}}); got.Code != http.StatusSeeOther {
+	if got := h.saveSettings(t, cookie, url.Values{
+		api.SettingTrustedProxies: {"10.21.0.0/16"},
+	}); got.Code != http.StatusSeeOther {
 		t.Fatalf("saving = %d, want a redirect (%s)", got.Code, got.Body)
 	}
 	if got := h.clientIPFor(t, "10.21.0.3:5000", "203.0.113.7"); got != "203.0.113.7" {
@@ -444,9 +490,7 @@ func TestTheTrustedProxiesSettingChangesWhoIsBelieved(t *testing.T) {
 func TestAnUnparseableTrustedProxiesValueIsRefused(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	got := h.postForm(t, "/settings", cookie, url.Values{
-		"domain": {"kept.example"}, "trusted_proxies": {"not-a-cidr"},
-	})
+	got := h.saveSettings(t, cookie, url.Values{api.SettingTrustedProxies: {"not-a-cidr"}})
 	if got.Code != http.StatusSeeOther || !strings.Contains(got.Header().Get("Location"), "refused") {
 		t.Errorf("saving a bad CIDR list = %d %q, want a refusal", got.Code, got.Header().Get("Location"))
 	}
@@ -860,8 +904,9 @@ func TestEveryHandlerRaisedEventCarriesTheCallersAddress(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
 
-	if rec := h.postForm(t, "/settings", cookie, url.Values{
-		"domain": {"zap.example"}, "address_name": {"bob"},
+	if rec := h.saveSettings(t, cookie, url.Values{
+		api.SettingDomain:      {"zap.example"},
+		api.SettingAddressName: {"bob"},
 	}); rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /settings = %d %q", rec.Code, rec.Body)
 	}

@@ -31,7 +31,7 @@ func TestAPastedURLBecomesABareAddressAndAHashAWalletCanReproduce(t *testing.T) 
 	h := newLNURLHarness(t)
 	cookie := h.login(t)
 
-	rec := h.postForm(t, "/settings", cookie, url.Values{
+	rec := h.saveSettings(t, cookie, url.Values{
 		api.SettingDomain:      {"https://zap.example.com/"},
 		api.SettingAddressName: {"bob"},
 	})
@@ -108,7 +108,7 @@ func TestReSavingTheBareHostKeepsAPlainHTTPAddressOnPlainHTTP(t *testing.T) {
 
 	save := func(domain string) {
 		t.Helper()
-		rec := h.postForm(t, "/settings", cookie, url.Values{
+		rec := h.saveSettings(t, cookie, url.Values{
 			api.SettingDomain:      {domain},
 			api.SettingAddressName: {"bob"},
 		})
@@ -220,8 +220,9 @@ func TestChangingTheHostResetsTheSchemeAndReSavingTheSameHostDoesNot(t *testing.
 
 	save := func(domain string) {
 		t.Helper()
-		rec := h.postForm(t, "/settings", cookie, url.Values{
-			api.SettingDomain: {domain}, api.SettingAddressName: {"bob"},
+		rec := h.saveSettings(t, cookie, url.Values{
+			api.SettingDomain:      {domain},
+			api.SettingAddressName: {"bob"},
 		})
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("POST /settings %q = %d %q", domain, rec.Code, rec.Body)

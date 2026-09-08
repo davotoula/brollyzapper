@@ -64,6 +64,30 @@ type settingField struct {
 	// refused is the flash marker shown when validate says no. Required
 	// whenever validate is set.
 	refused string
+	// reason is what the LOG says when validate refuses: a fixed phrase,
+	// written here, never the validator's error.
+	//
+	// THE ERROR TEXT CANNOT BE LOGGED, which is why this exists rather than
+	// err.Error(). Both validators format the submitted value into their
+	// message — `%q is not a log level`, and config.ParsePrefixList's `%q is
+	// neither a CIDR prefix nor an IP address` — so logging the error logs the
+	// operator's typing, and §12 has no exception for input that happens to be
+	// malformed. The value belongs on the page, where the operator can see what
+	// they typed; the log gets the key and this.
+	//
+	// Required whenever validate is set, on the same rule as refused.
+	reason string
+	// optional allows the key to be ABSENT from the POST, where every other
+	// missing key refuses the whole save (BrollyZap-1pd). Absence only: a
+	// submitted blank is legal for every key, optional or not.
+	//
+	// It says THAT a key may be absent, not why, and the two exemptions in this
+	// file have different reasons — log_level's absence is a legitimate empty
+	// row, credit_received's is HTML's checkbox rule. Only the first is
+	// expressible here; the second is why credit_received sits outside
+	// settingsForm entirely. A third exemption with a third reason is the point
+	// at which this wants to carry the reason instead of the permission.
+	optional bool
 }
 
 // settingsForm are the keys the Settings page owns. Everything here is read
@@ -72,8 +96,19 @@ type settingField struct {
 var settingsForm = []settingField{
 	{key: SettingDomain},
 	{key: SettingAddressName},
-	{key: SettingTrustedProxies, validate: validTrustedProxies, refused: "refused"},
-	{key: SettingLogLevel, validate: validLogLevel, refused: "bad_log_level"},
+	{key: SettingTrustedProxies, validate: validTrustedProxies, refused: "refused",
+		reason: "not a CIDR prefix or IP address list"},
+	// OPTIONAL, keeping 0vk.38's exemption: an absent log_level is the empty
+	// row 497 handles on purpose, by falling back to the level in force. It is
+	// the only key whose absence means something other than a truncated
+	// request.
+	//
+	// 0vk.38 also justified this by "several callers post the form without it",
+	// which THIS commit retired — a caller omitting anything else is now
+	// refused, and the page's <select> always submits. The exemption survives
+	// on the 497 reason alone, which was always the load-bearing half.
+	{key: SettingLogLevel, validate: validLogLevel, refused: "bad_log_level", optional: true,
+		reason: "not a level any reader can render"},
 	{key: SettingPublicRateLimitMinute},
 	{key: SettingPublicRateLimitHour},
 	{key: SettingMaxFeePPM},
@@ -360,14 +395,35 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// already saved — a partial save the operator was told nothing about, and
 	// the Settings page has no way to show which half took.
 	for _, field := range settingsForm {
+		// PRESENCE FIRST, in this loop for the reason the block above gives.
+		//
+		// r.PostForm, not r.PostFormValue: the question is whether the operator
+		// SENT the key, and PostFormValue answers "" for both an absent key and
+		// a submitted blank. Reading the map is what keeps clearing a field
+		// working. The body is already parsed — readForm runs ParseForm in the
+		// admin group's CSRF gate, before any handler sees the request.
+		if _, sent := r.PostForm[field.key]; !sent && !field.optional {
+			// The key is named; no value exists to log, and naming it is what
+			// lets an operator find the field their form dropped.
+			s.Log.Warn("refused an incomplete settings form", "key", field.key)
+			http.Redirect(w, r, "/settings?flash=incomplete_form", http.StatusSeeOther)
+			return
+		}
 		if field.validate == nil {
 			continue
 		}
 		if err := field.validate(strings.TrimSpace(r.PostFormValue(field.key))); err != nil {
-			// The VALUE is not logged. It is operator input echoed back into the
-			// log, and §12's rule about what reaches a log does not have an
-			// exception for input that happens to be malformed.
-			s.Log.Warn("refused a settings value", "key", field.key, "error", err.Error())
+			// THE VALUE IS NOT LOGGED, and until this branch that comment was
+			// wrong: the line carried err.Error(), and both validators format
+			// the submitted value into their message, so the operator's typing
+			// went into the record anyway. field.reason is the fixed phrase
+			// written beside the validator; err is dropped on purpose.
+			//
+			// Nothing is lost that the operator needs. They get the flash, which
+			// names the field and what it will accept, on a page still showing
+			// what they typed. The log says which key was refused and why, which
+			// is what someone reading it after the fact is asking.
+			s.Log.Warn("refused a settings value", "key", field.key, "reason", field.reason)
 			http.Redirect(w, r, "/settings?flash="+field.refused, http.StatusSeeOther)
 			return
 		}
@@ -393,6 +449,10 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		s.auditRequest(r, slog.LevelInfo, "setting changed",
 			logging.EventSettingChange, slog.String("key", field.key))
 	}
+	// NOT SUBJECT TO THE PRESENCE CHECK ABOVE, and it is not an oversight that
+	// it sits outside settingsForm. credit_received is a checkbox, and HTML
+	// submits a checkbox only when it is ticked — absence IS the value "off".
+	// Requiring it present would make unticking the box a refusal.
 	if err := s.Wallet.SetCreditReceived(ctx, r.PostFormValue("credit_received") != ""); err != nil {
 		s.Log.Error("saving credit_received", "error", err.Error())
 	}
@@ -496,6 +556,14 @@ var flashMessages = map[string]string{
 	"refused": "That change was refused — see the log for why.",
 	"bad_log_level": "That log level is not one this app can use, so nothing was saved. " +
 		"Choose debug, info, warn or error.",
+	// Says what to DO, like the ceremony's markers below: the operator who sees
+	// this did not choose to send a partial form, so "reload and save again" is
+	// the whole remedy and the sentence has to carry it. It also says what did
+	// NOT happen, because the bug this refusal replaced was silent — the old
+	// behaviour blanked the missing fields and reported success.
+	"incomplete_form": "That save was missing some of the Settings form's fields, so nothing " +
+		"was changed. Reload this page and save again — saving a partial form would have " +
+		"emptied the fields it left out.",
 	"signed-out": "Signed out. That ended every session, on every device — " +
 		"anyone still signed in elsewhere has to sign in again.",
 

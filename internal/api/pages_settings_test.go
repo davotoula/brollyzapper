@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/davotoula/brollyzapper/internal/api"
+	"github.com/davotoula/brollyzapper/internal/logging"
+	"github.com/davotoula/brollyzapper/internal/store"
 )
 
 // logLevelSelect reads the Log level control back out of the rendered page: the
@@ -121,7 +124,7 @@ func TestAFreshInstallDoesNotSubmitDebug(t *testing.T) {
 	// fail this. The rest of the form's round-trip is
 	// TestEverySettingsFieldRoundTrips' job, not this test's.
 	submitted := whatTheBrowserWouldSubmit(t, page)
-	if rec := h.postForm(t, "/settings", cookie, url.Values{
+	if rec := h.saveSettings(t, cookie, url.Values{
 		api.SettingLogLevel: {submitted},
 	}); rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /settings = %d, want a redirect (%s)", rec.Code, rec.Body)
@@ -287,8 +290,9 @@ func TestTheSettingsPageOffersTheLevelsTheHandlerExports(t *testing.T) {
 func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	got := h.postForm(t, "/settings", cookie, url.Values{
-		"domain": {"kept.example"}, "log_level": {"verbose"},
+	got := h.saveSettings(t, cookie, url.Values{
+		api.SettingDomain:   {"kept.example"},
+		api.SettingLogLevel: {"verbose"},
 	})
 
 	if got.Code != http.StatusSeeOther ||
@@ -307,15 +311,22 @@ func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
 	}
 }
 
-// An ABSENT field is not a refusal. Several callers post the settings form
-// without log_level at all, and so does any partial submission; refusing that
-// would reject a save for a field the operator never touched. It is also not
-// what the ruling asks for — an empty row is the fresh-install case 497 handles
-// on purpose. This is the boundary a failing test drew, so it is pinned.
+// An ABSENT log_level is not a refusal. Several callers post the settings form
+// without log_level at all; refusing that would reject a save for a field the
+// operator never touched. It is also not what the ruling asks for — an empty row
+// is the fresh-install case 497 handles on purpose. This is the boundary a
+// failing test drew, so it is pinned.
+//
+// THE FIXTURE IS THE FULL FORM MINUS log_level. This test once posted `domain`
+// alone, which was 1pd's evidence rather than its subject: under that ruling the
+// lone POST is refused for the eight keys it omitted, so it could no longer fail
+// for the reason this test is about.
 func TestASettingsSaveWithNoLogLevelFieldIsNotRefused(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	got := h.postForm(t, "/settings", cookie, url.Values{"domain": {"kept.example"}})
+	form := h.browserForm(t, cookie, url.Values{api.SettingDomain: {"kept.example"}})
+	form.Del(api.SettingLogLevel)
+	got := h.postForm(t, "/settings", cookie, form)
 
 	if location := got.Header().Get("Location"); strings.Contains(location, "bad_log_level") {
 		t.Errorf("a form with no log_level field was refused (%q); an absent field is not "+
@@ -354,5 +365,119 @@ func TestATolerantReaderStillRendersARowTheWriteWouldRefuse(t *testing.T) {
 		t.Errorf("with the unrenderable row %q stored and the process at warn, the form "+
 			"submits %q, want \"warn\" — the reader must fall back to the level in force, "+
 			"and a form submitting \"debug\" here is 497", "verbose", got)
+	}
+}
+
+// A POST that omits a key does not blank it — it is refused, whole
+// (BrollyZap-1pd).
+//
+// WHY A REFUSAL AND NOT A PARTIAL UPDATE. Both were on the table; the ruling
+// (David, 8 Sep) took the stricter one. Writing only the present keys would be
+// friendlier, but it makes a truncated request look identical to a deliberate
+// one, and several of these keys are security-relevant: trusted_proxies blanked
+// believes no forwarded-for header, relays blanked stops receipts publishing
+// anywhere. A refusal says what happened; a partial update says nothing.
+//
+// IT REFUSES BEFORE WRITING, in the same validate-first loop 0vk.38 added for
+// exactly this reason: a check inside the write loop would refuse half way and
+// leave the keys before it already saved, which is the partial save this bead is
+// about.
+func TestASettingsSaveMissingAKeyIsRefusedAndWritesNothing(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login(t)
+
+	// The shape the bead was filed on: one key, eight omitted.
+	got := h.postForm(t, "/settings", cookie, url.Values{api.SettingDomain: {"kept.example"}})
+
+	if location := got.Header().Get("Location"); !strings.Contains(location, "incomplete_form") {
+		t.Errorf("a form missing eight keys was not refused (%q); under 1pd's ruling an "+
+			"absent key refuses the whole save", location)
+	}
+	// ALL OR NOTHING. The refused key must not have taken the ones beside it
+	// with it, and the domain in the request is the one that would show.
+	if stored, ok, _ := h.store.Setting(t.Context(), api.SettingDomain); ok && stored == "kept.example" {
+		t.Error("the save was applied despite the refusal")
+	}
+}
+
+// An EMPTY value that WAS submitted is a deliberate blank and stays legal
+// (BrollyZap-1pd's ruling, second half).
+//
+// This is the outcome a wrong mechanism produces, pinned so it cannot be reached
+// by accident — see saveSettings' presence check for which mechanism and why.
+// Relays is the sharper case, since clearing it is a thing an operator does on
+// purpose.
+func TestASettingsSaveWithAnEmptyRelaysFieldStoresTheBlank(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login(t)
+	if err := h.store.SetSetting(t.Context(), api.SettingRelays, "wss://relay.example"); err != nil {
+		t.Fatalf("seeding relays: %v", err)
+	}
+
+	got := h.saveSettings(t, cookie, url.Values{api.SettingRelays: {""}})
+
+	if location := got.Header().Get("Location"); !strings.Contains(location, "flash=saved") {
+		t.Errorf("clearing relays was not accepted (%q); a submitted empty value is a "+
+			"deliberate blank, not an absent key", location)
+	}
+	stored, _, _ := h.store.Setting(t.Context(), api.SettingRelays)
+	if stored != "" {
+		t.Errorf("relays = %q, want the blank the operator submitted", stored)
+	}
+}
+
+// A refused settings value does not reach the log (§12).
+//
+// The rule has no exception for input that happens to be malformed, and the
+// refusal path had one anyway: the log line carried err.Error(), and both
+// wired validators embed the submitted value in their message
+// (`%q is not a log level`, `%q is neither a CIDR prefix nor an IP address`).
+// So the operator's typing was echoed into the record two lines below a
+// comment saying it was not.
+//
+// BOTH VALIDATORS, because they leak by different routes — validLogLevel
+// formats the value itself, validTrustedProxies inherits it from
+// config.ParsePrefixList — and a fix that only stopped the local one would
+// leave the inherited half in place.
+//
+// The sentinels are distinctive rather than realistic: "verbose" and
+// "not-a-cidr" are what the neighbouring refusal tests post, and a value that
+// appears nowhere else cannot be matched by accident.
+func TestARefusedSettingsValueIsNotLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value string
+	}{
+		{"an unrenderable log level", api.SettingLogLevel, "verbose-sentinel-1pd"},
+		{"an unparseable proxy list", api.SettingTrustedProxies, "not-a-cidr-sentinel-1pd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged bytes.Buffer
+			h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) {
+				opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
+			})
+			cookie := h.login(t)
+
+			got := h.saveSettings(t, cookie, url.Values{tc.key: {tc.value}})
+			// The refusal itself must still happen, or this test passes because
+			// nothing was refused rather than because nothing was logged.
+			if location := got.Header().Get("Location"); !strings.Contains(location, "flash=") ||
+				strings.Contains(location, "flash=saved") {
+				t.Fatalf("%s was not refused (%q); this test would prove nothing", tc.key, location)
+			}
+
+			record := logged.String()
+			if !strings.Contains(record, "refused a settings value") {
+				t.Fatalf("the refusal was not logged at all, so the assertion below has no "+
+					"subject:\n%s", record)
+			}
+			if strings.Contains(record, tc.value) {
+				// Masked, like every other leak assertion in this package: a
+				// test that proves a value escaped by printing it again has not
+				// finished the job.
+				t.Errorf("the refused %s value reached the log; §12 has no exception for "+
+					"malformed input. Record, with the value masked:\n%s", tc.key,
+					strings.ReplaceAll(record, tc.value, "<submitted>"))
+			}
+		})
 	}
 }
