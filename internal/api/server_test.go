@@ -406,7 +406,12 @@ func (h *harness) browserForm(t *testing.T, cookie *http.Cookie, overrides url.V
 		form.Set(name, valueFor(name))
 	}
 	for key, values := range overrides {
-		form[key] = values
+		// COPIED, not aliased. Assigning the caller's slice would leave two
+		// maps sharing one backing array, which is harmless today — form is
+		// freshly allocated and postForm only ever Sets csrf_token — and a trap
+		// the moment a table-driven settings test shares one overrides literal
+		// across parallel subtests. Cheaper to not have.
+		form[key] = slices.Clone(values)
 	}
 	return form
 }
