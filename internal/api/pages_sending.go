@@ -187,10 +187,11 @@ func (s *Server) moveGuardControl(w http.ResponseWriter, r *http.Request, change
 // directions puts back the misdirection 8vj removed.
 //
 // The copy lives in flashMessages with every other message; this map only
-// chooses. internal/arch's cap-pair rule is what keeps each of these two
-// messages naming the same control to move as the guard's own remedy does — the
-// guard decides WHAT the refusal is, this package writes what the operator
-// reads, and neither may drift into contradicting the other.
+// chooses. internal/arch's TestTheCapPairRemediesReadTheSameEverywhere is what
+// keeps that copy naming the same control to move as the guard's own remedy
+// does, alongside the Sending hint, MANUAL.html and OPERATING.md — the guard
+// decides WHAT the refusal is, this package writes what the operator reads, and
+// neither may drift into contradicting the other.
 var capPairFlashes = map[guard.Control]string{
 	guard.ControlSpendCap:   "cap_pair_lower_payment",
 	guard.ControlPaymentCap: "cap_pair_raise_window",

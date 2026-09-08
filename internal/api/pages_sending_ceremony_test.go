@@ -385,8 +385,11 @@ func TestACapPairRefusalTellsTheOperatorWhichLimitToMove(t *testing.T) {
 			})
 
 			location := rec.Header().Get("Location")
-			marker := location[strings.Index(location, "flash=")+len("flash="):]
-			flash := api.FlashMessage(marker)
+			redirect, err := url.Parse(location)
+			if err != nil {
+				t.Fatalf("the redirect %q does not parse: %v", location, err)
+			}
+			flash := api.FlashMessage(redirect.Query().Get("flash"))
 			if flash == "" {
 				t.Fatalf("the redirect is %q, whose marker renders no message at all; the "+
 					"operator is shown a page that says nothing happened", location)

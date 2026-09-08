@@ -719,8 +719,11 @@ func (g *Guard) Handle(ctx context.Context, req Request) Response {
 	return resp
 }
 
-// refused is the one way an error becomes a Response, so a kind added to a
-// refusal reaches the wire without a second edit at each `case`.
+// refused is the one way an error RETURNED BY AN OPERATION becomes a Response,
+// so a kind added to a refusal reaches the wire without a second edit at each
+// `case`. dispatch still builds three Responses directly — a missing Change and
+// an unknown Op — and those are kindless by construction: they are this
+// function refusing to call an operation at all, not an operation's verdict.
 //
 // The kind is read off the error rather than passed in, because the operation
 // that failed is not what names it: checkCapPair raises the same refusal from
