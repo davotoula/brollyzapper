@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/davotoula/brollyzapper/internal/api"
+	"github.com/davotoula/brollyzapper/internal/logging"
+	"github.com/davotoula/brollyzapper/internal/store"
 )
 
 // logLevelSelect reads the Log level control back out of the rendered page: the
@@ -420,5 +423,61 @@ func TestASettingsSaveWithAnEmptyRelaysFieldStoresTheBlank(t *testing.T) {
 	stored, _, _ := h.store.Setting(t.Context(), api.SettingRelays)
 	if stored != "" {
 		t.Errorf("relays = %q, want the blank the operator submitted", stored)
+	}
+}
+
+// A refused settings value does not reach the log (§12).
+//
+// The rule has no exception for input that happens to be malformed, and the
+// refusal path had one anyway: the log line carried err.Error(), and both
+// wired validators embed the submitted value in their message
+// (`%q is not a log level`, `%q is neither a CIDR prefix nor an IP address`).
+// So the operator's typing was echoed into the record two lines below a
+// comment saying it was not.
+//
+// BOTH VALIDATORS, because they leak by different routes — validLogLevel
+// formats the value itself, validTrustedProxies inherits it from
+// config.ParsePrefixList — and a fix that only stopped the local one would
+// leave the inherited half in place.
+//
+// The sentinels are distinctive rather than realistic: "verbose" and
+// "not-a-cidr" are what the neighbouring refusal tests post, and a value that
+// appears nowhere else cannot be matched by accident.
+func TestARefusedSettingsValueIsNotLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value string
+	}{
+		{"an unrenderable log level", api.SettingLogLevel, "verbose-sentinel-1pd"},
+		{"an unparseable proxy list", api.SettingTrustedProxies, "not-a-cidr-sentinel-1pd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logged bytes.Buffer
+			h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) {
+				opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
+			})
+			cookie := h.login(t)
+
+			got := h.saveSettings(t, cookie, url.Values{tc.key: {tc.value}})
+			// The refusal itself must still happen, or this test passes because
+			// nothing was refused rather than because nothing was logged.
+			if location := got.Header().Get("Location"); !strings.Contains(location, "flash=") ||
+				strings.Contains(location, "flash=saved") {
+				t.Fatalf("%s was not refused (%q); this test would prove nothing", tc.key, location)
+			}
+
+			record := logged.String()
+			if !strings.Contains(record, "refused a settings value") {
+				t.Fatalf("the refusal was not logged at all, so the assertion below has no "+
+					"subject:\n%s", record)
+			}
+			if strings.Contains(record, tc.value) {
+				// Masked, like every other leak assertion in this package: a
+				// test that proves a value escaped by printing it again has not
+				// finished the job.
+				t.Errorf("the refused %s value reached the log; §12 has no exception for "+
+					"malformed input. Record, with the value masked:\n%s", tc.key,
+					strings.ReplaceAll(record, tc.value, "<submitted>"))
+			}
+		})
 	}
 }

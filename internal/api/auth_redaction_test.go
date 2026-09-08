@@ -60,6 +60,11 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 			"this test would pass vacuously; NewAuth's bootstrap path has moved")
 	}
 
+	// Distinctive, and deliberately not 0 or 1: a generation left at its zero
+	// value cannot tell a working LogValue from one returning a constant.
+	const generation = 37
+	auth.generation.Store(generation)
+
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, nil))
 	// ONE call, where the neighbouring per-type tests make two. slog turns a
@@ -76,14 +81,26 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 		"generatedPassword": generated,
 	})
 
-	// Absence alone is satisfied by `return slog.GroupValue()` — a summary that
-	// leaks nothing because it says nothing — and that mutation passes every
-	// other test in this package. §12 wants the type logged AND redacted, so the
-	// facts an operator debugging a login needs are asserted too.
-	for _, want := range []string{"umbrel_managed", "session_generation"} {
+	// THE VALUES, not the key names. Asserting that "umbrel_managed" and
+	// "session_generation" merely APPEAR is satisfied by two constants —
+	// slog.Bool("umbrel_managed", true) and slog.Int64("session_generation", 0)
+	// would pass it while reporting the same thing on every install. That is the
+	// weakness BrollyZap-0vk.47 fixed one type over, and leaving its neighbour
+	// holding it would have made this file teach the weaker shape.
+	//
+	// This Auth has NO AppPassword and a generation moved off its zero value, so
+	// each fact is pinned away from the constant a broken LogValue would emit.
+	// The umbrel_managed=true direction is TestAuthOptionsLogValue's, on the
+	// options that decide it; here the interesting half is that a self-managed
+	// install says so.
+	for _, want := range []string{
+		`"umbrel_managed":false`,
+		`"session_generation":` + strconv.FormatInt(generation, 10),
+	} {
 		if !strings.Contains(record, want) {
-			t.Errorf("the redacted Auth says nothing about %s, which is what an operator "+
-				"debugging a login actually needs:\n%s", want, record)
+			t.Errorf("the redacted Auth does not report %s, which is what an operator "+
+				"debugging a login actually needs — and a summary that says the same thing "+
+				"on every install is worse than one that says nothing:\n%s", want, record)
 		}
 	}
 }

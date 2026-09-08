@@ -158,6 +158,19 @@ func TestEveryValidatedFieldCanSayWhyItRefused(t *testing.T) {
 			t.Errorf("settingsForm's %q names the flash marker %q but validates nothing, so "+
 				"that copy can never be reached", field.key, field.refused)
 		}
+		// THE LOG'S HALF, on the same rule as the page's. A validator with no
+		// reason leaves the refusal line saying reason="" — and the pull to fix
+		// that by reaching for err.Error() is exactly what put the operator's
+		// input in the record in the first place. A field that can refuse must
+		// be able to say why WITHOUT quoting what was typed.
+		if field.validate != nil && field.reason == "" {
+			t.Errorf("settingsForm's %q validates but names no log reason, so its refusal "+
+				"would be logged with an empty one", field.key)
+		}
+		if field.validate == nil && field.reason != "" {
+			t.Errorf("settingsForm's %q names the log reason %q but validates nothing, so "+
+				"it can never be logged", field.key, field.reason)
+		}
 	}
 }
 
