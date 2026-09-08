@@ -408,7 +408,9 @@ func TestChangingTheLogLevelAppliesWithoutARestart(t *testing.T) {
 		t.Fatalf("level starts at %v, want info", h.level.Level())
 	}
 
-	got := h.postForm(t, "/settings", cookie, url.Values{"log_level": {"debug"}})
+	form := fullSettingsForm()
+	form.Set(api.SettingLogLevel, "debug")
+	got := h.postForm(t, "/settings", cookie, form)
 	if got.Code != http.StatusSeeOther {
 		t.Fatalf("saving = %d, want a redirect", got.Code)
 	}
@@ -430,7 +432,9 @@ func TestTheTrustedProxiesSettingChangesWhoIsBelieved(t *testing.T) {
 		t.Fatalf("client IP = %s before the setting, want the peer", got)
 	}
 
-	if got := h.postForm(t, "/settings", cookie, url.Values{"trusted_proxies": {"10.21.0.0/16"}}); got.Code != http.StatusSeeOther {
+	form := fullSettingsForm()
+	form.Set(api.SettingTrustedProxies, "10.21.0.0/16")
+	if got := h.postForm(t, "/settings", cookie, form); got.Code != http.StatusSeeOther {
 		t.Fatalf("saving = %d, want a redirect (%s)", got.Code, got.Body)
 	}
 	if got := h.clientIPFor(t, "10.21.0.3:5000", "203.0.113.7"); got != "203.0.113.7" {
@@ -444,9 +448,9 @@ func TestTheTrustedProxiesSettingChangesWhoIsBelieved(t *testing.T) {
 func TestAnUnparseableTrustedProxiesValueIsRefused(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	got := h.postForm(t, "/settings", cookie, url.Values{
-		"domain": {"kept.example"}, "trusted_proxies": {"not-a-cidr"},
-	})
+	form := fullSettingsForm()
+	form.Set(api.SettingTrustedProxies, "not-a-cidr")
+	got := h.postForm(t, "/settings", cookie, form)
 	if got.Code != http.StatusSeeOther || !strings.Contains(got.Header().Get("Location"), "refused") {
 		t.Errorf("saving a bad CIDR list = %d %q, want a refusal", got.Code, got.Header().Get("Location"))
 	}
@@ -860,9 +864,10 @@ func TestEveryHandlerRaisedEventCarriesTheCallersAddress(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
 
-	if rec := h.postForm(t, "/settings", cookie, url.Values{
-		"domain": {"zap.example"}, "address_name": {"bob"},
-	}); rec.Code != http.StatusSeeOther {
+	form := fullSettingsForm()
+	form.Set(api.SettingDomain, "zap.example")
+	form.Set(api.SettingAddressName, "bob")
+	if rec := h.postForm(t, "/settings", cookie, form); rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /settings = %d %q", rec.Code, rec.Body)
 	}
 	if rec := h.postForm(t, "/wallet/allocate", cookie,

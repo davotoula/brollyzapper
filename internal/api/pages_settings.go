@@ -64,6 +64,15 @@ type settingField struct {
 	// refused is the flash marker shown when validate says no. Required
 	// whenever validate is set.
 	refused string
+	// optional allows the key to be ABSENT from the POST. Every other key
+	// missing from the form refuses the whole save (BrollyZap-1pd): writing
+	// only what arrived would make a truncated request indistinguishable from
+	// a deliberate one, and blanking the rest is the bug.
+	//
+	// This is about ABSENCE, never emptiness. A key that was submitted with an
+	// empty value is a deliberate blank — clearing relays or trusted_proxies —
+	// and stays legal whatever this flag says.
+	optional bool
 }
 
 // settingsForm are the keys the Settings page owns. Everything here is read
@@ -73,7 +82,11 @@ var settingsForm = []settingField{
 	{key: SettingDomain},
 	{key: SettingAddressName},
 	{key: SettingTrustedProxies, validate: validTrustedProxies, refused: "refused"},
-	{key: SettingLogLevel, validate: validLogLevel, refused: "bad_log_level"},
+	// OPTIONAL, keeping 0vk.38's exemption: several callers post this form
+	// without log_level, and an absent one is the empty row 497 handles on
+	// purpose by falling back to the level in force. It is the only key whose
+	// absence means something other than a truncated request.
+	{key: SettingLogLevel, validate: validLogLevel, refused: "bad_log_level", optional: true},
 	{key: SettingPublicRateLimitMinute},
 	{key: SettingPublicRateLimitHour},
 	{key: SettingMaxFeePPM},
@@ -360,6 +373,22 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	// already saved — a partial save the operator was told nothing about, and
 	// the Settings page has no way to show which half took.
 	for _, field := range settingsForm {
+		// PRESENCE FIRST, and in this loop rather than the write loop below for
+		// the reason that loop's own comment gives: a check that refused half
+		// way through would leave the keys before it already saved.
+		//
+		// r.PostForm, not r.PostFormValue: the question is whether the operator
+		// SENT the key, and PostFormValue answers "" for both an absent key and
+		// a submitted blank. Reading the map is what keeps clearing a field
+		// working. The body is already parsed — readForm runs ParseForm in the
+		// admin group's CSRF gate, before any handler sees the request.
+		if _, sent := r.PostForm[field.key]; !sent && !field.optional {
+			// The key is named; no value exists to log, and naming it is what
+			// lets an operator find the field their form dropped.
+			s.Log.Warn("refused an incomplete settings form", "key", field.key)
+			http.Redirect(w, r, "/settings?flash=incomplete_form", http.StatusSeeOther)
+			return
+		}
 		if field.validate == nil {
 			continue
 		}
@@ -393,6 +422,10 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		s.auditRequest(r, slog.LevelInfo, "setting changed",
 			logging.EventSettingChange, slog.String("key", field.key))
 	}
+	// NOT SUBJECT TO THE PRESENCE CHECK ABOVE, and it is not an oversight that
+	// it sits outside settingsForm. credit_received is a checkbox, and HTML
+	// submits a checkbox only when it is ticked — absence IS the value "off".
+	// Requiring it present would make unticking the box a refusal.
 	if err := s.Wallet.SetCreditReceived(ctx, r.PostFormValue("credit_received") != ""); err != nil {
 		s.Log.Error("saving credit_received", "error", err.Error())
 	}
@@ -496,6 +529,14 @@ var flashMessages = map[string]string{
 	"refused": "That change was refused — see the log for why.",
 	"bad_log_level": "That log level is not one this app can use, so nothing was saved. " +
 		"Choose debug, info, warn or error.",
+	// Says what to DO, like the ceremony's markers below: the operator who sees
+	// this did not choose to send a partial form, so "reload and save again" is
+	// the whole remedy and the sentence has to carry it. It also says what did
+	// NOT happen, because the bug this refusal replaced was silent — the old
+	// behaviour blanked the missing fields and reported success.
+	"incomplete_form": "That save was missing some of the Settings form's fields, so nothing " +
+		"was changed. Reload this page and save again — saving a partial form would have " +
+		"emptied the fields it left out.",
 	"signed-out": "Signed out. That ended every session, on every device — " +
 		"anyone still signed in elsewhere has to sign in again.",
 

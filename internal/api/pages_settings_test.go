@@ -121,9 +121,9 @@ func TestAFreshInstallDoesNotSubmitDebug(t *testing.T) {
 	// fail this. The rest of the form's round-trip is
 	// TestEverySettingsFieldRoundTrips' job, not this test's.
 	submitted := whatTheBrowserWouldSubmit(t, page)
-	if rec := h.postForm(t, "/settings", cookie, url.Values{
-		api.SettingLogLevel: {submitted},
-	}); rec.Code != http.StatusSeeOther {
+	form := fullSettingsForm()
+	form.Set(api.SettingLogLevel, submitted)
+	if rec := h.postForm(t, "/settings", cookie, form); rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /settings = %d, want a redirect (%s)", rec.Code, rec.Body)
 	}
 	stored, ok, err := h.store.Setting(t.Context(), api.SettingLogLevel)
@@ -287,9 +287,9 @@ func TestTheSettingsPageOffersTheLevelsTheHandlerExports(t *testing.T) {
 func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	got := h.postForm(t, "/settings", cookie, url.Values{
-		"domain": {"kept.example"}, "log_level": {"verbose"},
-	})
+	form := fullSettingsForm()
+	form.Set(api.SettingLogLevel, "verbose")
+	got := h.postForm(t, "/settings", cookie, form)
 
 	if got.Code != http.StatusSeeOther ||
 		!strings.Contains(got.Header().Get("Location"), "bad_log_level") {
@@ -307,15 +307,43 @@ func TestAnUnrenderableLogLevelIsRefusedAtTheWrite(t *testing.T) {
 	}
 }
 
-// An ABSENT field is not a refusal. Several callers post the settings form
-// without log_level at all, and so does any partial submission; refusing that
-// would reject a save for a field the operator never touched. It is also not
-// what the ruling asks for — an empty row is the fresh-install case 497 handles
-// on purpose. This is the boundary a failing test drew, so it is pinned.
+// fullSettingsForm is every key the Settings page submits, which is what a
+// browser always sends: the page renders all of them, so all of them come back.
+// Tests that care about ONE key's absence build from this and delete that key,
+// rather than posting a lone field — a lone field is now a refusal in its own
+// right (BrollyZap-1pd) and would mask what the test meant to ask.
+func fullSettingsForm() url.Values {
+	return url.Values{
+		api.SettingDomain:                {"kept.example"},
+		api.SettingAddressName:           {"name"},
+		api.SettingTrustedProxies:        {""},
+		api.SettingLogLevel:              {"info"},
+		api.SettingPublicRateLimitMinute: {"60"},
+		api.SettingPublicRateLimitHour:   {"600"},
+		api.SettingMaxFeePPM:             {"10000"},
+		api.SettingMaxFeeFloorMsat:       {"10000"},
+		api.SettingRelays:                {""},
+	}
+}
+
+// An ABSENT log_level is not a refusal. Several callers post the settings form
+// without log_level at all; refusing that would reject a save for a field the
+// operator never touched. It is also not what the ruling asks for — an empty row
+// is the fresh-install case 497 handles on purpose. This is the boundary a
+// failing test drew, so it is pinned.
+//
+// THE FIXTURE IS THE FULL FORM MINUS log_level, where this test once posted
+// `domain` alone. That lone POST was 1pd's evidence rather than its subject: it
+// blanked eight keys and nothing objected, and under 1pd's ruling it is now
+// refused for the eight, which would make this test pass for the wrong reason —
+// or fail while log_level's exemption was working perfectly. Narrowing the
+// fixture to the one absence it is about is what keeps it able to fail.
 func TestASettingsSaveWithNoLogLevelFieldIsNotRefused(t *testing.T) {
 	h := newHarness(t)
 	cookie := h.login(t)
-	got := h.postForm(t, "/settings", cookie, url.Values{"domain": {"kept.example"}})
+	form := fullSettingsForm()
+	form.Del(api.SettingLogLevel)
+	got := h.postForm(t, "/settings", cookie, form)
 
 	if location := got.Header().Get("Location"); strings.Contains(location, "bad_log_level") {
 		t.Errorf("a form with no log_level field was refused (%q); an absent field is not "+
@@ -354,5 +382,66 @@ func TestATolerantReaderStillRendersARowTheWriteWouldRefuse(t *testing.T) {
 		t.Errorf("with the unrenderable row %q stored and the process at warn, the form "+
 			"submits %q, want \"warn\" — the reader must fall back to the level in force, "+
 			"and a form submitting \"debug\" here is 497", "verbose", got)
+	}
+}
+
+// A POST that omits a key does not blank it — it is refused, whole
+// (BrollyZap-1pd).
+//
+// WHY A REFUSAL AND NOT A PARTIAL UPDATE. Both were on the table; the ruling
+// (David, 8 Sep) took the stricter one. Writing only the present keys would be
+// friendlier, but it makes a truncated request look identical to a deliberate
+// one, and several of these keys are security-relevant: trusted_proxies blanked
+// believes no forwarded-for header, relays blanked stops receipts publishing
+// anywhere. A refusal says what happened; a partial update says nothing.
+//
+// IT REFUSES BEFORE WRITING, in the same validate-first loop 0vk.38 added for
+// exactly this reason: a check inside the write loop would refuse half way and
+// leave the keys before it already saved, which is the partial save this bead is
+// about.
+func TestASettingsSaveMissingAKeyIsRefusedAndWritesNothing(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login(t)
+
+	// The shape the bead was filed on: one key, eight omitted.
+	got := h.postForm(t, "/settings", cookie, url.Values{api.SettingDomain: {"kept.example"}})
+
+	if location := got.Header().Get("Location"); !strings.Contains(location, "incomplete_form") {
+		t.Errorf("a form missing eight keys was not refused (%q); under 1pd's ruling an "+
+			"absent key refuses the whole save", location)
+	}
+	// ALL OR NOTHING. The refused key must not have taken the ones beside it
+	// with it, and the domain in the request is the one that would show.
+	if stored, ok, _ := h.store.Setting(t.Context(), api.SettingDomain); ok && stored == "kept.example" {
+		t.Error("the save was applied despite the refusal")
+	}
+}
+
+// An EMPTY value that WAS submitted is a deliberate blank and stays legal
+// (BrollyZap-1pd's ruling, second half).
+//
+// This is the outcome a wrong mechanism produces, pinned so it cannot be
+// reached by accident: testing `r.PostFormValue(key) == ""` instead of
+// presence in r.PostForm would refuse an operator clearing relays or
+// trusted_proxies — which works today and must keep working. Relays is the
+// sharper of the two, since clearing it is a thing an operator does on purpose.
+func TestASettingsSaveWithAnEmptyRelaysFieldStoresTheBlank(t *testing.T) {
+	h := newHarness(t)
+	cookie := h.login(t)
+	if err := h.store.SetSetting(t.Context(), api.SettingRelays, "wss://relay.example"); err != nil {
+		t.Fatalf("seeding relays: %v", err)
+	}
+
+	form := fullSettingsForm()
+	form.Set(api.SettingRelays, "")
+	got := h.postForm(t, "/settings", cookie, form)
+
+	if location := got.Header().Get("Location"); !strings.Contains(location, "flash=saved") {
+		t.Errorf("clearing relays was not accepted (%q); a submitted empty value is a "+
+			"deliberate blank, not an absent key", location)
+	}
+	stored, _, _ := h.store.Setting(t.Context(), api.SettingRelays)
+	if stored != "" {
+		t.Errorf("relays = %q, want the blank the operator submitted", stored)
 	}
 }
