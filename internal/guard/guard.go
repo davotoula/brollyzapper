@@ -625,6 +625,12 @@ func (g *Guard) nodeForgotReceiveKey(ctx context.Context, rootKeyID uint64) bool
 // needing macaroon:read is answered here, because the server's own macaroons do
 // not have it, by design (§6).
 func (g *Guard) Status(ctx context.Context) (Status, error) {
+	// FIRST, so the state read below is the swept one (`0vk.54`). Status is
+	// polled every few seconds by the server, which makes it the route by which
+	// a grant nobody came back for actually gets cleared — no timer, no
+	// background goroutine, and no window in which the report and the disk
+	// disagree. It writes nothing when there is nothing to sweep.
+	g.SweepExpiredAuthorisation(ctx)
 	state, err := g.state.load()
 	if err != nil {
 		return Status{}, err

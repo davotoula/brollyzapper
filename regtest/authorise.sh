@@ -75,6 +75,19 @@ guardctl_op() {
     -v "$WORK/guardctl:/guardctl:ro" "$TOOL_IMAGE" /guardctl "$@"
 }
 
+# code_file — "present" or "absent", never an exit status (`0vk.54`).
+#
+# NOT `docker run ... test -e`, and this script already explains why in section
+# 2: an assertion built on a container's exit status reports a pass whenever the
+# container fails to run at all. This prints a word, so a broken invocation
+# prints neither and the comparison fails rather than passing backwards. Its own
+# positive control is that section 2 reads the file's CONTENT through the same
+# volume, so "absent" cannot be a mount that was never there.
+code_file() {
+  docker run --rm -v "$GUARD_DATA_VOLUME:/guard:ro" "$TOOL_IMAGE" \
+    sh -c '[ -e /guard/authorisation.txt ] && echo present || echo absent'
+}
+
 latched()  { guardctl status | jq -r '.sending_latched // false'; }
 pending()  { guardctl status | jq -r '.authorisation_pending // false'; }
 window()   { guardctl status | jq -r '.spend_limit_msat // 0'; }
@@ -187,7 +200,14 @@ for attempt in 1 2 3; do
 done
 [ "$(latched)" = "false" ] || die "sending was latched by a run of wrong codes"
 [ "$(pending)" = "false" ] || die "the grant survived the attempt bound; it stays a standing target for the one attacker with unlimited local tries"
-ok "three wrong codes changed nothing and spent the grant"
+# AND THE FILE GOES WITH THE GRANT (`0vk.54`). The 0.1.20-rc1 trip found a code
+# file that had outlived its grant and two container recreates, which made "is
+# the file absent?" unanswerable — the trip had to fall back to comparing mtimes
+# to verify `pou`. The file's presence means exactly "a live code exists", and
+# this is the half of that invariant a suite with no control over the clock can
+# assert. The EXPIRY half needs a 10-minute TTL to pass and is left to the box.
+[ "$(code_file)" = "absent" ] || die "the code file outlived the grant the attempt bound spent; its presence is supposed to mean a live code exists"
+ok "three wrong codes changed nothing and spent the grant, file and all"
 
 # ---------------------------------------------------------------------------
 say "4. the operator's code turns sending on"
@@ -198,6 +218,7 @@ note "the operator read a code out of the guard's own file"
 guardctl apply sending on "$CODE" || die "the guard refused the code it had just written"
 [ "$(latched)" = "true" ] || die "the latch is still off after a completed ceremony"
 [ "$(pending)" = "false" ] || die "the grant was not consumed on use; a captured code would work twice"
+[ "$(code_file)" = "absent" ] || die "the code file survived the ceremony that consumed it; the next operator to look cannot tell a live code from a spent one"
 guardctl bake-spend || die "the bake was still refused after the ceremony"
 ok "sending is on, and the spend macaroon is baked"
 

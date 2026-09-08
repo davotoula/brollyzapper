@@ -241,6 +241,11 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	if err := change.valid(); err != nil {
 		return err
 	}
+	// A timed-out grant is cleared before this one supersedes it (`0vk.54`), so
+	// the trail records the expiry as an expiry. Without it the row this call
+	// overwrites would simply vanish, and §12 would answer "what happened to that
+	// authorisation" with silence for every grant an operator abandoned.
+	g.SweepExpiredAuthorisation(ctx)
 	state, err := g.state.load()
 	if err != nil {
 		return err
@@ -507,6 +512,50 @@ func (g *Guard) redeem(ctx context.Context, state State, change Change, code str
 	// costs the operator one ceremony; the other order would leave a spent code
 	// usable a second time.
 	return g.consumeAuthorisation()
+}
+
+// SweepExpiredAuthorisation clears a grant that has timed out unattended, so
+// that the presence of authorisation.txt means exactly "a live code exists"
+// (`0vk.54`).
+//
+// AN EXPIRED GRANT USED TO BE DISCARDED ONLY INSIDE redeem, which is the path a
+// RETURNING operator takes. A grant nobody came back for was therefore never
+// cleared: Status hid it once expired, and the row and the file stayed, across
+// restarts, forever. The 0.1.20-rc1 trip found one that had survived two
+// container recreates, and the cost was not the dead file — it was that "is the
+// code file absent?" stopped being an answerable question, so the trip had to
+// verify `pou` by comparing mtimes instead.
+//
+// BOTH HALVES OR NEITHER, which is what makes discardAuthorisation the right
+// callee rather than a bare file removal: clearing the file and leaving the row
+// would make Status and the disk disagree, and the next RequestAuthorisation
+// would supersede a grant nothing can redeem.
+//
+// IT REUSES redeem's OWN WORD, "expired". The trail already says that when a
+// returning operator is refused; this is the same fact observed by a different
+// route, and a second vocabulary for it would make §12's answer depend on who
+// happened to look.
+//
+// IDEMPOTENT AND SILENT when there is nothing to sweep — no state write, no
+// audit row, no log line — which is what lets it sit at the top of the polled
+// Status without costing anything or filling the trail.
+//
+// IT RETURNS NOTHING. A load that fails here is not this call's business: every
+// caller is about to load the state itself and report that failure properly, and
+// an error return would invite a caller to abandon its own operation because a
+// housekeeping read went wrong.
+func (g *Guard) SweepExpiredAuthorisation(ctx context.Context) {
+	state, err := g.state.load()
+	if err != nil {
+		g.log.Warn("could not read the state to sweep an expired authorisation",
+			"error", err.Error())
+		return
+	}
+	grant := state.Authorisation
+	if grant == nil || !grant.expired(g.rotation.clock()) {
+		return
+	}
+	g.discardAuthorisation(ctx, grant.Change, "expired")
 }
 
 // discardAuthorisation ends a grant that will not be honoured, and says why.

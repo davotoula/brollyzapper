@@ -89,6 +89,11 @@ func run(ctx context.Context, args []string, env config.Lookup, stdout, stderr i
 		// what is wrong rather than the tile going dead (§11).
 		log.Error("could not copy tls.cert into the credential volume", "error", err.Error())
 	}
+	// A grant that timed out while the container was down (`0vk.54`). The polled
+	// Status sweeps one during normal operation; this is the case Status cannot
+	// reach — an install whose server never comes up leaves the code file on disk
+	// indefinitely, and its presence is supposed to mean a live code exists.
+	broker.SweepExpiredAuthorisation(ctx)
 	if err := broker.EnsureReceiveMacaroon(ctx); err != nil {
 		log.Warn("could not bake the receive macaroon yet; the server will ask again",
 			"error", err.Error())
