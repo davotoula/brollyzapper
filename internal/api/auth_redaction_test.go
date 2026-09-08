@@ -88,11 +88,16 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	// weakness BrollyZap-0vk.47 fixed one type over, and leaving its neighbour
 	// holding it would have made this file teach the weaker shape.
 	//
-	// This Auth has NO AppPassword and a generation moved off its zero value, so
-	// each fact is pinned away from the constant a broken LogValue would emit.
-	// The umbrel_managed=true direction is TestAuthOptionsLogValue's, on the
-	// options that decide it; here the interesting half is that a self-managed
-	// install says so.
+	// This Auth has NO AppPassword and a generation moved off its zero value.
+	// That pins session_generation away from any constant, but it pins
+	// umbrel_managed only against a constant TRUE — a LogValue hardcoding FALSE
+	// passes everything here. TestAnUmbrelManagedAuthReportsItself below is the
+	// other half, and the PAIR is what makes the field's input matter; neither
+	// test is sufficient alone.
+	//
+	// AuthOptions' own test does not cover this. It pins the fact on the options
+	// struct, a different type with a different LogValue — Auth reads its own
+	// umbrelManaged field, set once in NewAuth.
 	for _, want := range []string{
 		`"umbrel_managed":false`,
 		`"session_generation":` + strconv.FormatInt(generation, 10),
@@ -102,6 +107,60 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 				"debugging a login actually needs — and a summary that says the same thing "+
 				"on every install is worse than one that says nothing:\n%s", want, record)
 		}
+	}
+}
+
+// The managed half of the pair above: an Auth built WITH an app password says
+// so (BrollyZap-0vk.47).
+//
+// WHY A SECOND FIXTURE AND NOT A SECOND ASSERTION. umbrelManaged is set once,
+// in NewAuth, from whether AuthOptions carried an AppPassword — so the only way
+// to exercise the true direction is to build a second Auth. Without it a
+// LogValue hardcoding `slog.Bool("umbrel_managed", false)` passes the whole
+// package: the neighbouring test asserts exactly false, and no other test looks
+// at the value at all. Verified by planting that constant.
+//
+// THE SECRETS DIFFER FROM THE NEIGHBOUR'S, and that is the fixture, not
+// decoration. With an app password supplied NewAuth does not bootstrap one, so
+// there is no generatedPassword here; the credential at risk is the app
+// password itself, and it is the one asserted absent.
+func TestAnUmbrelManagedAuthReportsItself(t *testing.T) {
+	t.Parallel()
+
+	const (
+		appPassword   = "app-password-sentinel-0vk47-auth"
+		sessionSecret = "session-secret-sentinel-0vk47-auth"
+	)
+
+	auth, err := NewAuth(t.Context(), &fakeSettings{}, AuthOptions{
+		AppPassword:   secret.New(appPassword),
+		SessionSecret: secret.New(sessionSecret),
+	})
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+	// NewAuth is what decides the fact under test, so it is worth knowing it
+	// decided rather than defaulted: a bootstrap path that ignored AppPassword
+	// would leave this false and the assertion below would read as a LogValue
+	// bug when it was a constructor one.
+	if !auth.umbrelManaged {
+		t.Fatal("NewAuth did not record an app password as Umbrel-managed; this test would " +
+			"be asserting over the wrong state")
+	}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	log.Info("auth", "auth", auth)
+	record := buf.String()
+
+	assertNoSecretInRecord(t, record, map[string]string{
+		"appPassword":   appPassword,
+		"sessionSecret": sessionSecret,
+	})
+
+	if want := `"umbrel_managed":true`; !strings.Contains(record, want) {
+		t.Errorf("an Umbrel-managed Auth does not report %s. An operator debugging a login "+
+			"is told this install manages its own password when it does not:\n%s", want, record)
 	}
 }
 
