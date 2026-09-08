@@ -2,6 +2,7 @@ package guard
 
 import (
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/logging"
@@ -87,6 +88,22 @@ type Request struct {
 type Response struct {
 	Error  string  `json:"error,omitempty"`
 	Status *Status `json:"status,omitempty"`
+	// ErrorKind names WHICH refusal Error describes, as one fixed token from
+	// ErrorKinds — never a message, and never a second copy of the reason.
+	//
+	// It exists because Error is prose the server must not repeat: relaying the
+	// guard's text to the page put untested operator-facing copy — msat on a page
+	// §9 renders in sats — beside the box asking for a code, and made the
+	// ceremony's own screen the easiest place in the app to render arbitrary text
+	// from a URL parameter (`0vk.53`). A token is the opposite: the guard stays
+	// the authority on WHAT the refusal is, and the server authors the copy for
+	// the kinds it recognises. A kind it does not recognise reads as no kind at
+	// all, which is the generic refusal it already showed.
+	//
+	// EXPIRY CONDITION for the set staying small: a kind earns its place only
+	// when the server has a DIFFERENT thing to say to the operator about it. A
+	// kind nobody maps to copy is a message field wearing a token's clothes.
+	ErrorKind ErrorKind `json:"error_kind,omitempty"`
 	// Events is the guard's recent security events, for the server to write to
 	// the durable trail. The guard has no mount for the server's database and
 	// must not have one (§16), so this is the only way §12's trail can hold
@@ -251,4 +268,80 @@ var SpendPermissions = []string{
 	SendPaymentMethod,
 	"/routerrpc.Router/TrackPaymentV2",
 	"/lnrpc.Lightning/DecodePayReq",
+}
+
+// ErrorKind is a fixed token naming one kind of guard refusal.
+//
+// It is a CLOSED SET, and that is the whole of its value: the server maps a
+// token to copy it wrote and tested, so nothing the guard says reaches an
+// operator unread. A free-text field here would be the relayed reason again
+// under a new name (`0vk.53`).
+type ErrorKind string
+
+// KindCapPair is §6's cap-pair invariant refusing a one-control change: the
+// per-payment limit would end up above the 24-hour one, where it could never be
+// reached. checkCapPair is the only place that raises it, and it is the only
+// refusal whose remedy is a DIFFERENT control from the one the operator was
+// editing — which is exactly why the page needs to tell it apart from a code
+// that was not accepted.
+const KindCapPair ErrorKind = "cap_pair"
+
+// ErrorKinds is every token this field may carry. A second entry is a decision
+// about what the page says, not an implementation detail — see the test that
+// pins this list, and ErrorKind's expiry condition on Response.
+var ErrorKinds = []ErrorKind{KindCapPair}
+
+// Refusal is an error that carries its kind.
+//
+// One type for both sides of the socket: the guard returns it, the client
+// rebuilds it from the wire, and errors.As finds it either way — so a handler
+// asking KindOf gets the same answer whether it is talking to a guard in this
+// process or one across a unix socket. Two types would be two answers.
+type Refusal struct {
+	Kind ErrorKind
+	// Err is the refusal itself and MUST NOT be nil — a Refusal is a kind
+	// attached to a reason, never a kind on its own. The field is exported
+	// because tests in other packages build one to stand in for the guard.
+	Err error
+}
+
+// Error DEGRADES RATHER THAN PANICS on a Refusal built without its Err.
+//
+// The invariant above is what every construction site keeps, and this is what
+// happens if one stops: r.Err.Error() on a nil Err panics, and the process it
+// panics in is the GUARD — the one holding admin.macaroon, with no listener
+// anyone can restart it through. A refusal that reads oddly in a log is a
+// defect; a guard that dies while formatting one takes credential brokering
+// down with it. Found by review, which also confirmed no live path reaches it.
+func (r *Refusal) Error() string {
+	if r.Err == nil {
+		return "guard: refused (" + string(r.Kind) + "), with no reason recorded"
+	}
+	return r.Err.Error()
+}
+
+func (r *Refusal) Unwrap() error { return r.Err }
+
+// KindOf reports the fixed token err carries, or "" for an error that carries
+// none — which is every refusal the server has no separate thing to say about.
+func KindOf(err error) ErrorKind {
+	var refusal *Refusal
+	if errors.As(err, &refusal) {
+		return refusal.Kind
+	}
+	return ""
+}
+
+// knownKind is the wire token, admitted only if it is one this build knows.
+//
+// A guard newer than the server can name a kind this server has no copy for,
+// and the safe reading of an unrecognised token is "no kind" — the generic
+// refusal — rather than a token that flows on into a map lookup and renders a
+// blank flash. It also means the field cannot become a channel for arbitrary
+// text by way of a caller that forgets to check.
+func knownKind(raw ErrorKind) ErrorKind {
+	if slices.Contains(ErrorKinds, raw) {
+		return raw
+	}
+	return ""
 }

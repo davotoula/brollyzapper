@@ -719,27 +719,41 @@ func (g *Guard) Handle(ctx context.Context, req Request) Response {
 	return resp
 }
 
+// refused is the one way an error RETURNED BY AN OPERATION becomes a Response,
+// so a kind added to a refusal reaches the wire without a second edit at each
+// `case`. dispatch still builds three Responses directly — a missing Change and
+// an unknown Op — and those are kindless by construction: they are this
+// function refusing to call an operation at all, not an operation's verdict.
+//
+// The kind is read off the error rather than passed in, because the operation
+// that failed is not what names it: checkCapPair raises the same refusal from
+// OpApplyChange and from OpRequestAuthorisation (`pou`), and a switch here would
+// have to know that.
+func refused(err error) Response {
+	return Response{Error: err.Error(), ErrorKind: KindOf(err)}
+}
+
 func (g *Guard) dispatch(ctx context.Context, req Request) Response {
 	switch req.Op {
 	case OpStatus:
 		status, err := g.Status(ctx)
 		if err != nil {
-			return Response{Error: err.Error()}
+			return refused(err)
 		}
 		return Response{Status: &status}
 	case OpBakeReceive:
 		if err := g.BakeReceive(ctx); err != nil {
-			return Response{Error: err.Error()}
+			return refused(err)
 		}
 		return Response{}
 	case OpBakeSpend:
 		if err := g.BakeSpend(ctx); err != nil {
-			return Response{Error: err.Error()}
+			return refused(err)
 		}
 		return Response{}
 	case OpRevokeSpend:
 		if err := g.RevokeSpend(ctx); err != nil {
-			return Response{Error: err.Error()}
+			return refused(err)
 		}
 		return Response{}
 	case OpRequestAuthorisation:
@@ -747,7 +761,7 @@ func (g *Guard) dispatch(ctx context.Context, req Request) Response {
 			return Response{Error: "guard: request_authorisation carried no change"}
 		}
 		if err := g.RequestAuthorisation(ctx, *req.Change); err != nil {
-			return Response{Error: err.Error()}
+			return refused(err)
 		}
 		return Response{}
 	case OpApplyChange:
@@ -755,7 +769,7 @@ func (g *Guard) dispatch(ctx context.Context, req Request) Response {
 			return Response{Error: "guard: apply_change carried no change"}
 		}
 		if err := g.ApplyChange(ctx, *req.Change, req.Code); err != nil {
-			return Response{Error: err.Error()}
+			return refused(err)
 		}
 		return Response{}
 	default:

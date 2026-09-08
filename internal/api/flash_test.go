@@ -54,6 +54,27 @@ func TestEveryFlashMarkerHasAMessageAndEveryMessageAMarker(t *testing.T) {
 	if len(found) == 0 {
 		t.Fatal("no flash markers were found at all; this rule can no longer see its subject")
 	}
+
+	// The ceremony's refusal markers, which the scan cannot see because since
+	// `0vk.53` moveGuardControl redirects with "?flash="+refusalFlash(...) — a
+	// cap-pair refusal and a bad code are two different things to say, and the
+	// guard's own sentence may not be either of them.
+	//
+	// Read out of the producing code, not re-listed: capPairFlashes is the map
+	// the handler indexes, and the fallback is whatever refusalFlash returns for
+	// an error carrying no kind, so a renamed marker or a changed default is
+	// still seen here. Same departure as settingsForm below, same reason.
+	//
+	// ABOVE THE FORWARD LOOP, unlike settingsForm's, so BOTH directions cover
+	// these: a marker here with no message renders nothing at all, and that is
+	// the failure this whole rule exists for. settingsForm can sit below because
+	// TestEveryValidatedFieldCanSayWhyItRefused covers its forward direction;
+	// nothing else covers this one.
+	for _, marker := range capPairFlashes {
+		found[marker] = append(found[marker], "capPairFlashes")
+	}
+	fallback := refusalFlash(nil, "")
+	found[fallback] = append(found[fallback], "refusalFlash")
 	for name, files := range found {
 		if FlashMessage(name) == "" {
 			t.Errorf("%s redirects with ?flash=%s and nothing translates it, so the page "+
@@ -143,5 +164,37 @@ func TestTheLogLevelOptionsAscend(t *testing.T) {
 	// change what an INFO process renders.
 	if got := levelOption(slog.LevelInfo); got != "info" {
 		t.Errorf("levelOption(INFO) = %q, want \"info\"", got)
+	}
+}
+
+// Every cap control this route may move has a cap-pair message of its own
+// (`0vk.53`).
+//
+// ANCHORED TO capControls, the production list, not to a second copy of it here:
+// a third cap control added there and nowhere else would fall through
+// refusalFlash to code_refused, and its operator would be told a code was not
+// accepted for a refusal that involves no code — which is the exact defect this
+// bead exists to remove, arriving again by way of a list that was extended in
+// one place.
+//
+// WHAT THE MESSAGES SAY is not checked here. internal/arch's
+// TestTheCapPairRemediesReadTheSameEverywhere holds this copy to the guard's own
+// remedy, alongside the Sending hint, MANUAL.html and OPERATING.md; and
+// TestACapPairRefusalTellsTheOperatorWhichLimitToMove drives the real handler to
+// prove which control gets which message.
+func TestEveryCapControlHasACapPairMessage(t *testing.T) {
+	if len(capControls) == 0 {
+		t.Fatal("capControls is empty; this rule can no longer see its subject")
+	}
+	for _, control := range capControls {
+		marker, ok := capPairFlashes[control]
+		if !ok {
+			t.Errorf("the caps route may move %q and capPairFlashes has no message for it, "+
+				"so its cap-pair refusal falls back to the ceremony's code message", control)
+			continue
+		}
+		if FlashMessage(marker) == "" {
+			t.Errorf("%q's cap-pair marker %q translates to nothing", control, marker)
+		}
 	}
 }

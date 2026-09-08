@@ -160,7 +160,12 @@ func (c *SocketClient) call(ctx context.Context, req Request) (Response, error) 
 		c.relay(ctx, resp.Events)
 	}
 	if resp.Error != "" {
-		return resp, errors.New(resp.Error)
+		// REBUILT WITH ITS KIND, so errors.As finds the same thing on this side
+		// of the socket as the guard returned on the other (`0vk.53`). The text
+		// still goes no further than the caller's log: it is the KIND a handler
+		// switches on, and knownKind is what keeps a token this build has no copy
+		// for from getting that far.
+		return resp, &Refusal{Kind: knownKind(resp.ErrorKind), Err: errors.New(resp.Error)}
 	}
 	return resp, nil
 }

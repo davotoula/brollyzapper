@@ -198,9 +198,9 @@ a per-payment limit above the window could never be reached.
 
 **The two move in an order.** To lower the 24-hour limit below the per-payment one, lower the
 per-payment limit first; to raise the per-payment limit above the 24-hour one, raise the 24-hour
-limit first. The guard refuses the change either way round and names the limit to move, but the
-raising case is refused only when you *apply* the change — after you have fetched the code and
-typed it — so knowing the order first saves a whole ceremony.
+limit first. The guard refuses the change either way round and the page names the limit to move.
+The raising case is refused *before* a code is issued, so you are never sent to fetch one for a
+change that could never be applied.
 
 ---
 

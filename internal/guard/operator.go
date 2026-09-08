@@ -203,12 +203,19 @@ func (st *State) apply(c Change) {
 //
 // UNEXPORTED, and it is the same reasoning errSpendRefused carries: this error
 // crosses the socket, where `dispatch` flattens it to a string and
-// SocketClient.call rebuilds it with errors.New — so nothing on the server side
-// can ever errors.Is it, by construction. An exported name would read as a
+// SocketClient.call rebuilds one from that string — so nothing on the server
+// side can ever errors.Is it, by construction. An exported name would read as a
 // contract, and the next handler wanting to tell "needs a code" from "wrong
 // code" would write a match that compiles, never fires, and fails silently.
 // What survives is the TEXT, which is why the text says what to do. Found by
 // review.
+//
+// WHAT DOES CROSS IS A KIND (`0vk.53`), and it is the answer to that next
+// handler: the rebuilt error is a *Refusal, so errors.As finds the fixed token
+// the guard set, and ErrorKinds is the closed set of them. Sentinel IDENTITY
+// still does not survive — the wrapped error is a fresh one built from the
+// string — so telling "needs a code" from "wrong code" means giving each a kind
+// here, not exporting this variable.
 var errAuthorisationRequired = errors.New("guard: this change needs an authorisation code")
 
 // RequestAuthorisation issues a one-time grant for a loosening and writes it
@@ -424,12 +431,25 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 	}
 	if payment > window {
 		// IN SATS, because this string is read by an operator on a page §9 says
-		// renders whole sats. It reaches them through the flash copy, and a
-		// number in msat there is three orders of magnitude away from the one in
-		// the box they just typed into. Found by review.
-		return fmt.Errorf("guard: a per-payment limit of %s is above the 24-hour limit of %s, "+
-			"so it could never be reached; %s",
-			msatSentence(payment), msatSentence(window), remedy)
+		// renders whole sats, and a number in msat here is three orders of
+		// magnitude away from the one in the box they just typed into. Found by
+		// review.
+		//
+		// IT REACHES THEM THROUGH THE LOG AND THE TRAIL, NOT THE FLASH. This
+		// comment used to claim the flash carried it, and that was false for as
+		// long as it stood: moveGuardControl deliberately does not relay guard
+		// text to the page, so every refusal there read as "that code was not
+		// accepted" — including this one, which involves no code at all. The
+		// 0.1.20-rc1 box trip found it and `0vk.53` fixed it, by sending the
+		// KIND across and letting internal/api choose one of its own tested
+		// messages. So this sentence is read by an operator or a supporter in
+		// `docker logs` and on the Security page, and the remedy below is the one
+		// internal/arch's TestTheCapPairRemediesReadTheSameEverywhere holds the
+		// page's copy — and the Sending hint, MANUAL.html and OPERATING.md — to.
+		return &Refusal{Kind: KindCapPair, Err: fmt.Errorf(
+			"guard: a per-payment limit of %s is above the 24-hour limit of %s, "+
+				"so it could never be reached; %s",
+			msatSentence(payment), msatSentence(window), remedy)}
 	}
 	return nil
 }

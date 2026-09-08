@@ -5712,10 +5712,24 @@ func TestTheGenericAppNamesNoDeploymentRoute(t *testing.T) {
 // able to name. Anything else is a handler reaching past the socket, which is
 // the one thing the two-container split exists to prevent.
 func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []problem {
+	// THE REFUSAL KIND JOINED THE LIST IN `0vk.53`, and it is admitted on the
+	// rule's own stated grounds rather than as an exception to them: it is a
+	// closed set the guard owns, which the server cannot learn through
+	// lnd.BrokerStatus and must not hold a second copy of. The page has to tell a
+	// cap-pair refusal — which involves no code at all — from a code that was not
+	// accepted, and the alternative was relaying the guard's SENTENCE to the URL,
+	// which is the thing moveGuardControl's comment exists to forbid.
+	//
+	// It is two names, deliberately: the predicate and the one token the server
+	// has separate copy for. guard.Refusal and guard.ErrorKind stay out, because
+	// a handler that named the type would be building refusals rather than
+	// reading them — and nothing in internal/api should be authoring the guard's
+	// verdicts.
 	allowed := map[string]bool{
 		"Change": true, "Control": true,
 		"ControlSending": true, "ControlSpendCap": true, "ControlPaymentCap": true,
 		"Controls": true,
+		"KindOf":   true, "KindCapPair": true,
 	}
 	reference := regexp.MustCompile(`\bguard\.([A-Z]\w*)`)
 
@@ -5765,6 +5779,18 @@ func broker(path string) *guard.SocketClient {
 	return guard.NewSocketClient(path, nil)
 }
 `)}), "reachable only through the socket")
+
+	// And the one the `0vk.53` widening makes plausible: having been allowed to
+	// READ a refusal's kind, a handler builds one. The two names admitted above
+	// are a predicate and a token; the type is not among them, because a server
+	// that can construct guard.Refusal can put any verdict in front of the
+	// operator without the guard having reached that verdict.
+	catches(t, checkAPINamesOnlyTheGuardsVocabulary(t, []sourceFile{planted("internal/api", `package api
+
+func refuse(err error) error {
+	return &guard.Refusal{Kind: guard.KindCapPair, Err: err}
+}
+`)}), "names guard.Refusal")
 }
 
 // A generic type's LogValue is credited to it, and its absence is still reported.
@@ -5870,10 +5896,18 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 			"failed to find", len(matches))
 	}
 
+	// THE PAGE'S REFUSAL COPY IS THE FOURTH SURFACE (`0vk.53`). The three prose
+	// documents state the ordering BEFORE an operator meets it; internal/api's
+	// flash is what they read AFTER being refused, and it was the one surface the
+	// guard's remedy never reached. It belongs in this list rather than in a rule
+	// of its own precisely because the hazard is the same one: an operator reads
+	// the hint and the refusal minutes apart, and two wordings for one action are
+	// two different instructions (`6zd`).
 	docs := []string{
 		"internal/web/templates/sending.html",
 		"MANUAL.html",
 		"OPERATING.md",
+		"internal/api/pages_settings.go",
 	}
 	// lead-in text before each remedy, per document, so the three can be compared
 	// with each other as well as with the guard.
@@ -5885,10 +5919,17 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 			t.Fatalf("reading %s: %v", doc, err)
 		}
 		// Whitespace-normalised and case-folded. Prose wraps and the guard's
-		// string does not — every one of these three has the phrase broken across
+		// string does not — every one of these four has the phrase broken across
 		// a line — and folding case means a document that opens a sentence with
 		// the remedy is not failed for capitalising it.
 		flat := strings.ToLower(strings.Join(strings.Fields(string(body)), " "))
+		// AND THE GO SPLICE, for the one entry that is source rather than prose.
+		// gofmt breaks a long message across concatenated literals, so the flash
+		// copy holds `one, " + "lower the per-payment limit first` where the
+		// three documents hold a sentence. Removing the splice makes the copy one
+		// string again; the documents contain no such sequence, so this is a
+		// no-op for them.
+		flat = strings.ReplaceAll(flat, `" + "`, "")
 		leadIn[doc] = map[string]string{}
 		for _, m := range matches {
 			remedy := strings.ToLower(m[1])
@@ -5903,7 +5944,7 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 		}
 	}
 
-	// AND THE THREE MUST AGREE WITH EACH OTHER, not merely each with the guard.
+	// AND THEY MUST AGREE WITH EACH OTHER, not merely each with the guard.
 	//
 	// Containment alone cannot see a SWAP. A document that paired "to lower the
 	// 24-hour limit below the per-payment one" with "raise the 24-hour limit
@@ -5914,7 +5955,7 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 	// THE COMMON SUFFIX, not a fixed window, and the first attempt is why. A
 	// fixed lookback reached past the shared clause into each document's own
 	// preamble — "an order: to lower..." against "order.** to lower..." — and
-	// reported a disagreement that was really three different sentences leading
+	// reported a disagreement that was really different sentences leading
 	// into the same one. What the three owe each other is the CLAUSE that says
 	// which case the remedy answers, not the words before it.
 	//
@@ -5928,7 +5969,7 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 			shared = commonSuffix(shared, leadIn[doc][remedy])
 		}
 		if len(shared) < minSharedClause {
-			t.Errorf("the three documents introduce the remedy %q differently — they share "+
+			t.Errorf("the surfaces introduce the remedy %q differently — they share "+
 				"only %q before it. Each must say which case this remedy answers, in the "+
 				"same words, or a swapped pairing reads as the opposite instruction while "+
 				"still containing both remedies (6zd)", m[1], shared)
@@ -5959,7 +6000,7 @@ func commonSuffix(a, b string) string {
 }
 
 // leadInWindow is how much text before a remedy the rule keeps, and
-// minSharedClause is how much of it the three documents must have in common.
+// minSharedClause is how much of it the four surfaces must have in common.
 //
 // EXPIRY CONDITION: the window has to be long enough to reach past the scenario
 // clause that distinguishes the two remedies, and the minimum long enough that

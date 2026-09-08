@@ -522,6 +522,23 @@ var flashMessages = map[string]string{
 	"cap_invalid": "A limit has to be a whole number of sats, and cannot be negative. Nothing " +
 		"has been changed.",
 
+	// §6's cap-pair invariant, refused (`0vk.53`). TWO MESSAGES, because the
+	// remedy is the control the operator is NOT editing (`8vj`) and it differs by
+	// direction — and NEITHER mentions a code, because neither refusal involves
+	// one: lowering the 24-hour limit is a tightening that needs no ceremony, and
+	// the raising case is refused before a code is ever issued (`pou`).
+	//
+	// The wording after "Nothing has changed" is the Sending page's hint and
+	// OPERATING.md's, deliberately (`6zd`): an operator reads the hint before the
+	// refusal and this after it, minutes apart, and two wordings for one action
+	// become two different instructions.
+	"cap_pair_lower_payment": "Nothing has changed — a per-payment limit above the 24-hour one " +
+		"could never be reached. To lower the 24-hour limit below the per-payment one, lower " +
+		"the per-payment limit first.",
+	"cap_pair_raise_window": "Nothing has changed — a per-payment limit above the 24-hour one " +
+		"could never be reached. To raise the per-payment limit above the 24-hour one, raise " +
+		"the 24-hour limit first.",
+
 	// Connections (§9 item 4).
 	"created": "Connection created. Pair it with the code below — it is the only thing that " +
 		"app needs, so treat it like a password.",

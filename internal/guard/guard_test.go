@@ -1102,3 +1102,73 @@ func TestSpendCaveatsAreVerifiedBeforeAMacaroonIsAccepted(t *testing.T) {
 		t.Error("a spend macaroon with no time-before caveat was accepted")
 	}
 }
+
+// The error kinds are exactly this list, for the reason Ops is (`0vk.53`).
+//
+// ErrorKind exists so the server can say something DIFFERENT about a refusal
+// without repeating the guard's sentence, and the value of that is entirely in
+// the set staying small: a token nobody has written copy for renders as the
+// generic refusal, which is the message it replaced. So a second kind is a
+// decision about what the page says, and it fails here rather than arriving as a
+// field somebody widened.
+//
+// AND EVERY KIND MUST BE REACHABLE, which is the half a list alone does not
+// give: a token no refusal ever carries is copy the operator can never be shown,
+// and this repo has already shipped two flash messages nothing could trigger.
+func TestTheErrorKindsAreExactlyThese(t *testing.T) {
+	if got := guard.ErrorKinds; !slices.Equal(got, []guard.ErrorKind{guard.KindCapPair}) {
+		t.Errorf("guard.ErrorKinds = %v, want just %v", got, guard.KindCapPair)
+	}
+
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+	raised := map[guard.ErrorKind]bool{}
+	// The cap pair, from BOTH operations that check it: ApplyChange, and the
+	// request-time refusal `pou` added. A kind that reached the wire from one and
+	// not the other would leave the page's message depending on which half of the
+	// ceremony the operator was in.
+	for _, resp := range []guard.Response{
+		g.Handle(t.Context(), guard.Request{Op: guard.OpApplyChange,
+			Change: &guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}}),
+		g.Handle(t.Context(), guard.Request{Op: guard.OpRequestAuthorisation,
+			Change: &guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000}}),
+	} {
+		if resp.Error == "" {
+			t.Fatalf("a cap-pair violation was accepted: %+v", resp)
+		}
+		raised[resp.ErrorKind] = true
+	}
+	for _, kind := range guard.ErrorKinds {
+		if !raised[kind] {
+			t.Errorf("no refusal in this test carries kind %q; the server holds copy for a "+
+				"case that cannot happen, or this rule has stopped reaching the case that "+
+				"raises it", kind)
+		}
+	}
+}
+
+// A Refusal built without its reason must not take the guard down.
+//
+// Err is exported and documented as required, which is a rule a future caller
+// can break — a shortcut for "a kind with nothing to add" is the plausible one.
+// The cost of breaking it is not a bad message: err.Error() is called on the
+// dispatch path, inside the process that holds admin.macaroon and exposes no
+// listener anyone could restart it through, so the panic would end credential
+// brokering for the install. Found by review, which confirmed no live path
+// reaches it today; this is what keeps that true.
+func TestARefusalWithNoReasonDoesNotPanic(t *testing.T) {
+	var refusal error = &guard.Refusal{Kind: guard.KindCapPair}
+	got := refusal.Error()
+	if got == "" {
+		t.Error("a Refusal with no reason renders nothing at all")
+	}
+	if !strings.Contains(got, string(guard.KindCapPair)) {
+		t.Errorf("the refusal reads %q and does not name its kind, which is the only thing "+
+			"it has left to say", got)
+	}
+	// And the kind still survives, because that is the half the page acts on.
+	if guard.KindOf(refusal) != guard.KindCapPair {
+		t.Error("a Refusal with no reason lost its kind")
+	}
+}
