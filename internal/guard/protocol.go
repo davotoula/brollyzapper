@@ -286,10 +286,21 @@ type ErrorKind string
 // that was not accepted.
 const KindCapPair ErrorKind = "cap_pair"
 
-// ErrorKinds is every token this field may carry. A second entry is a decision
+// KindAuthorisationRequired is a loosening that arrived without a live grant to
+// redeem (`0vk.55`).
+//
+// It is the SECOND kind, and it earns its place by ErrorKind's own expiry
+// condition: the server has a different thing to say about it. Without it the
+// commonest codeless failure on this path renders either "that code was not
+// accepted" — to an operator who typed none — or, if the server merely defaults
+// on an empty code, "refused, see the log", which sends them to a log for a
+// condition whose whole remedy is "ask for a code". The app can simply say so.
+const KindAuthorisationRequired ErrorKind = "authorisation_required"
+
+// ErrorKinds is every token this field may carry. A third entry is a decision
 // about what the page says, not an implementation detail — see the test that
 // pins this list, and ErrorKind's expiry condition on Response.
-var ErrorKinds = []ErrorKind{KindCapPair}
+var ErrorKinds = []ErrorKind{KindCapPair, KindAuthorisationRequired}
 
 // Refusal is an error that carries its kind.
 //

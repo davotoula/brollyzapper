@@ -1116,8 +1116,9 @@ func TestSpendCaveatsAreVerifiedBeforeAMacaroonIsAccepted(t *testing.T) {
 // give: a token no refusal ever carries is copy the operator can never be shown,
 // and this repo has already shipped two flash messages nothing could trigger.
 func TestTheErrorKindsAreExactlyThese(t *testing.T) {
-	if got := guard.ErrorKinds; !slices.Equal(got, []guard.ErrorKind{guard.KindCapPair}) {
-		t.Errorf("guard.ErrorKinds = %v, want just %v", got, guard.KindCapPair)
+	want := []guard.ErrorKind{guard.KindCapPair, guard.KindAuthorisationRequired}
+	if got := guard.ErrorKinds; !slices.Equal(got, want) {
+		t.Errorf("guard.ErrorKinds = %v, want %v", got, want)
 	}
 
 	node := lndtest.Start(t)
@@ -1128,14 +1129,23 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 	// request-time refusal `pou` added. A kind that reached the wire from one and
 	// not the other would leave the page's message depending on which half of the
 	// ceremony the operator was in.
+	//
+	// And the loosening with no grant behind it (`0vk.55`), which is the only way
+	// KindAuthorisationRequired is raised: 80k sats is above the standing 50k
+	// per-payment cap and below the 100k window, so it passes the cap pair, is a
+	// loosening, and reaches redeem with nothing to redeem.
 	for _, resp := range []guard.Response{
 		g.Handle(t.Context(), guard.Request{Op: guard.OpApplyChange,
 			Change: &guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}}),
 		g.Handle(t.Context(), guard.Request{Op: guard.OpRequestAuthorisation,
 			Change: &guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000}}),
+		g.Handle(t.Context(), guard.Request{Op: guard.OpApplyChange,
+			Change: &guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}}),
 	} {
 		if resp.Error == "" {
-			t.Fatalf("a cap-pair violation was accepted: %+v", resp)
+			t.Fatalf("a refusal this test relies on did not happen: %+v. Two of these are "+
+				"cap-pair violations and the third is a loosening with nothing to redeem; "+
+				"whichever it is, no kind was raised and the check below proves nothing", resp)
 		}
 		raised[resp.ErrorKind] = true
 	}

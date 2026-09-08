@@ -413,25 +413,108 @@ func TestACapPairRefusalTellsTheOperatorWhichLimitToMove(t *testing.T) {
 	}
 }
 
-// A genuine bad code still says a code was not accepted (`0vk.53`).
+// TestARefusalWithNoKindStillShowsTheCodeMessage STOOD HERE (`0vk.55`).
 //
-// The anti-vacuity half: a fix that redirected every refusal to the new cap-pair
-// flash would satisfy the test above and lose the message the ceremony actually
-// needs.
-func TestARefusalWithNoKindStillShowsTheCodeMessage(t *testing.T) {
-	g := &fakeGuard{
-		authoriseErr: errors.New("guard: that is not a loosening"),
-		applyErr:     errors.New("guard: that code is not the one that was written"),
-	}
-	h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) { opts.Guard = g })
-	cookie := h.login(t)
+// It drove the identical fixture, form and code as the "a code was typed and
+// refused" row of the table below, and asserted less: only the marker, not that
+// the marker renders anything. The row states that job in its own comment. The
+// name is kept here because it was the anti-vacuity guarantee for `0vk.53` — a
+// fix that sent every refusal to the new flash would have satisfied that bead's
+// other test and lost the ceremony's own message — and a reader coming to check
+// that guarantee still holds should find where it went.
 
-	rec := h.postForm(t, "/sending/caps", cookie, url.Values{
-		"control": {"spend_cap"}, "sats": {"40000"}, "code": {"123456"},
-	})
+// A refusal the operator typed no code for does not claim a code was refused
+// (`0vk.55`).
+//
+// `0vk.53` fixed this class for exactly one kind, the cap pair. Every OTHER
+// failure reached with an empty code — an LND outage, a guard state-write
+// failure, a transport error — still rendered "That code was not accepted, so
+// nothing has changed", to an operator who typed nothing. The tightening path is
+// the one that gets there: a tightening needs no ceremony, so it falls through
+// RequestAuthorisation and applies with an empty code.
+//
+// THE THREE ROWS OF THE RULING IN ONE TABLE, because the defect is one message
+// standing in for three different next steps, and a test asserting one row
+// passes against the version that collapses them.
+func TestARefusalIsToldApartByWhetherACodeWasTyped(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		code     string
+		applyErr error
+		want     string
+		notWant  string
+	}{{
+		// The bead's case: no code typed, and nothing about the failure says a
+		// code was involved.
+		name:     "no code typed and the guard refused for its own reasons",
+		applyErr: errors.New("guard: lnd is not answering"),
+		want:     "refused",
+		notWant:  "code was not accepted",
+	}, {
+		// The commonest codeless failure, and the reason "if code == \"\" then
+		// refused" was the wrong one-liner: sending this operator to the log
+		// hides a remedy the app can simply state.
+		name: "no code typed and the guard says the change needs one",
+		applyErr: &guard.Refusal{Kind: guard.KindAuthorisationRequired,
+			Err: errors.New("guard: this change needs an authorisation code")},
+		want:    "authorisation_required",
+		notWant: "code was not accepted",
+	}, {
+		// Unchanged, and the anti-vacuity row: the ceremony's own message is
+		// still the commonest thing this page has to say.
+		name:     "a code was typed and refused",
+		code:     "123456",
+		applyErr: errors.New("guard: that code is not the one that was written"),
+		want:     "code_refused",
+		notWant:  "see the log for why",
+	}, {
+		// THE FOURTH CELL of the (kind × code typed) matrix, which the three
+		// rows above leave out: an operator types a code and the guard says the
+		// change needs one — their grant was swept, consumed, or superseded
+		// while they were reading it. code_refused is right, because it already
+		// covers "expired, already used, or written for a different change" and
+		// tells them to ask for a new one. It is also the row that would change
+		// silently if the branches in refusalFlash were reordered, which is the
+		// only reason this cell resolves the way it does. Found by review.
+		name: "a code was typed and the guard says the change needs one",
+		code: "123456",
+		applyErr: &guard.Refusal{Kind: guard.KindAuthorisationRequired,
+			Err: errors.New("guard: this change needs an authorisation code")},
+		want:    "code_refused",
+		notWant: "Save it again with the code box empty",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &fakeGuard{
+				authoriseErr: errors.New("guard: that is not a loosening"),
+				applyErr:     tc.applyErr,
+			}
+			h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) { opts.Guard = g })
+			cookie := h.login(t)
 
-	if location := rec.Header().Get("Location"); !strings.Contains(location, "flash=code_refused") {
-		t.Errorf("the redirect is %q, want code_refused; a mistyped code is still the "+
-			"commonest way this ceremony fails and the page has to say so", location)
+			form := url.Values{"control": {"spend_cap"}, "sats": {"40000"}}
+			if tc.code != "" {
+				form.Set("code", tc.code)
+			}
+			rec := h.postForm(t, "/sending/caps", cookie, form)
+
+			location := rec.Header().Get("Location")
+			redirect, err := url.Parse(location)
+			if err != nil {
+				t.Fatalf("the redirect %q does not parse: %v", location, err)
+			}
+			marker := redirect.Query().Get("flash")
+			if marker != tc.want {
+				t.Errorf("the redirect carries flash=%q, want %q", marker, tc.want)
+			}
+			flash := api.FlashMessage(marker)
+			if flash == "" {
+				t.Fatalf("flash=%q renders no message at all, so the page says nothing "+
+					"happened when something did", marker)
+			}
+			if strings.Contains(flash, tc.notWant) {
+				t.Errorf("the page says\n  %s\nwhich contains %q — the wrong next step for "+
+					"this refusal", flash, tc.notWant)
+			}
+		})
 	}
 }

@@ -1,7 +1,9 @@
 package guard_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -364,32 +366,16 @@ func TestTheCeremonyIsAuditedAndTheCodeIsNever(t *testing.T) {
 	}
 }
 
-// §6's outer bound holds over the STORED values, not only over the environment.
+// TestThePerPaymentCapCanNeverBeLeftAboveTheWindowCap STOOD HERE (`l4g`).
 //
-// config.LoadGuard makes this check at load. It has to be made here too, because
-// the operator changes one cap at a time: lowering the window below the
-// per-payment cap would leave a per-payment limit that can never be reached — a
-// number on the page that means nothing, which is worse than a refusal saying
-// why.
-func TestThePerPaymentCapCanNeverBeLeftAboveTheWindowCap(t *testing.T) {
-	node := lndtest.Start(t)
-	d := guardDirs(t, node)
-	g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
-
-	// A LOWERING, so it needs no code — and it must still be refused. The
-	// monotonic split is about who may ask; it is not a licence to write an
-	// inconsistent pair.
-	err := g.ApplyChange(t.Context(),
-		guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}, "")
-
-	if err == nil {
-		t.Fatal("the 24-hour cap was lowered below the per-payment cap; the per-payment limit " +
-			"can now never be reached, and the page states a number that means nothing")
-	}
-	if got := spendLimit(t, g); got != 100_000 {
-		t.Errorf("the window cap is %d msat after a refused change, want 100000", got)
-	}
-}
+// Its fixture and its change were identical to the first case of
+// TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing below; only the
+// assertion differed, and that assertion is now a per-case field of that table,
+// made in BOTH directions rather than only the tightening one. The name is left
+// in this comment on purpose: it states the invariant — §6's outer bound holds
+// over the STORED values, not only over the environment — and it was a grep
+// target, so a reader who comes looking for it should find where it went rather
+// than an absence.
 
 // The stored caps are what the MIDDLEWARE enforces, not the environment ones.
 //
@@ -437,15 +423,22 @@ func render(t *testing.T, v any) string {
 	return string(raw)
 }
 
-// spendLimit reads the window cap back through the guard's own Status, which is
-// the only account of it the rest of the system ever sees.
-func spendLimit(t *testing.T, g *guard.Guard) int64 {
+// storedCaps is the PAIR the guard has stored, which is the unit §6's outer
+// bound is about — one number cannot see a refusal that moved the other.
+func storedCaps(t *testing.T, g *guard.Guard) caps {
 	t.Helper()
 	status, err := g.Status(t.Context())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	return status.SpendLimitMsat
+	return caps{window: status.SpendLimitMsat, payment: status.MaxPaymentMsat}
+}
+
+// spendLimit reads the window cap back through the guard's own Status, which is
+// the only account of it the rest of the system ever sees.
+func spendLimit(t *testing.T, g *guard.Guard) int64 {
+	t.Helper()
+	return storedCaps(t, g).window
 }
 
 // sendPaymentOf builds the interception LND would make for a payment of msat.
@@ -493,6 +486,16 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 		change  guard.Change
 		want    string
 		notWant string
+		// THE CAPS THIS CASE STARTS WITH — and, because the change is refused,
+		// the caps it must still have afterwards (`l4g`).
+		//
+		// ONE FIELD FOR BOTH, so neither can drift into being a second copy of
+		// the other. The refusal is only half the guarantee: a guard that said
+		// the right sentence and wrote the change anyway would leave the very
+		// pair this check exists to prevent. Per case rather than hoisted, so a
+		// row needing different numbers states them once and gets the fixture
+		// and the assertion from the same field.
+		fixture caps
 	}{{
 		// TIGHTENING, and the case from the box. It needs no code, and it is
 		// refused anyway — correctly — so the message is the operator's only
@@ -501,6 +504,7 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 		change:  guard.Change{Control: guard.ControlSpendCap, Msat: 40_000},
 		want:    "a per-payment limit of 50 sats is above the 24-hour limit of 40 sats, so it could never be reached; lower the per-payment limit first",
 		notWant: "24-hour limit first",
+		fixture: caps{window: 100_000, payment: 50_000},
 	}, {
 		// LOOSENING, and the direction the old message was written for. It is
 		// refused by the cap-pair check BEFORE the authorisation check, which is
@@ -509,11 +513,12 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 		change:  guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
 		want:    "a per-payment limit of 150 sats is above the 24-hour limit of 100 sats, so it could never be reached; raise the 24-hour limit first",
 		notWant: "per-payment limit first",
+		fixture: caps{window: 100_000, payment: 50_000},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
 			d := guardDirs(t, node)
-			g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+			g := openGuardWithCaps(t, node, d, tc.fixture)
 
 			err := g.ApplyChange(t.Context(), tc.change, "")
 			if err == nil {
@@ -527,6 +532,15 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 			if strings.Contains(got, tc.notWant) {
 				t.Errorf("the refusal reads\n  %s\nand names %q — the control the operator is "+
 					"already editing, which is the whole of 8vj", got, tc.notWant)
+			}
+			// BOTH CAPS, not only the one being edited: a refusal that moved the
+			// OTHER control would leave exactly the inconsistent pair §6's outer
+			// bound exists to forbid, and checking one number cannot see it.
+			if stored := storedCaps(t, g); stored != tc.fixture {
+				t.Errorf("the caps are %+v after a REFUSED change, want the fixture %+v "+
+					"untouched; the guard said no and wrote anyway, so the per-payment limit "+
+					"can never be reached and the page states a number that means nothing",
+					stored, tc.fixture)
 			}
 		})
 	}
@@ -684,6 +698,26 @@ func TestTheCapPairRefusalCarriesItsKindOverTheSocket(t *testing.T) {
 			"support path reads out of docker logs", relayed)
 	}
 
+	// AND THE SECOND KIND OVER THE SAME SOCKET (`0vk.55`): a loosening that
+	// arrives with nothing to redeem. 80k sats clears the 100k window and is
+	// above the standing 50k per-payment cap, so it passes the cap pair, counts
+	// as a loosening, and reaches redeem with no grant.
+	//
+	// ACROSS THE SOCKET RATHER THAN IN PROCESS, for the reason the cap pair is:
+	// errAuthorisationRequired is a package-level *Refusal, so a direct call
+	// returns the very pointer the guard holds and errors.As would find its kind
+	// even if nothing were ever encoded. Only the relayed copy proves the wire.
+	needsCode := client.ApplyChange(ctx,
+		guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}, "")
+	if needsCode == nil {
+		t.Fatal("a loosening applied with no code and no grant")
+	}
+	if got := guard.KindOf(needsCode); got != guard.KindAuthorisationRequired {
+		t.Errorf("the relayed refusal carries kind %q, want %q; the page cannot tell "+
+			"'this needs a code' from 'that code was wrong' (%v)",
+			got, guard.KindAuthorisationRequired, needsCode)
+	}
+
 	// A refusal with no kind stays kindless over the same socket.
 	loosening := guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}
 	if err := client.RequestAuthorisation(ctx, loosening); err != nil {
@@ -740,5 +774,243 @@ func TestAnUnknownErrorKindReadsAsNoKind(t *testing.T) {
 	if got := guard.KindOf(err); got != "" {
 		t.Errorf("an unknown token was admitted as kind %q; it would pick no message and the "+
 			"page would render a blank flash", got)
+	}
+}
+
+// A grant nobody comes back for is swept, file and row together (`0vk.54`).
+//
+// Found on the 0.1.20-rc1 trip, finding D: an authorisation.txt written for a
+// raise sat on disk after its expiry and across two container recreates. Inert —
+// single-use, expired — but it made "is the file absent?" an ambiguous check,
+// and the trip had to verify `pou` by mtime instead. An expired grant was
+// discarded only inside redeem, so one nobody returned for was never cleared;
+// Status hid it while the row and the file stayed.
+//
+// THE INVARIANT THE RULING ASKS FOR is that the file's presence means exactly
+// "a live code exists". So both halves are asserted here: a sweep that removed
+// the file and left the row would make Status and the disk disagree, which is a
+// different defect wearing this one's fix.
+//
+// THE AUDIT ROW IS redeem's OWN VOCABULARY, "expired", deliberately. The trail
+// already says that when a returning operator is refused; a grant that timed out
+// unattended is the same fact observed by a different route, and a second word
+// for it would make the trail's vocabulary depend on who happened to look.
+func TestAGrantThatExpiresUnattendedIsSweptAway(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
+	g := openGuardFull(t, node, d, guard.Options{Now: clock.Now}, serverAddr(), true)
+	change := guard.Change{Control: guard.ControlSending, On: true}
+
+	if err := g.RequestAuthorisation(t.Context(), change); err != nil {
+		t.Fatal(err)
+	}
+	status, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.AuthorisationPending {
+		t.Fatal("no grant is pending, so this test would sweep nothing and pass")
+	}
+	clock.now = status.AuthorisationExpiresAt
+
+	// The Status call is the route this takes in production: runGuardEvents polls
+	// the guard every five minutes and a page render asks at most every ten
+	// seconds while somebody is looking, so nothing has to run on a timer of its
+	// own. (The first version of this comment said "every few seconds", which was
+	// wrong by two orders of magnitude — found by review.)
+	events := g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events
+
+	if _, err := os.Stat(filepath.Join(d.data, "authorisation.txt")); !os.IsNotExist(err) {
+		t.Errorf("the code file outlived its grant (stat: %v); its presence is supposed to "+
+			"mean a live code exists, and an operator checking for one cannot tell", err)
+	}
+	// THE ROW IS GONE, NOT MERELY HIDDEN BY THE CLOCK, and that is what the
+	// rewind asks. Status masks an expired grant whether or not it was swept, so
+	// asserting !AuthorisationPending at the expired time is satisfied by a sweep
+	// that removed the FILE and left the row — which is the wrong-mechanism
+	// outcome the ruling names, Status and the disk disagreeing. Winding the
+	// clock back is the only question that separates them.
+	clock.now = status.AuthorisationExpiresAt.Add(-time.Minute)
+	after, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.AuthorisationPending {
+		t.Error("the grant's row outlived its file: the guard reports a pending " +
+			"authorisation whose code the operator cannot read, and the next request " +
+			"would supersede something rather than start clean")
+	}
+	var outcomes []string
+	for _, event := range events {
+		if event.Event == logging.EventGuardAuthorise {
+			outcomes = append(outcomes, event.Attrs["outcome"])
+		}
+	}
+	// "expired", which is the word redeem writes for the same fact when a
+	// returning operator hits it — asserted as the literal the trail carries, not
+	// as a phrase this test composes.
+	if !containsString(outcomes, "expired") {
+		t.Errorf("the trail holds %v, missing the discard; §12 answers 'what happened to that "+
+			"authorisation' and an unattended expiry is one of the answers", outcomes)
+	}
+}
+
+// A LIVE grant survives a restart with its file intact (`0vk.54`).
+//
+// The other half of the ruling, and the one a careless sweep breaks: clearing an
+// unexpired grant at start would cost the operator a whole ceremony on every
+// container recreate — and umbrelOS recreates the container for a settings
+// change. This is existing behaviour; it is pinned here because 0vk.54 adds the
+// code that could take it away.
+func TestALiveGrantSurvivesARestart(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	// A FIXED "now", not a testClock: nothing here advances time, and the whole
+	// point is that a grant which has NOT expired survives.
+	now := func() time.Time { return time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC) }
+	g := openGuardFull(t, node, d, guard.Options{Now: now}, serverAddr(), true)
+	change := guard.Change{Control: guard.ControlSending, On: true}
+	if err := g.RequestAuthorisation(t.Context(), change); err != nil {
+		t.Fatal(err)
+	}
+	code := readAuthorisationCode(t, d)
+
+	// The restart: a second guard over the same volumes, which is what a
+	// container recreate is.
+	restarted := openGuardFull(t, node, d, guard.Options{Now: now}, serverAddr(), true)
+	restarted.SweepExpiredAuthorisation(t.Context())
+
+	if _, err := os.Stat(filepath.Join(d.data, "authorisation.txt")); err != nil {
+		t.Fatalf("a live code file did not survive a restart: %v", err)
+	}
+	if err := restarted.ApplyChange(t.Context(), change, code); err != nil {
+		t.Errorf("the code written before the restart no longer redeems: %v; the operator "+
+			"paid for a ceremony the restart threw away", err)
+	}
+}
+
+// An apply-time cap-pair refusal leaves the live grant alone (`0vk.54`).
+//
+// RULED (David, 8 Sep): consistent with the invariant, because the grant is
+// still live — the operator may raise the 24-hour limit and redeem this same
+// code within its TTL. It is the one path that reaches a refusal with a grant
+// outstanding and must NOT sweep, which is why it is asserted rather than
+// assumed: checkCapPair runs before redeem, so a sweep placed carelessly at the
+// top of ApplyChange would take the grant with it.
+func TestAnApplyTimeCapPairRefusalLeavesTheGrantAlone(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+	// A legitimate loosening of the per-payment cap, granted a code.
+	change := guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}
+	if err := g.RequestAuthorisation(t.Context(), change); err != nil {
+		t.Fatal(err)
+	}
+	code := readAuthorisationCode(t, d)
+	// Now the 24-hour limit drops below it — a tightening, no ceremony — so the
+	// outstanding change no longer passes the cap pair.
+	if err := g.ApplyChange(t.Context(),
+		guard.Change{Control: guard.ControlSpendCap, Msat: 60_000}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.ApplyChange(t.Context(), change, code); err == nil {
+		t.Fatal("a per-payment cap above the 24-hour limit was applied")
+	}
+
+	if _, err := os.Stat(filepath.Join(d.data, "authorisation.txt")); err != nil {
+		t.Errorf("the cap-pair refusal took the operator's live code with it: %v", err)
+	}
+	status, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.AuthorisationPending {
+		t.Error("the grant is gone after a refusal that did not consume it; the operator " +
+			"has to walk the whole ceremony again to make a change the guard would accept")
+	}
+}
+
+// A sweep whose state write fails does not claim it discarded anything
+// (`0vk.54`).
+//
+// discardAuthorisation raises its row whether or not the write succeeded, which
+// is right for redeem — that is one operator action and it happened. The sweep
+// runs on the POLLED path, so the same behaviour turns one unwritable state file
+// into an attempt every five minutes, forever: auditAuthorisation draws on
+// authoriseBudget BEFORE it writes, so each attempt spends one of the eight
+// rows an hour that bound reserves for the events an operator actually needs.
+// And the claim would be false — a grant the guard failed to clear is still in
+// the state file and still redeemable.
+//
+// ASSERTED ON THE LOG, NOT THE TRAIL, and the first version of this test got
+// that wrong: Guard.audit persists each event through g.state.update, which is
+// the very write that has just failed, so the row never reaches
+// Response.Events either way and the assertion passed against the defect. The
+// log line is written before that, unconditionally, so it is the one place the
+// two behaviours differ. Found by planting the defect and watching the test
+// stay green.
+func TestASweepThatCannotWriteClaimsNothing(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
+	var logged bytes.Buffer
+	g := openGuardFull(t, node, d, guard.Options{
+		Now: clock.Now,
+		Log: logging.New(&logged, logging.NewLevelVar(slog.LevelDebug)),
+	}, serverAddr(), true)
+	change := guard.Change{Control: guard.ControlSending, On: true}
+	if err := g.RequestAuthorisation(t.Context(), change); err != nil {
+		t.Fatal(err)
+	}
+	status, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.AuthorisationPending {
+		t.Fatal("no grant is pending, so this test would sweep nothing and pass")
+	}
+	clock.now = status.AuthorisationExpiresAt
+	logged.Reset()
+
+	// The state file's DIRECTORY, made unwritable: stateStore.saveLocked writes
+	// beside the state and renames, so this is what a read-only volume or a full
+	// disk looks like from inside the guard.
+	if err := os.Chmod(d.data, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// PAIRED WITH A CLEANUP, not with the restore three lines down. A t.Fatal or
+	// a panic between the two would leave the directory at 0500, and t.TempDir's
+	// RemoveAll cannot unlink through it — so the real failure would be buried
+	// under a confusing cleanup error, and the temp directory would leak. Found
+	// by review.
+	t.Cleanup(func() { _ = os.Chmod(d.data, 0o700) })
+	g.SweepExpiredAuthorisation(t.Context())
+	if err := os.Chmod(d.data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// THE POSITIVE CONTROL, without which this proves nothing: if the write in
+	// fact succeeded there was never a discard to suppress. The clock is wound
+	// back because Status masks an expired grant whether or not it was swept.
+	clock.now = status.AuthorisationExpiresAt.Add(-time.Minute)
+	after, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.AuthorisationPending {
+		t.Skip("the guard cleared the grant with its data directory at 0500, so this test " +
+			"cannot create the failure it is about (running as root?)")
+	}
+
+	if !strings.Contains(logged.String(), "could not clear an expired authorisation") {
+		t.Errorf("the sweep failed silently; the log has to say why a code file is still "+
+			"there:\n%s", logged.String())
+	}
+	if strings.Contains(logged.String(), "an authorisation was discarded") {
+		t.Errorf("a sweep that could not write said it discarded the grant. The grant is "+
+			"still in the state file and still redeemable, so the claim is false — and on "+
+			"the polled path it is one authoriseBudget slot every five minutes, spent on a "+
+			"row that never lands:\n%s", logged.String())
 	}
 }

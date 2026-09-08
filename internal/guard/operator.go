@@ -203,20 +203,24 @@ func (st *State) apply(c Change) {
 //
 // UNEXPORTED, and it is the same reasoning errSpendRefused carries: this error
 // crosses the socket, where `dispatch` flattens it to a string and
-// SocketClient.call rebuilds one from that string — so nothing on the server
-// side can ever errors.Is it, by construction. An exported name would read as a
-// contract, and the next handler wanting to tell "needs a code" from "wrong
-// code" would write a match that compiles, never fires, and fails silently.
-// What survives is the TEXT, which is why the text says what to do. Found by
-// review.
+// SocketClient.call rebuilds one from that string, so sentinel IDENTITY does not
+// survive — nothing on the server side can ever errors.Is it, by construction.
+// An exported name would read as a contract that holds in tests and never in
+// production. Found by review.
 //
-// WHAT DOES CROSS IS A KIND (`0vk.53`), and it is the answer to that next
-// handler: the rebuilt error is a *Refusal, so errors.As finds the fixed token
-// the guard set, and ErrorKinds is the closed set of them. Sentinel IDENTITY
-// still does not survive — the wrapped error is a fresh one built from the
-// string — so telling "needs a code" from "wrong code" means giving each a kind
-// here, not exporting this variable.
-var errAuthorisationRequired = errors.New("guard: this change needs an authorisation code")
+// WHAT CROSSES IS ITS KIND (`0vk.55`), and that is what the server acts on. The
+// comment here used to end by saying that telling "needs a code" from "wrong
+// code" would mean giving each one a kind rather than exporting this variable;
+// this is that, done. A loosening that arrives with no live grant is the
+// commonest way this page refuses without a code being involved, and the page
+// now says "ask for one" rather than sending the operator to a log.
+//
+// THE TEXT STILL MATTERS, because it is what the guard's log and §12's trail
+// carry — the kind is a token for the server to choose copy with, not a message.
+var errAuthorisationRequired error = &Refusal{
+	Kind: KindAuthorisationRequired,
+	Err:  errors.New("guard: this change needs an authorisation code"),
+}
 
 // RequestAuthorisation issues a one-time grant for a loosening and writes it
 // where only the operator can read it.
@@ -241,6 +245,18 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	if err != nil {
 		return err
 	}
+	// A timed-out grant is cleared before this one supersedes it (`0vk.54`), so
+	// the trail records an abandoned grant's expiry as an expiry rather than
+	// letting the overwrite below swallow it.
+	//
+	// ONLY THE EXPIRED HALF. Superseding a LIVE grant — an operator who asks for
+	// a code, does not use it, and asks again inside the TTL — still writes no
+	// discard row, so §12 cannot answer "what happened to that one" for that
+	// path. That is a gap this call does not close and does not pretend to; it is
+	// filed rather than fixed here, because auditing supersession means a new
+	// outcome word in the trail, which is a decision about §12's vocabulary.
+	// Found by review, which caught this comment claiming the whole of it.
+	state = g.sweepExpired(ctx, state)
 	if !state.loosens(change) {
 		// Refused rather than issued. A grant for a change that needs none would
 		// teach the operator that the ceremony is a formality they perform for
@@ -285,11 +301,34 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// The FILE first, then the state. A file with no grant behind it is a code
 	// that does not work, which the operator retries; a grant with no file is a
 	// code nobody can read, which is a dead end they cannot diagnose.
-	if err := g.writeAuthorisationFile(grant, now); err != nil {
+	//
+	// BOTH UNDER THE STORE'S LOCK, because the ordering above only protects this
+	// call against itself. Against another connection it protected nothing: the
+	// sweep and redeem both delete the operator file, and while that delete ran
+	// outside the lock the two could interleave into precisely the dead end this
+	// ordering exists to prevent — this writes file2, the sweep takes the lock,
+	// sees the still-expired row1, clears it and deletes what is now file2, and
+	// then this writes row2. A live row, no file. The lock is the only thing that
+	// orders a write on one connection against a delete on another.
+	//
+	// EXPIRY CONDITION: this holds stateStore.mu across one small file write, so
+	// the payment path's cap check waits behind it. That is acceptable only
+	// because the ceremony is operator-paced — a handful of calls a day against a
+	// lock the payment path takes per request. If anything ever puts a
+	// credential-sized write or a network call in here, this is the line to move
+	// back out and solve differently.
+	var wrote error
+	if err := g.state.updateIf(func(st *State) bool {
+		if wrote = g.writeAuthorisationFile(grant, now); wrote != nil {
+			return false
+		}
+		st.Authorisation = grant
+		return true
+	}); err != nil {
 		return err
 	}
-	if err := g.state.update(func(st *State) { st.Authorisation = grant }); err != nil {
-		return err
+	if wrote != nil {
+		return wrote
 	}
 	// Audited: an authorisation request is the app asking for more authority
 	// than it has, which is worth a durable row whether or not it is redeemed.
@@ -505,6 +544,112 @@ func (g *Guard) redeem(ctx context.Context, state State, change Change, code str
 	return g.consumeAuthorisation()
 }
 
+// SweepExpiredAuthorisation clears a grant that has timed out unattended, so
+// that the presence of authorisation.txt means exactly "a live code exists"
+// (`0vk.54`).
+//
+// AN EXPIRED GRANT USED TO BE DISCARDED ONLY INSIDE redeem, which is the path a
+// RETURNING operator takes. A grant nobody came back for was therefore never
+// cleared: Status hid it once expired, and the row and the file stayed, across
+// restarts, forever. The 0.1.20-rc1 trip found one that had survived two
+// container recreates, and the cost was not the dead file — it was that "is the
+// code file absent?" stopped being an answerable question, so the trip had to
+// verify `pou` by comparing mtimes instead.
+//
+// THIS IS THE ENTRY POINT FOR A CALLER WITH NO STATE IN HAND, which is start-up
+// and nothing else. Everything inside the guard has just loaded the state and
+// calls sweepExpired with it, because stateStore.load is a file read and a
+// parse, and doing it twice on the same call would also produce two error
+// reports for one unreadable file.
+func (g *Guard) SweepExpiredAuthorisation(ctx context.Context) {
+	state, err := g.state.load()
+	if err != nil {
+		g.log.Warn("could not read the state to sweep an expired authorisation",
+			"error", err.Error())
+		return
+	}
+	g.sweepExpired(ctx, state)
+}
+
+// sweepExpired discards state's grant if it has timed out, and returns the state
+// as it now stands.
+//
+// BOTH HALVES OR NEITHER, which is why this clears the row through
+// consumeAuthorisation rather than removing the file: clearing the file and
+// leaving the row would make Status and the disk disagree, and the next
+// RequestAuthorisation would supersede a grant nothing can redeem.
+//
+// IT REUSES redeem's OWN WORD, "expired". The trail already says that when a
+// returning operator is refused; this is the same fact observed by a different
+// route, and a second vocabulary for it would make §12's answer depend on who
+// happened to look.
+//
+// NOTHING IS AUDITED IF THE WRITE FAILED, and that is not tidiness — it is what
+// keeps a stuck sweep from eating the trail. discardAuthorisation raises its row
+// whether or not the state write succeeded, which is right for redeem: that is
+// one operator action, and it happened. This runs on a POLL, so a state file
+// that cannot be written turns one failure into a row every five minutes,
+// forever — and auditAuthorisationBound is eight rows an hour, so the loop would
+// evict the ceremony events an operator actually needs. A grant the guard failed
+// to clear was not discarded, and the trail should not say it was. Found by
+// review.
+//
+// THE DECISION IS MADE UNDER THE STORE'S LOCK, against the grant that is
+// CURRENTLY stored, and the caller's `state` is only a cheap way to skip the
+// lock when there is obviously nothing to do. That is not caution: the first
+// version composed the caller's load() with consumeAuthorisation's independent
+// update(), which is precisely the lost update stateStore's own doc warns about
+// — "the guard serves one goroutine per socket connection". A Status poll that
+// had loaded state holding an expired grant, and then lost the CPU while the
+// operator asked for a new code, came back and cleared the REPLACEMENT: state
+// row and code file both, for a grant it had never seen. The operator's code
+// stopped working within milliseconds of being written, and the redeem told them
+// to ask for another. Found by review; the sequence is driven by hand in
+// TestASweepOnAStaleSnapshotLeavesTheCurrentGrantAlone.
+//
+// The same re-check is what stops two concurrent Status polls both discarding
+// one grant and spending two of the eight audit rows an hour on it.
+//
+// IDEMPOTENT AND SILENT when there is nothing to sweep — no state write, no
+// audit row, no log line — which is what lets it sit on the polled path.
+func (g *Guard) sweepExpired(ctx context.Context, state State) State {
+	if grant := state.Authorisation; grant == nil || !grant.expired(g.rotation.clock()) {
+		return state
+	}
+	// swept is the CURRENT grant's change, captured inside the lock, because the
+	// row has to name what was actually discarded rather than what the caller's
+	// snapshot happened to hold.
+	var swept *Change
+	err := g.state.updateIf(func(st *State) bool {
+		current := st.Authorisation
+		if current == nil || !current.expired(g.rotation.clock()) {
+			return false
+		}
+		change := current.Change
+		swept = &change
+		// Inside the lock, beside the row it belongs to — see
+		// consumeAuthorisation, which this deliberately mirrors rather than
+		// calls: that one clears unconditionally, and this one has just decided,
+		// under this same lock, that the grant it is looking at is expired.
+		g.clearAuthorisationFile()
+		st.Authorisation = nil
+		return true
+	})
+	if err != nil {
+		g.log.Warn("could not clear an expired authorisation", "error", err.Error())
+		return state
+	}
+	if swept == nil {
+		// Somebody else got there first, or replaced the grant with a live one.
+		// Nothing was discarded here, so nothing is said about it.
+		return state
+	}
+	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded",
+		*swept, discarded("expired"))
+	state.Authorisation = nil
+	return state
+}
+
 // discardAuthorisation ends a grant that will not be honoured, and says why.
 func (g *Guard) discardAuthorisation(ctx context.Context, change Change, why string) {
 	if err := g.consumeAuthorisation(); err != nil {
@@ -513,12 +658,27 @@ func (g *Guard) discardAuthorisation(ctx context.Context, change Change, why str
 	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded", change, discarded(why))
 }
 
+// consumeAuthorisation ends the stored grant, file and row together.
+//
+// THE FILE IS REMOVED INSIDE THE STORE'S LOCK, and that is the whole point of
+// doing it here rather than after the update returns. A delete that runs once
+// the lock is released can land on a file some other connection has written in
+// the meantime: this clears row1, RequestAuthorisation writes file2 and row2,
+// and then this deletes file2 — leaving a LIVE row with no file, which is "a
+// code nobody can read, which is a dead end they cannot diagnose", the exact
+// outcome RequestAuthorisation's own file-first comment exists to prevent.
+// RequestAuthorisation writes its file under the same lock for the same reason,
+// so a write and a delete can no longer overlap at all. Found by review, twice:
+// the row half in the go-review, this half in David's.
+//
+// BEFORE THE SAVE, not after, so the ordering that survives a crash is still the
+// safe one — a file with no grant behind it is a code that does not work, which
+// the operator retries; a grant with no file is the dead end above.
 func (g *Guard) consumeAuthorisation() error {
-	if err := g.state.update(func(st *State) { st.Authorisation = nil }); err != nil {
-		return err
-	}
-	g.clearAuthorisationFile()
-	return nil
+	return g.state.update(func(st *State) {
+		g.clearAuthorisationFile()
+		st.Authorisation = nil
+	})
 }
 
 // auditAuthorisationBound is how much of the guard's 32-slot ring one burst of

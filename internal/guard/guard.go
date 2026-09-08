@@ -629,6 +629,20 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	// AND THE SWEEP RIDES ON THIS CALL (`0vk.54`), which is what clears a grant
+	// nobody came back for without a timer or a background goroutine.
+	//
+	// HOW LONG THAT TAKES, stated properly because it is the whole justification
+	// and the first version of this comment was wrong by two orders of magnitude:
+	// runGuardEvents polls the guard every five minutes (guardEventInterval), and
+	// a page render asks at most once per NodeStatusTTL — ten seconds — while
+	// somebody actually has the admin UI open. So an expired grant's file is gone
+	// within five minutes of its expiry unattended, and within ten seconds of it
+	// while an operator is looking, against a ten-minute TTL. Found by review.
+	//
+	// It takes the state ALREADY LOADED above rather than reading the file a
+	// second time, and hands back the version it leaves behind.
+	state = g.sweepExpired(ctx, state)
 	status := Status{
 		ReceiveMacaroonPresent: g.credentialExists(lnd.ReceiveMacaroon),
 		SpendMacaroonPresent:   g.credentialExists(lnd.SpendMacaroon),

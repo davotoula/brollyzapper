@@ -532,6 +532,15 @@ var flashMessages = map[string]string{
 	// OPERATING.md's, deliberately (`6zd`): an operator reads the hint before the
 	// refusal and this after it, minutes apart, and two wordings for one action
 	// become two different instructions.
+	// A loosening that reached the guard with no live grant behind it (`0vk.55`).
+	//
+	// IT NAMES THE NEXT ACT, like every other step of the ceremony above: leaving
+	// the code box empty is what asks for a code, and an operator who has just
+	// been refused will not infer that from "refused — see the log for why".
+	"authorisation_required": "Nothing has changed — that change loosens a limit, so it needs " +
+		"a confirmation code. Save it again with the code box empty and one will be written " +
+		"where only you can read it.",
+
 	"cap_pair_lower_payment": "Nothing has changed — a per-payment limit above the 24-hour one " +
 		"could never be reached. To lower the 24-hour limit below the per-payment one, lower " +
 		"the per-payment limit first.",

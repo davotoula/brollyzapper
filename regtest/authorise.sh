@@ -75,6 +75,30 @@ guardctl_op() {
     -v "$WORK/guardctl:/guardctl:ro" "$TOOL_IMAGE" /guardctl "$@"
 }
 
+# code_file — "present", "absent", or "unreadable: …", never an exit status
+# (`0vk.54`).
+#
+# A WORD RATHER THAN A STATUS, because this script already explains in section 2
+# why an assertion built on a container's exit code reports a pass whenever the
+# container fails to run at all. A third answer for "it failed for some other
+# reason" is what keeps a broken stack from reading as an absent file.
+#
+# THROUGH guardctl, NOT A PATH TYPED IN SHELL. The first version ran `[ -e
+# /guard/authorisation.txt ]` directly, and guard.AuthorisationFile exists
+# precisely to stop that: its own doc records that the name had been re-typed at
+# four sites and that renaming it would compile cleanly and fail at regtest
+# runtime. A shell literal is worse than those four — it would print "absent"
+# forever after a rename, and both assertions below would pass having observed
+# nothing. read-code goes through the constant. Found by review.
+code_file() {
+  local err
+  err=$(guardctl_op read-code 2>&1) && { echo present; return; }
+  case "$err" in
+    *"no such file"*) echo absent ;;
+    *) echo "unreadable: $err" ;;
+  esac
+}
+
 latched()  { guardctl status | jq -r '.sending_latched // false'; }
 pending()  { guardctl status | jq -r '.authorisation_pending // false'; }
 window()   { guardctl status | jq -r '.spend_limit_msat // 0'; }
@@ -175,6 +199,12 @@ case "$FILE" in
   *"TURN SENDING ON"*) : ;;
   *) die "the authorisation file does not say what is being authorised; it is the one account of the pending change the server did not write, and it is the only reason typing the code is safe" ;;
 esac
+# THE POSITIVE CONTROL for the two "absent" assertions in sections 3 and 4
+# (`0vk.54`). A helper that answered "absent" unconditionally — because the
+# volume name changed, or read-code started failing for its own reasons — would
+# make both of them pass having observed nothing. This is the one point in the
+# script where a live code is known to exist.
+[ "$(code_file)" = "present" ] || die "the code file is not readable through guardctl while a grant is live, so the absence checks below would prove nothing: $(code_file)"
 ok "the operator can read it, and it says what is being authorised"
 
 # ---------------------------------------------------------------------------
@@ -187,7 +217,14 @@ for attempt in 1 2 3; do
 done
 [ "$(latched)" = "false" ] || die "sending was latched by a run of wrong codes"
 [ "$(pending)" = "false" ] || die "the grant survived the attempt bound; it stays a standing target for the one attacker with unlimited local tries"
-ok "three wrong codes changed nothing and spent the grant"
+# AND THE FILE GOES WITH THE GRANT (`0vk.54`). The 0.1.20-rc1 trip found a code
+# file that had outlived its grant and two container recreates, which made "is
+# the file absent?" unanswerable — the trip had to fall back to comparing mtimes
+# to verify `pou`. The file's presence means exactly "a live code exists", and
+# this is the half of that invariant a suite with no control over the clock can
+# assert. The EXPIRY half needs a 10-minute TTL to pass and is left to the box.
+[ "$(code_file)" = "absent" ] || die "the code file outlived the grant the attempt bound spent; its presence is supposed to mean a live code exists"
+ok "three wrong codes changed nothing and spent the grant, file and all"
 
 # ---------------------------------------------------------------------------
 say "4. the operator's code turns sending on"
@@ -198,6 +235,7 @@ note "the operator read a code out of the guard's own file"
 guardctl apply sending on "$CODE" || die "the guard refused the code it had just written"
 [ "$(latched)" = "true" ] || die "the latch is still off after a completed ceremony"
 [ "$(pending)" = "false" ] || die "the grant was not consumed on use; a captured code would work twice"
+[ "$(code_file)" = "absent" ] || die "the code file survived the ceremony that consumed it; the next operator to look cannot tell a live code from a spent one"
 guardctl bake-spend || die "the bake was still refused after the ceremony"
 ok "sending is on, and the spend macaroon is baked"
 

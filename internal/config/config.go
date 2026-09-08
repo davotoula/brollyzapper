@@ -210,10 +210,25 @@ func LoadGuard(env Lookup) (*Guard, error) {
 	// zero is settled where it is enforced rather than refused here: refusing
 	// would be a crash loop over a setting, and §19 is degraded over dead.
 	//
-	// A per-payment cap above the window cap is unenforceable and always a
-	// mistake; §6 has the window as the outer bound.
+	// A per-payment cap above the 24-hour limit is unenforceable and always a
+	// mistake; §6 has the 24-hour limit as the outer bound.
+	//
+	// "24-HOUR LIMIT", NOT "WINDOW CAP" (`eht`). Every other surface an operator
+	// or deployer reads says 24-hour limit — the guard's own refusal, the Sending
+	// page, MANUAL.html, OPERATING.md — and "window cap" appeared nowhere but
+	// here, leaving whoever hit it to map GUARD_MAX_SPEND_MSAT to a phrase and
+	// the phrase to a limit, unaided.
+	//
+	// MSAT AND THE GUARD_MAX_* NAMES STAY, deliberately: this line is read by
+	// whoever is editing the compose file, where those are the actual names and
+	// the actual units, not by an operator on a page §9 renders in whole sats.
+	//
+	// AND IT STILL OFFERS NO REMEDY, which is right and is NOT the 8vj defect:
+	// both variables arrive together at start-up, so there is no control being
+	// edited and no direction to get wrong. Naming one to change would be picking
+	// for the deployer.
 	if p.ok("GUARD_MAX_PAYMENT_MSAT") && p.ok("GUARD_MAX_SPEND_MSAT") && cfg.MaxPaymentMsat > cfg.MaxSpendMsat {
-		p.fail("GUARD_MAX_PAYMENT_MSAT", "%d exceeds GUARD_MAX_SPEND_MSAT (%d); the per-payment cap cannot be above the window cap",
+		p.fail("GUARD_MAX_PAYMENT_MSAT", "%d exceeds GUARD_MAX_SPEND_MSAT (%d); the per-payment cap cannot be above the 24-hour limit",
 			cfg.MaxPaymentMsat, cfg.MaxSpendMsat)
 	}
 	if err := p.err(); err != nil {
