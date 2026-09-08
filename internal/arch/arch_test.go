@@ -5919,7 +5919,7 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 			t.Fatalf("reading %s: %v", doc, err)
 		}
 		// Whitespace-normalised and case-folded. Prose wraps and the guard's
-		// string does not — every one of these three has the phrase broken across
+		// string does not — every one of these four has the phrase broken across
 		// a line — and folding case means a document that opens a sentence with
 		// the remedy is not failed for capitalising it.
 		flat := strings.ToLower(strings.Join(strings.Fields(string(body)), " "))
@@ -6000,7 +6000,7 @@ func commonSuffix(a, b string) string {
 }
 
 // leadInWindow is how much text before a remedy the rule keeps, and
-// minSharedClause is how much of it the three documents must have in common.
+// minSharedClause is how much of it the four surfaces must have in common.
 //
 // EXPIRY CONDITION: the window has to be long enough to reach past the scenario
 // clause that distinguishes the two remedies, and the minimum long enough that
