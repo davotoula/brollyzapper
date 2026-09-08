@@ -299,10 +299,26 @@ var ErrorKinds = []ErrorKind{KindCapPair}
 // process or one across a unix socket. Two types would be two answers.
 type Refusal struct {
 	Kind ErrorKind
-	Err  error
+	// Err is the refusal itself and MUST NOT be nil — a Refusal is a kind
+	// attached to a reason, never a kind on its own. The field is exported
+	// because tests in other packages build one to stand in for the guard.
+	Err error
 }
 
-func (r *Refusal) Error() string { return r.Err.Error() }
+// Error DEGRADES RATHER THAN PANICS on a Refusal built without its Err.
+//
+// The invariant above is what every construction site keeps, and this is what
+// happens if one stops: r.Err.Error() on a nil Err panics, and the process it
+// panics in is the GUARD — the one holding admin.macaroon, with no listener
+// anyone can restart it through. A refusal that reads oddly in a log is a
+// defect; a guard that dies while formatting one takes credential brokering
+// down with it. Found by review, which also confirmed no live path reaches it.
+func (r *Refusal) Error() string {
+	if r.Err == nil {
+		return "guard: refused (" + string(r.Kind) + "), with no reason recorded"
+	}
+	return r.Err.Error()
+}
 
 func (r *Refusal) Unwrap() error { return r.Err }
 

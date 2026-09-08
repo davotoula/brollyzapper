@@ -1147,3 +1147,28 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 		}
 	}
 }
+
+// A Refusal built without its reason must not take the guard down.
+//
+// Err is exported and documented as required, which is a rule a future caller
+// can break — a shortcut for "a kind with nothing to add" is the plausible one.
+// The cost of breaking it is not a bad message: err.Error() is called on the
+// dispatch path, inside the process that holds admin.macaroon and exposes no
+// listener anyone could restart it through, so the panic would end credential
+// brokering for the install. Found by review, which confirmed no live path
+// reaches it today; this is what keeps that true.
+func TestARefusalWithNoReasonDoesNotPanic(t *testing.T) {
+	var refusal error = &guard.Refusal{Kind: guard.KindCapPair}
+	got := refusal.Error()
+	if got == "" {
+		t.Error("a Refusal with no reason renders nothing at all")
+	}
+	if !strings.Contains(got, string(guard.KindCapPair)) {
+		t.Errorf("the refusal reads %q and does not name its kind, which is the only thing "+
+			"it has left to say", got)
+	}
+	// And the kind still survives, because that is the half the page acts on.
+	if guard.KindOf(refusal) != guard.KindCapPair {
+		t.Error("a Refusal with no reason lost its kind")
+	}
+}
