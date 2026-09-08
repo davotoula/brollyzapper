@@ -226,7 +226,8 @@ var capPairFlashes = map[guard.Control]string{
 // from putting it in a log line or a URL — which §11 forbids and this page's own
 // design goes to some length to prevent.
 func refusalFlash(err error, control guard.Control, codeTyped bool) string {
-	if guard.KindOf(err) == guard.KindCapPair {
+	kind := guard.KindOf(err)
+	if kind == guard.KindCapPair {
 		if marker, ok := capPairFlashes[control]; ok {
 			return marker
 		}
@@ -234,7 +235,7 @@ func refusalFlash(err error, control guard.Control, codeTyped bool) string {
 	if codeTyped {
 		return "code_refused"
 	}
-	if guard.KindOf(err) == guard.KindAuthorisationRequired {
+	if kind == guard.KindAuthorisationRequired {
 		return "authorisation_required"
 	}
 	return "refused"

@@ -1143,7 +1143,9 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 			Change: &guard.Change{Control: guard.ControlPaymentCap, Msat: 80_000}}),
 	} {
 		if resp.Error == "" {
-			t.Fatalf("a cap-pair violation was accepted: %+v", resp)
+			t.Fatalf("a refusal this test relies on did not happen: %+v. Two of these are "+
+				"cap-pair violations and the third is a loosening with nothing to redeem; "+
+				"whichever it is, no kind was raised and the check below proves nothing", resp)
 		}
 		raised[resp.ErrorKind] = true
 	}

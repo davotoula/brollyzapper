@@ -123,7 +123,10 @@ func TestTheBinarySweepsAnExpiredAuthorisationAtStartup(t *testing.T) {
 	if err := aged.Close(); err != nil {
 		t.Fatal(err)
 	}
-	codeFile := filepath.Join(cfg.DataDir, "authorisation.txt")
+	// guard.AuthorisationFile, not the literal: its own doc says it was exported
+	// because the name had been re-typed at four sites and a rename would have
+	// compiled cleanly and failed at regtest runtime.
+	codeFile := filepath.Join(cfg.DataDir, guard.AuthorisationFile)
 	if _, err := os.Stat(codeFile); err != nil {
 		t.Fatalf("the ceremony wrote no code file, so this test would sweep nothing: %v", err)
 	}

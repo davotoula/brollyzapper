@@ -75,17 +75,28 @@ guardctl_op() {
     -v "$WORK/guardctl:/guardctl:ro" "$TOOL_IMAGE" /guardctl "$@"
 }
 
-# code_file — "present" or "absent", never an exit status (`0vk.54`).
+# code_file — "present", "absent", or "unreadable: …", never an exit status
+# (`0vk.54`).
 #
-# NOT `docker run ... test -e`, and this script already explains why in section
-# 2: an assertion built on a container's exit status reports a pass whenever the
-# container fails to run at all. This prints a word, so a broken invocation
-# prints neither and the comparison fails rather than passing backwards. Its own
-# positive control is that section 2 reads the file's CONTENT through the same
-# volume, so "absent" cannot be a mount that was never there.
+# A WORD RATHER THAN A STATUS, because this script already explains in section 2
+# why an assertion built on a container's exit code reports a pass whenever the
+# container fails to run at all. A third answer for "it failed for some other
+# reason" is what keeps a broken stack from reading as an absent file.
+#
+# THROUGH guardctl, NOT A PATH TYPED IN SHELL. The first version ran `[ -e
+# /guard/authorisation.txt ]` directly, and guard.AuthorisationFile exists
+# precisely to stop that: its own doc records that the name had been re-typed at
+# four sites and that renaming it would compile cleanly and fail at regtest
+# runtime. A shell literal is worse than those four — it would print "absent"
+# forever after a rename, and both assertions below would pass having observed
+# nothing. read-code goes through the constant. Found by review.
 code_file() {
-  docker run --rm -v "$GUARD_DATA_VOLUME:/guard:ro" "$TOOL_IMAGE" \
-    sh -c '[ -e /guard/authorisation.txt ] && echo present || echo absent'
+  local err
+  err=$(guardctl_op read-code 2>&1) && { echo present; return; }
+  case "$err" in
+    *"no such file"*) echo absent ;;
+    *) echo "unreadable: $err" ;;
+  esac
 }
 
 latched()  { guardctl status | jq -r '.sending_latched // false'; }
@@ -188,6 +199,12 @@ case "$FILE" in
   *"TURN SENDING ON"*) : ;;
   *) die "the authorisation file does not say what is being authorised; it is the one account of the pending change the server did not write, and it is the only reason typing the code is safe" ;;
 esac
+# THE POSITIVE CONTROL for the two "absent" assertions in sections 3 and 4
+# (`0vk.54`). A helper that answered "absent" unconditionally — because the
+# volume name changed, or read-code started failing for its own reasons — would
+# make both of them pass having observed nothing. This is the one point in the
+# script where a live code is known to exist.
+[ "$(code_file)" = "present" ] || die "the code file is not readable through guardctl while a grant is live, so the absence checks below would prove nothing: $(code_file)"
 ok "the operator can read it, and it says what is being authorised"
 
 # ---------------------------------------------------------------------------

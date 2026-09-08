@@ -625,16 +625,24 @@ func (g *Guard) nodeForgotReceiveKey(ctx context.Context, rootKeyID uint64) bool
 // needing macaroon:read is answered here, because the server's own macaroons do
 // not have it, by design (§6).
 func (g *Guard) Status(ctx context.Context) (Status, error) {
-	// FIRST, so the state read below is the swept one (`0vk.54`). Status is
-	// polled every few seconds by the server, which makes it the route by which
-	// a grant nobody came back for actually gets cleared — no timer, no
-	// background goroutine, and no window in which the report and the disk
-	// disagree. It writes nothing when there is nothing to sweep.
-	g.SweepExpiredAuthorisation(ctx)
 	state, err := g.state.load()
 	if err != nil {
 		return Status{}, err
 	}
+	// AND THE SWEEP RIDES ON THIS CALL (`0vk.54`), which is what clears a grant
+	// nobody came back for without a timer or a background goroutine.
+	//
+	// HOW LONG THAT TAKES, stated properly because it is the whole justification
+	// and the first version of this comment was wrong by two orders of magnitude:
+	// runGuardEvents polls the guard every five minutes (guardEventInterval), and
+	// a page render asks at most once per NodeStatusTTL — ten seconds — while
+	// somebody actually has the admin UI open. So an expired grant's file is gone
+	// within five minutes of its expiry unattended, and within ten seconds of it
+	// while an operator is looking, against a ten-minute TTL. Found by review.
+	//
+	// It takes the state ALREADY LOADED above rather than reading the file a
+	// second time, and hands back the version it leaves behind.
+	state = g.sweepExpired(ctx, state)
 	status := Status{
 		ReceiveMacaroonPresent: g.credentialExists(lnd.ReceiveMacaroon),
 		SpendMacaroonPresent:   g.credentialExists(lnd.SpendMacaroon),

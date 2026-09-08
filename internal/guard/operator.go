@@ -241,15 +241,22 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	if err := change.valid(); err != nil {
 		return err
 	}
-	// A timed-out grant is cleared before this one supersedes it (`0vk.54`), so
-	// the trail records the expiry as an expiry. Without it the row this call
-	// overwrites would simply vanish, and §12 would answer "what happened to that
-	// authorisation" with silence for every grant an operator abandoned.
-	g.SweepExpiredAuthorisation(ctx)
 	state, err := g.state.load()
 	if err != nil {
 		return err
 	}
+	// A timed-out grant is cleared before this one supersedes it (`0vk.54`), so
+	// the trail records an abandoned grant's expiry as an expiry rather than
+	// letting the overwrite below swallow it.
+	//
+	// ONLY THE EXPIRED HALF. Superseding a LIVE grant — an operator who asks for
+	// a code, does not use it, and asks again inside the TTL — still writes no
+	// discard row, so §12 cannot answer "what happened to that one" for that
+	// path. That is a gap this call does not close and does not pretend to; it is
+	// filed rather than fixed here, because auditing supersession means a new
+	// outcome word in the trail, which is a decision about §12's vocabulary.
+	// Found by review, which caught this comment claiming the whole of it.
+	state = g.sweepExpired(ctx, state)
 	if !state.loosens(change) {
 		// Refused rather than issued. A grant for a change that needs none would
 		// teach the operator that the ceremony is a formality they perform for
@@ -526,24 +533,11 @@ func (g *Guard) redeem(ctx context.Context, state State, change Change, code str
 // code file absent?" stopped being an answerable question, so the trip had to
 // verify `pou` by comparing mtimes instead.
 //
-// BOTH HALVES OR NEITHER, which is what makes discardAuthorisation the right
-// callee rather than a bare file removal: clearing the file and leaving the row
-// would make Status and the disk disagree, and the next RequestAuthorisation
-// would supersede a grant nothing can redeem.
-//
-// IT REUSES redeem's OWN WORD, "expired". The trail already says that when a
-// returning operator is refused; this is the same fact observed by a different
-// route, and a second vocabulary for it would make §12's answer depend on who
-// happened to look.
-//
-// IDEMPOTENT AND SILENT when there is nothing to sweep — no state write, no
-// audit row, no log line — which is what lets it sit at the top of the polled
-// Status without costing anything or filling the trail.
-//
-// IT RETURNS NOTHING. A load that fails here is not this call's business: every
-// caller is about to load the state itself and report that failure properly, and
-// an error return would invite a caller to abandon its own operation because a
-// housekeeping read went wrong.
+// THIS IS THE ENTRY POINT FOR A CALLER WITH NO STATE IN HAND, which is start-up
+// and nothing else. Everything inside the guard has just loaded the state and
+// calls sweepExpired with it, because stateStore.load is a file read and a
+// parse, and doing it twice on the same call would also produce two error
+// reports for one unreadable file.
 func (g *Guard) SweepExpiredAuthorisation(ctx context.Context) {
 	state, err := g.state.load()
 	if err != nil {
@@ -551,11 +545,47 @@ func (g *Guard) SweepExpiredAuthorisation(ctx context.Context) {
 			"error", err.Error())
 		return
 	}
+	g.sweepExpired(ctx, state)
+}
+
+// sweepExpired discards state's grant if it has timed out, and returns the state
+// as it now stands.
+//
+// BOTH HALVES OR NEITHER, which is why this clears the row through
+// consumeAuthorisation rather than removing the file: clearing the file and
+// leaving the row would make Status and the disk disagree, and the next
+// RequestAuthorisation would supersede a grant nothing can redeem.
+//
+// IT REUSES redeem's OWN WORD, "expired". The trail already says that when a
+// returning operator is refused; this is the same fact observed by a different
+// route, and a second vocabulary for it would make §12's answer depend on who
+// happened to look.
+//
+// NOTHING IS AUDITED IF THE WRITE FAILED, and that is not tidiness — it is what
+// keeps a stuck sweep from eating the trail. discardAuthorisation raises its row
+// whether or not the state write succeeded, which is right for redeem: that is
+// one operator action, and it happened. This runs on a POLL, so a state file
+// that cannot be written turns one failure into a row every five minutes,
+// forever — and auditAuthorisationBound is eight rows an hour, so the loop would
+// evict the ceremony events an operator actually needs. A grant the guard failed
+// to clear was not discarded, and the trail should not say it was. Found by
+// review.
+//
+// IDEMPOTENT AND SILENT when there is nothing to sweep — no state write, no
+// audit row, no log line — which is what lets it sit on the polled path.
+func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 	grant := state.Authorisation
 	if grant == nil || !grant.expired(g.rotation.clock()) {
-		return
+		return state
 	}
-	g.discardAuthorisation(ctx, grant.Change, "expired")
+	if err := g.consumeAuthorisation(); err != nil {
+		g.log.Warn("could not clear an expired authorisation", "error", err.Error())
+		return state
+	}
+	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded",
+		grant.Change, discarded("expired"))
+	state.Authorisation = nil
+	return state
 }
 
 // discardAuthorisation ends a grant that will not be honoured, and says why.

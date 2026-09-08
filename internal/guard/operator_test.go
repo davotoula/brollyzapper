@@ -1,7 +1,9 @@
 package guard_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -421,11 +423,8 @@ func render(t *testing.T, v any) string {
 	return string(raw)
 }
 
-// spendLimit reads the window cap back through the guard's own Status, which is
-// the only account of it the rest of the system ever sees.
 // storedCaps is the PAIR the guard has stored, which is the unit §6's outer
-// bound is about — spendLimit alone cannot see a refusal that moved the other
-// one.
+// bound is about — one number cannot see a refusal that moved the other.
 func storedCaps(t *testing.T, g *guard.Guard) caps {
 	t.Helper()
 	status, err := g.Status(t.Context())
@@ -435,13 +434,11 @@ func storedCaps(t *testing.T, g *guard.Guard) caps {
 	return caps{window: status.SpendLimitMsat, payment: status.MaxPaymentMsat}
 }
 
+// spendLimit reads the window cap back through the guard's own Status, which is
+// the only account of it the rest of the system ever sees.
 func spendLimit(t *testing.T, g *guard.Guard) int64 {
 	t.Helper()
-	status, err := g.Status(t.Context())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	return status.SpendLimitMsat
+	return storedCaps(t, g).window
 }
 
 // sendPaymentOf builds the interception LND would make for a payment of msat.
@@ -489,36 +486,39 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 		change  guard.Change
 		want    string
 		notWant string
-		// NOTHING MOVED (`l4g`). The refusal is only half the guarantee: a guard
-		// that said the right sentence and wrote the change anyway would leave
-		// the very pair this check exists to prevent. Stated per case rather
-		// than once, so a row added with a different fixture has to say what it
-		// expects instead of inheriting an assertion about someone else's
-		// numbers.
-		unchanged caps
+		// THE CAPS THIS CASE STARTS WITH — and, because the change is refused,
+		// the caps it must still have afterwards (`l4g`).
+		//
+		// ONE FIELD FOR BOTH, so neither can drift into being a second copy of
+		// the other. The refusal is only half the guarantee: a guard that said
+		// the right sentence and wrote the change anyway would leave the very
+		// pair this check exists to prevent. Per case rather than hoisted, so a
+		// row needing different numbers states them once and gets the fixture
+		// and the assertion from the same field.
+		fixture caps
 	}{{
 		// TIGHTENING, and the case from the box. It needs no code, and it is
 		// refused anyway — correctly — so the message is the operator's only
 		// signal about what to do next.
-		name:      "lowering the 24-hour window below the standing per-payment cap",
-		change:    guard.Change{Control: guard.ControlSpendCap, Msat: 40_000},
-		want:      "a per-payment limit of 50 sats is above the 24-hour limit of 40 sats, so it could never be reached; lower the per-payment limit first",
-		notWant:   "24-hour limit first",
-		unchanged: caps{window: 100_000, payment: 50_000},
+		name:    "lowering the 24-hour window below the standing per-payment cap",
+		change:  guard.Change{Control: guard.ControlSpendCap, Msat: 40_000},
+		want:    "a per-payment limit of 50 sats is above the 24-hour limit of 40 sats, so it could never be reached; lower the per-payment limit first",
+		notWant: "24-hour limit first",
+		fixture: caps{window: 100_000, payment: 50_000},
 	}, {
 		// LOOSENING, and the direction the old message was written for. It is
 		// refused by the cap-pair check BEFORE the authorisation check, which is
 		// why an empty code reaches this error rather than errAuthorisationRequired.
-		name:      "raising the per-payment cap above the standing 24-hour window",
-		change:    guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
-		want:      "a per-payment limit of 150 sats is above the 24-hour limit of 100 sats, so it could never be reached; raise the 24-hour limit first",
-		notWant:   "per-payment limit first",
-		unchanged: caps{window: 100_000, payment: 50_000},
+		name:    "raising the per-payment cap above the standing 24-hour window",
+		change:  guard.Change{Control: guard.ControlPaymentCap, Msat: 150_000},
+		want:    "a per-payment limit of 150 sats is above the 24-hour limit of 100 sats, so it could never be reached; raise the 24-hour limit first",
+		notWant: "per-payment limit first",
+		fixture: caps{window: 100_000, payment: 50_000},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
 			d := guardDirs(t, node)
-			g := openGuardWithCaps(t, node, d, caps{window: 100_000, payment: 50_000})
+			g := openGuardWithCaps(t, node, d, tc.fixture)
 
 			err := g.ApplyChange(t.Context(), tc.change, "")
 			if err == nil {
@@ -536,10 +536,11 @@ func TestTheCapPairRefusalNamesTheControlTheOperatorIsNotEditing(t *testing.T) {
 			// BOTH CAPS, not only the one being edited: a refusal that moved the
 			// OTHER control would leave exactly the inconsistent pair §6's outer
 			// bound exists to forbid, and checking one number cannot see it.
-			if stored := storedCaps(t, g); stored != tc.unchanged {
-				t.Errorf("the caps are %+v after a REFUSED change, want %+v; the guard said no "+
-					"and wrote anyway, so the per-payment limit can never be reached and the "+
-					"page states a number that means nothing", stored, tc.unchanged)
+			if stored := storedCaps(t, g); stored != tc.fixture {
+				t.Errorf("the caps are %+v after a REFUSED change, want the fixture %+v "+
+					"untouched; the guard said no and wrote anyway, so the per-payment limit "+
+					"can never be reached and the page states a number that means nothing",
+					stored, tc.fixture)
 			}
 		})
 	}
@@ -813,8 +814,11 @@ func TestAGrantThatExpiresUnattendedIsSweptAway(t *testing.T) {
 	}
 	clock.now = status.AuthorisationExpiresAt
 
-	// The polled Status is the route this takes in production: the server asks
-	// for it every few seconds, and nothing else has to run on a timer.
+	// The Status call is the route this takes in production: runGuardEvents polls
+	// the guard every five minutes and a page render asks at most every ten
+	// seconds while somebody is looking, so nothing has to run on a timer of its
+	// own. (The first version of this comment said "every few seconds", which was
+	// wrong by two orders of magnitude — found by review.)
 	events := g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events
 
 	if _, err := os.Stat(filepath.Join(d.data, "authorisation.txt")); !os.IsNotExist(err) {
@@ -837,7 +841,6 @@ func TestAGrantThatExpiresUnattendedIsSweptAway(t *testing.T) {
 			"authorisation whose code the operator cannot read, and the next request " +
 			"would supersede something rather than start clean")
 	}
-	clock.now = status.AuthorisationExpiresAt
 	var outcomes []string
 	for _, event := range events {
 		if event.Event == logging.EventGuardAuthorise {
@@ -863,8 +866,10 @@ func TestAGrantThatExpiresUnattendedIsSweptAway(t *testing.T) {
 func TestALiveGrantSurvivesARestart(t *testing.T) {
 	node := lndtest.Start(t)
 	d := guardDirs(t, node)
-	clock := &testClock{now: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
-	g := openGuardFull(t, node, d, guard.Options{Now: clock.Now}, serverAddr(), true)
+	// A FIXED "now", not a testClock: nothing here advances time, and the whole
+	// point is that a grant which has NOT expired survives.
+	now := func() time.Time { return time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC) }
+	g := openGuardFull(t, node, d, guard.Options{Now: now}, serverAddr(), true)
 	change := guard.Change{Control: guard.ControlSending, On: true}
 	if err := g.RequestAuthorisation(t.Context(), change); err != nil {
 		t.Fatal(err)
@@ -873,7 +878,7 @@ func TestALiveGrantSurvivesARestart(t *testing.T) {
 
 	// The restart: a second guard over the same volumes, which is what a
 	// container recreate is.
-	restarted := openGuardFull(t, node, d, guard.Options{Now: clock.Now}, serverAddr(), true)
+	restarted := openGuardFull(t, node, d, guard.Options{Now: now}, serverAddr(), true)
 	restarted.SweepExpiredAuthorisation(t.Context())
 
 	if _, err := os.Stat(filepath.Join(d.data, "authorisation.txt")); err != nil {
@@ -923,5 +928,83 @@ func TestAnApplyTimeCapPairRefusalLeavesTheGrantAlone(t *testing.T) {
 	if !status.AuthorisationPending {
 		t.Error("the grant is gone after a refusal that did not consume it; the operator " +
 			"has to walk the whole ceremony again to make a change the guard would accept")
+	}
+}
+
+// A sweep whose state write fails does not claim it discarded anything
+// (`0vk.54`).
+//
+// discardAuthorisation raises its row whether or not the write succeeded, which
+// is right for redeem — that is one operator action and it happened. The sweep
+// runs on the POLLED path, so the same behaviour turns one unwritable state file
+// into an attempt every five minutes, forever: auditAuthorisation draws on
+// authoriseBudget BEFORE it writes, so each attempt spends one of the eight
+// rows an hour that bound reserves for the events an operator actually needs.
+// And the claim would be false — a grant the guard failed to clear is still in
+// the state file and still redeemable.
+//
+// ASSERTED ON THE LOG, NOT THE TRAIL, and the first version of this test got
+// that wrong: Guard.audit persists each event through g.state.update, which is
+// the very write that has just failed, so the row never reaches
+// Response.Events either way and the assertion passed against the defect. The
+// log line is written before that, unconditionally, so it is the one place the
+// two behaviours differ. Found by planting the defect and watching the test
+// stay green.
+func TestASweepThatCannotWriteClaimsNothing(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
+	var logged bytes.Buffer
+	g := openGuardFull(t, node, d, guard.Options{
+		Now: clock.Now,
+		Log: logging.New(&logged, logging.NewLevelVar(slog.LevelDebug)),
+	}, serverAddr(), true)
+	change := guard.Change{Control: guard.ControlSending, On: true}
+	if err := g.RequestAuthorisation(t.Context(), change); err != nil {
+		t.Fatal(err)
+	}
+	status, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.AuthorisationPending {
+		t.Fatal("no grant is pending, so this test would sweep nothing and pass")
+	}
+	clock.now = status.AuthorisationExpiresAt
+	logged.Reset()
+
+	// The state file's DIRECTORY, made unwritable: stateStore.saveLocked writes
+	// beside the state and renames, so this is what a read-only volume or a full
+	// disk looks like from inside the guard.
+	if err := os.Chmod(d.data, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	g.SweepExpiredAuthorisation(t.Context())
+	if err := os.Chmod(d.data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// THE POSITIVE CONTROL, without which this proves nothing: if the write in
+	// fact succeeded there was never a discard to suppress. The clock is wound
+	// back because Status masks an expired grant whether or not it was swept.
+	clock.now = status.AuthorisationExpiresAt.Add(-time.Minute)
+	after, err := g.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.AuthorisationPending {
+		t.Skip("the guard cleared the grant with its data directory at 0500, so this test " +
+			"cannot create the failure it is about (running as root?)")
+	}
+
+	if !strings.Contains(logged.String(), "could not clear an expired authorisation") {
+		t.Errorf("the sweep failed silently; the log has to say why a code file is still "+
+			"there:\n%s", logged.String())
+	}
+	if strings.Contains(logged.String(), "an authorisation was discarded") {
+		t.Errorf("a sweep that could not write said it discarded the grant. The grant is "+
+			"still in the state file and still redeemable, so the claim is false — and on "+
+			"the polled path it is one authoriseBudget slot every five minutes, spent on a "+
+			"row that never lands:\n%s", logged.String())
 	}
 }

@@ -413,28 +413,15 @@ func TestACapPairRefusalTellsTheOperatorWhichLimitToMove(t *testing.T) {
 	}
 }
 
-// A genuine bad code still says a code was not accepted (`0vk.53`).
+// TestARefusalWithNoKindStillShowsTheCodeMessage STOOD HERE (`0vk.55`).
 //
-// The anti-vacuity half: a fix that redirected every refusal to the new cap-pair
-// flash would satisfy the test above and lose the message the ceremony actually
-// needs.
-func TestARefusalWithNoKindStillShowsTheCodeMessage(t *testing.T) {
-	g := &fakeGuard{
-		authoriseErr: errors.New("guard: that is not a loosening"),
-		applyErr:     errors.New("guard: that code is not the one that was written"),
-	}
-	h := newHarness(t, func(opts *api.ServerOptions, _ *store.Store) { opts.Guard = g })
-	cookie := h.login(t)
-
-	rec := h.postForm(t, "/sending/caps", cookie, url.Values{
-		"control": {"spend_cap"}, "sats": {"40000"}, "code": {"123456"},
-	})
-
-	if location := rec.Header().Get("Location"); !strings.Contains(location, "flash=code_refused") {
-		t.Errorf("the redirect is %q, want code_refused; a mistyped code is still the "+
-			"commonest way this ceremony fails and the page has to say so", location)
-	}
-}
+// It drove the identical fixture, form and code as the "a code was typed and
+// refused" row of the table below, and asserted less: only the marker, not that
+// the marker renders anything. The row states that job in its own comment. The
+// name is kept here because it was the anti-vacuity guarantee for `0vk.53` — a
+// fix that sent every refusal to the new flash would have satisfied that bead's
+// other test and lost the ceremony's own message — and a reader coming to check
+// that guarantee still holds should find where it went.
 
 // A refusal the operator typed no code for does not claim a code was refused
 // (`0vk.55`).
@@ -480,6 +467,21 @@ func TestARefusalIsToldApartByWhetherACodeWasTyped(t *testing.T) {
 		applyErr: errors.New("guard: that code is not the one that was written"),
 		want:     "code_refused",
 		notWant:  "see the log for why",
+	}, {
+		// THE FOURTH CELL of the (kind × code typed) matrix, which the three
+		// rows above leave out: an operator types a code and the guard says the
+		// change needs one — their grant was swept, consumed, or superseded
+		// while they were reading it. code_refused is right, because it already
+		// covers "expired, already used, or written for a different change" and
+		// tells them to ask for a new one. It is also the row that would change
+		// silently if the branches in refusalFlash were reordered, which is the
+		// only reason this cell resolves the way it does. Found by review.
+		name: "a code was typed and the guard says the change needs one",
+		code: "123456",
+		applyErr: &guard.Refusal{Kind: guard.KindAuthorisationRequired,
+			Err: errors.New("guard: this change needs an authorisation code")},
+		want:    "code_refused",
+		notWant: "Save it again with the code box empty",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &fakeGuard{
