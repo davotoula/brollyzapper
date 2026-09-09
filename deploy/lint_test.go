@@ -266,32 +266,48 @@ var imageRE = regexp.MustCompile(`ghcr\.io/davotoula/brollyzapper(-guard)?:[0-9]
 // previous release — with an operator following a procedure that says nothing
 // is wrong. Equality here makes the pin step update both or go red.
 func TestTheImagesEqualThePackages(t *testing.T) {
-	compose, raw := loadCompose(t)
-	pkg, err := os.ReadFile(packageCompose)
+	compose, _ := loadCompose(t)
+	pkgRaw, err := os.ReadFile(packageCompose)
 	if err != nil {
 		t.Fatalf("reading %s: %v", packageCompose, err)
 	}
-	// Both spellings: the regex over the raw file is what catches a digest written
-	// anywhere, and the parsed field is what proves the two services actually
-	// CARRY one — a file with the images commented out would otherwise match
-	// nothing in both places and compare equal.
+	var pkg composeFile
+	if err := yaml.Unmarshal(pkgRaw, &pkg); err != nil {
+		t.Fatalf("parsing %s: %v", packageCompose, err)
+	}
+
+	// PER SERVICE, NOT AS A SET. The first version pulled every digest-pinned
+	// reference out of each file's raw text and compared the two sorted sets —
+	// which is blind to the one edit that matters most here: swap the two image
+	// lines, so the server runs the guard's binary and the guard the server's,
+	// and both files still yield the same two strings in the same sorted order.
+	// The go-review pass reproduced that. The service is the unit, because the
+	// guard/server split is what §3 is.
 	for _, name := range []string{"guard", "server"} {
-		if !imageRE.MatchString(compose.Services[name].Image) {
-			t.Errorf("the %s service's image %q is not a digest-pinned ghcr.io reference; a tag "+
-				"alone can be moved under the operator", name, compose.Services[name].Image)
+		mine, theirs := compose.Services[name].Image, pkg.Services[name].Image
+		if !imageRE.MatchString(theirs) {
+			t.Fatalf("the package's %s image is %q, which is not a digest-pinned ghcr.io "+
+				"reference; this check is reading the wrong thing and would compare two "+
+				"empty strings", name, theirs)
+		}
+		if mine != theirs {
+			t.Errorf("the %s service runs a different image from the App Store package.\n"+
+				"  template: %s\n  package:  %s\n"+
+				"A release's pin step must update both, or this template installs the "+
+				"previous release while nothing says so.", name, mine, theirs)
 		}
 	}
-	mine := imageRE.FindAllString(raw, -1)
-	theirs := imageRE.FindAllString(string(pkg), -1)
-	slices.Sort(mine)
-	slices.Sort(theirs)
-	if len(theirs) != 2 {
-		t.Fatalf("found %d pinned images in %s, want 2; this check is reading the wrong "+
-			"thing and would pass whatever this template says", len(theirs), packageCompose)
+
+	// AND THE NAMES ARE NOT INTERCHANGEABLE, asserted separately so that a
+	// package which itself had them swapped could not make the equality above
+	// pass. -guard is the credential broker; the other is all of the attack
+	// surface.
+	if got := compose.Services["guard"].Image; !strings.Contains(got, "brollyzapper-guard:") {
+		t.Errorf("the guard service runs %q, which is not the guard image", got)
 	}
-	if !slices.Equal(mine, theirs) {
-		t.Errorf("the template's images are not the package's.\n  template: %v\n  package:  %v\n"+
-			"A release's pin step must update both", mine, theirs)
+	if got := compose.Services["server"].Image; strings.Contains(got, "-guard:") {
+		t.Errorf("the server service runs %q, which is the GUARD's image — the server would "+
+			"then hold the only container that mounts admin.macaroon (spec §3, §6)", got)
 	}
 }
 
@@ -368,11 +384,46 @@ func TestTheServerHasAFixedAddressAndTheGuardBakesIt(t *testing.T) {
 // from umbrel/lint_test.go because the hazard is the deployment's, not
 // umbrelOS's: mounting LND's data directory whole also exposes wallet.db,
 // macaroons.db and channel.backup.
+// mountSource returns the host side of a compose short-syntax volume.
+//
+// IT CANNOT JUST CUT AT THE FIRST COLON, which is what this did until the
+// mounts gained compose's required-variable form: `${LND_DIR:?...}` puts a colon
+// INSIDE the source, so cutting at the first one yielded "${LND_DIR" and the
+// mount check reported that the guard mounts LND's directory whole — a false
+// alarm on a template that had just been made safer. Blank the interpolations
+// first; what is left has colons only where compose means them.
+func mountSource(volume string) string {
+	var out strings.Builder
+	depth := 0
+	for i := 0; i < len(volume); i++ {
+		switch {
+		case strings.HasPrefix(volume[i:], "${"):
+			depth++
+			out.WriteString("$_")
+			i++
+		case depth > 0 && volume[i] == '}':
+			depth--
+		case depth == 0:
+			out.WriteByte(volume[i])
+		}
+	}
+	source, _, _ := strings.Cut(out.String(), ":")
+	// The blanked form is only for FINDING the boundary; the caller wants the
+	// real text, so map the index back.
+	return volume[:len(volume)-len(out.String())+len(source)]
+}
+
 func TestTheGuardMountsTwoFilesAndNotTheDirectory(t *testing.T) {
 	compose, _ := loadCompose(t)
+	// `${LND_DIR` and not `${LND_DIR}`, because the mounts carry compose's
+	// required-variable form — ${LND_DIR:?...} — so that an .env which never sets
+	// it is refused rather than resolving these sources to the host filesystem
+	// root. Matching the closing brace missed both mounts and reported zero,
+	// which is how this was found: the check went red on a template that was
+	// right, which is the good direction for a matcher to fail in.
 	var fromLND []string
 	for _, v := range compose.Services["guard"].Volumes {
-		if strings.Contains(v, "${LND_DIR}") {
+		if strings.Contains(v, "${LND_DIR") {
 			fromLND = append(fromLND, v)
 		}
 	}
@@ -381,7 +432,7 @@ func TestTheGuardMountsTwoFilesAndNotTheDirectory(t *testing.T) {
 			"admin.macaroon): %v", len(fromLND), fromLND)
 	}
 	for _, v := range fromLND {
-		source, _, _ := strings.Cut(v, ":")
+		source := mountSource(v)
 		if !strings.HasSuffix(source, "tls.cert") && !strings.HasSuffix(source, "admin.macaroon") {
 			t.Errorf("the guard mounts %q out of LND's directory; only tls.cert and "+
 				"admin.macaroon may be mounted, and never the directory itself — it also "+
@@ -400,7 +451,7 @@ func TestTheGuardMountsTwoFilesAndNotTheDirectory(t *testing.T) {
 func TestTheServerNeverSeesAdminMacaroon(t *testing.T) {
 	compose, _ := loadCompose(t)
 	for _, v := range compose.Services["server"].Volumes {
-		if strings.Contains(v, "admin.macaroon") || strings.Contains(v, "${LND_DIR}") {
+		if strings.Contains(v, "admin.macaroon") || strings.Contains(v, "${LND_DIR") {
 			t.Errorf("the server mounts %q; only the guard may see LND's credentials "+
 				"(spec §3, §6, §16)", v)
 		}

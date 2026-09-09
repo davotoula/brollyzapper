@@ -191,8 +191,12 @@ jobs:
       # the only instruction they get, so it must not be the forbidden one.
       - name: the compose file pins real digests
         run: |
-          if grep -q 'sha256:0\{64\}' umbrel/brollyzapper/docker-compose.yml deploy/docker-compose.yml; then
-            echo "A compose file still pins placeholder digests (listed above)."
+          # -l AND NOT -q, so the file that is wrong is named. With two files
+          # checked, "a compose file still pins placeholders" without saying which
+          # is a worse instruction than the single-file one it replaced — and -q
+          # prints nothing at all, so an earlier "(listed above)" was never true.
+          if grep -l 'sha256:0\{64\}' umbrel/brollyzapper/docker-compose.yml deploy/docker-compose.yml; then
+            echo "The compose file(s) named above still pin placeholder digests."
             echo
             echo "Publish from CI, never a laptop. Then pin what the registry actually has:"
             echo "  1. gh workflow run publish.yml -f version=<version>"
