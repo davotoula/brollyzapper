@@ -484,7 +484,7 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 		// messages. So this sentence is read by an operator or a supporter in
 		// `docker logs` and on the Security page, and the remedy below is the one
 		// internal/arch's TestTheCapPairRemediesReadTheSameEverywhere holds the
-		// page's copy — and the Sending hint, MANUAL.html and OPERATING.md — to.
+		// page's copy — and the Sending hint and OPERATING.md — to.
 		return &Refusal{Kind: KindCapPair, Err: fmt.Errorf(
 			"guard: a per-payment limit of %s is above the 24-hour limit of %s, "+
 				"so it could never be reached; %s",

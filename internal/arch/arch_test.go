@@ -5871,7 +5871,7 @@ func (h holder[T]) LogValue() slog.Value { return slog.StringValue(h.Token.Revea
 //
 // THE PROBLEM IT SOLVES IS DRIFT IN ONE DIRECTION. checkCapPair composes the two
 // remedies — "lower the per-payment limit first" and "raise the 24-hour limit
-// first" — and the Sending page, MANUAL.html and OPERATING.md all print the same
+// first" — and the Sending page and OPERATING.md print the same
 // instruction as prose. The hint and the refusal are read minutes apart by the
 // same person, so two wordings for one action is how they become two different
 // instructions.
@@ -5912,7 +5912,6 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 	// two different instructions (`6zd`).
 	docs := []string{
 		"internal/web/templates/sending.html",
-		"MANUAL.html",
 		"OPERATING.md",
 		"internal/api/pages_settings.go",
 	}
@@ -5926,14 +5925,14 @@ func TestTheCapPairRemediesReadTheSameEverywhere(t *testing.T) {
 			t.Fatalf("reading %s: %v", doc, err)
 		}
 		// Whitespace-normalised and case-folded. Prose wraps and the guard's
-		// string does not — every one of these four has the phrase broken across
+		// string does not — every one of these three has the phrase broken across
 		// a line — and folding case means a document that opens a sentence with
 		// the remedy is not failed for capitalising it.
 		flat := strings.ToLower(strings.Join(strings.Fields(string(body)), " "))
 		// AND THE GO SPLICE, for the one entry that is source rather than prose.
 		// gofmt breaks a long message across concatenated literals, so the flash
 		// copy holds `one, " + "lower the per-payment limit first` where the
-		// three documents hold a sentence. Removing the splice makes the copy one
+		// two documents hold a sentence. Removing the splice makes the copy one
 		// string again; the documents contain no such sequence, so this is a
 		// no-op for them.
 		flat = strings.ReplaceAll(flat, `" + "`, "")
@@ -6007,7 +6006,7 @@ func commonSuffix(a, b string) string {
 }
 
 // leadInWindow is how much text before a remedy the rule keeps, and
-// minSharedClause is how much of it the four surfaces must have in common.
+// minSharedClause is how much of it the three surfaces must have in common.
 //
 // EXPIRY CONDITION: the window has to be long enough to reach past the scenario
 // clause that distinguishes the two remedies, and the minimum long enough that

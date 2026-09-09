@@ -85,7 +85,6 @@ are in [`DEPLOYING.md`](DEPLOYING.md), which also covers running outside Umbrel.
 |---|---|
 | [`DEPLOYING.md`](DEPLOYING.md) | Exposing the address (Cloudflare Tunnel, step by step), what is public, running outside Umbrel |
 | [`OPERATING.md`](OPERATING.md) | Every setting and its default, sending and the two caps, backups, macaroon rotation, storage |
-| [`MANUAL.html`](MANUAL.html) | The Settings and Sending pages, field by field, on one page |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Layout, the build and test gate, the architecture rules, how a change lands |
 | [`umbrel/`](umbrel/) | The App Store package and its submission notes |

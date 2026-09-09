@@ -189,7 +189,7 @@ func (s *Server) moveGuardControl(w http.ResponseWriter, r *http.Request, change
 // The copy lives in flashMessages with every other message; this map only
 // chooses. internal/arch's TestTheCapPairRemediesReadTheSameEverywhere is what
 // keeps that copy naming the same control to move as the guard's own remedy
-// does, alongside the Sending hint, MANUAL.html and OPERATING.md — the guard
+// does, alongside the Sending hint and OPERATING.md — the guard
 // decides WHAT the refusal is, this package writes what the operator reads, and
 // neither may drift into contradicting the other.
 var capPairFlashes = map[guard.Control]string{

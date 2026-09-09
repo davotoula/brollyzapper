@@ -187,7 +187,7 @@ func TestLoadGuardRejectsMalformedValues(t *testing.T) {
 // The start-up refusal speaks the vocabulary every other surface speaks (`eht`).
 //
 // "Window cap" appeared here and nowhere else: not in the guard's own cap-pair
-// refusal, not on the Sending page, not in MANUAL.html or OPERATING.md, all of
+// refusal, not on the Sending page, not in OPERATING.md, all of
 // which say "24-hour limit". A deployer who hit this had to map
 // GUARD_MAX_SPEND_MSAT to a phrase they had never seen and that phrase to the
 // limit they had, with nothing connecting them.
