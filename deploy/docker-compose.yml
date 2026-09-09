@@ -1,8 +1,6 @@
 # BrollyZapper beside an LND on the same host, without umbrelOS.
 #
-# THE PROCEDURE IS DEPLOYING.md §Running outside Umbrel: prerequisites, the two
-# lnd.conf edits with the error each one produces when it is missing, what "up"
-# looks like, updating, and the case that is not supported.
+# The full procedure is DEPLOYING.md §Running outside Umbrel.
 #
 # Fill in deploy/.env (copy .env.example) and run:
 #

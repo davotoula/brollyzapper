@@ -192,26 +192,33 @@ The supported template is [`deploy/`](deploy/), and this section is the procedur
 `regtest/docker-compose.yml` is the integration suite's stack — the two services surrounded by a
 test node, a payer and two relays — and is not a deployment.
 
+**Steps 1 to 5 are the install**, done once and in order. Steps 6 to 10 are what you will want
+afterwards, and the two headings without a number — the mount hazard and trusted proxies — are
+background, placed where the decision they inform gets made.
+
 ### 1. Before you start
 
 - **Docker with the compose plugin.** `docker compose version` has to answer; the old
   `docker-compose` script will not do.
 - **An LND on this host that you control**, synced, with its wallet unlocked. The app runs no
   node of its own and will not create one.
+- **A window to restart LND, and to regenerate its TLS certificate**, unless it already answers
+  on a Docker-reachable address with a certificate naming it. Step 4 needs both, and any other
+  client that holds a copy of `tls.cert` — a mobile wallet, RTL, your own `lncli` — needs the new
+  one afterwards. If you cannot do this, stop now rather than at step 4: nothing here works
+  without it.
 - **A non-root user in the `docker` group**, so `docker compose` needs no `sudo`. The containers
   do not run as root either — that is `RUN_AS_UID`, at step 3.
 
-Find LND's data directory: `/home/lnd/.lnd` for a systemd install, `~/.lnd` for a user-run node,
-or whatever host path sits behind its container's `/root/.lnd`. Exactly two **files** are mounted
-out of it, both read-only:
+Find LND's data directory — `/home/lnd/.lnd` for a systemd install, `~/.lnd` for a user-run node,
+or whatever host path sits behind its container's `/root/.lnd` — and note which chain directory
+it uses, `mainnet`, `testnet` or `regtest`. Both go into `.env` at step 3.
 
-| | |
-|---|---|
-| `tls.cert` | the certificate the app verifies the node's gRPC against |
-| `data/chain/bitcoin/<network>/admin.macaroon` | the credential the **guard** holds, and nothing else does |
-
-Note which `<network>` — `mainnet`, `testnet` or `regtest` — you need it at step 3. Before you
-adapt either path, read the hazard immediately below.
+Two **files** come out of that directory, read-only, and only two: `tls.cert`, and
+`data/chain/bitcoin/<network>/admin.macaroon`. Why it is files and not the directory is
+immediately below — written in the Umbrel package's variable names, because the rule and the
+reason are the same wherever the paths come from. In `deploy/` they come from `LND_DIR` and
+`LND_NETWORK`.
 
 ### The single-file mount hazard
 
@@ -233,17 +240,17 @@ only, never the server. The server has no mount for it and cannot read it.
 
 ### 2. Get `deploy/`
 
-Two files are needed — `docker-compose.yml` and `.env.example`. `lint_test.go` beside them is
-this repository's own test and is no part of a deployment.
-
 ```bash
 git clone https://github.com/davotoula/brollyzapper.git
 cd brollyzapper/deploy
 ```
 
-Downloading the two files on their own does just as well. **Nothing is built here.** Both
-`image:` lines name a published image on GHCR pinned by digest, and `docker compose up` pulls
-them.
+Only `docker-compose.yml` and `.env.example` matter — fetching those two on their own does just
+as well, from `raw.githubusercontent.com/davotoula/brollyzapper/main/deploy/`. `lint_test.go`
+beside them is this repository's own test and is no part of a deployment.
+
+**Nothing is built here.** Both `image:` lines name a published image on GHCR pinned by digest,
+and `docker compose up` pulls them.
 
 ### 3. Fill `.env`
 
@@ -260,41 +267,65 @@ list does:
 - **`LND_ADDRESS`** — host and port **as the container will dial it**, which is not how you
   reach LND from a shell on the host. Its comment gives the two shapes; step 4 is what a host
   LND needs before either of them answers.
-- **`LND_NETWORK`** — the `<network>` from step 1, so the macaroon path resolves.
-- **`ADMIN_PASSWORD`** — **set one here, before the first start.** Left empty, the server
-  invents a password on its first run and shows it on `/setup` — which is behind the login, so
-  off Umbrel there is no way to read it and no way in. On umbrelOS the platform supplies the
-  password and displays it itself, which is why leaving it empty is right there and wrong here.
-  Two consequences worth knowing before you choose the value: a later start does **not**
-  re-seed, so filling this in afterwards will not rescue an install that was first started
-  empty; and because the app reads "a password was supplied" as "the platform manages it",
-  **Settings will not offer a password change** — this file stays the password's only home, so
-  keep it `0600` and change the password by editing it here and restarting.
+- **`LND_NETWORK`** — the chain directory from step 1, so the macaroon path resolves.
+- **`ADMIN_PASSWORD`** — the one of the four where empty is *wrong* here. **Set it before the
+  first start:** left empty the server invents a password and shows it only on `/setup`, which
+  is behind the login it would open. Its comment says why that is right on umbrelOS and not
+  here, and what a later start will not undo for you. Recovering from an empty first start is
+  at step 5, and it is not cheap.
 
-Then create the data directories and give them to the uid the containers will run as:
+Two below the line are worth setting now rather than after the first start:
+
+- **`DATA_DIR`** — make it an **absolute** path, outside this checkout. The Sending page prints
+  it verbatim as the home of the sending confirmation code, and a relative
+  `./data/guard/authorisation.txt` means "wherever you last ran `docker compose`", which is no
+  help months later.
+- **`TRUSTED_PROXIES`** — leave it commented out unless you are putting a reverse proxy or a
+  tunnel in front of the app. If you are, read [§Trusted proxies](#trusted-proxies) below now,
+  so you set it once rather than after a restart.
+
+**Then pick the uid, and let the two files decide it.** The containers must be able to *read*
+what step 1 named, and LND usually writes those `0600` to its own user — a guard that cannot
+read them dies at first start:
 
 ```bash
-mkdir -p data/guard data/credentials data/server
-sudo chown -R 1000:1000 data
+# the same values you just put in .env, so the two commands below can use them.
+# Do not `source .env` for this: it is a compose file, not a shell script, and
+# ADMIN_PASSWORD is in it.
+LND_DIR=/home/lnd/.lnd
+LND_NETWORK=mainnet
+DATA_DIR=/srv/brollyzapper/data
+
+ls -l "$LND_DIR/tls.cert" "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
 ```
 
-**1000 is the default, not a fact about your host.** What decides it is whether that uid can
-*read* the two files from step 1: LND usually writes them `0600` to its own user, and a guard
-that cannot read them dies at first start. `RUN_AS_UID`'s comment in `.env.example` has the `ls`
-that shows the ownership and the two ways out — and whichever you take, the `chown` above uses
-the same uid, because it is one decision rather than two.
+This is also the check that both paths exist at all: a missing bind-mount source is not an
+error, it is a root-owned directory Docker creates for you and a container that dies at exit
+127. Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
+`RUN_AS_UID`'s comment in `.env.example` has the other way out, a group both can read through.
+Then create the data directories with that same decision, because it is one decision and not
+two:
 
-Set `DATA_DIR` to an **absolute** path while you are in the file; step 6 says what that buys.
+```bash
+mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+sudo chown -R 1000:1000 "$DATA_DIR"          # or the uid the `ls` above showed
+```
 
 ### 4. The two `lnd.conf` edits a host LND needs
 
-An LND running on the host rather than in this compose project answers on neither the right
-interface nor the right name until `lnd.conf` says so. Both edits together, then one restart:
+**If LND runs in Docker on this project's network**, you dial it by service name and this step
+is nearly free — but the certificate rule still applies to that name, so read the
+`tlsextradomain=` bullet below and skip the rest. Everything else here is for an LND on the host, which answers on neither the
+right interface nor the right name until `lnd.conf` says so. Both edits together, then one
+restart:
 
 ```ini
 rpclisten=10.61.7.1:10009
 tlsextraip=10.61.7.1
 ```
+
+`10.61.7.1` is the gateway of the template's default `brolly` subnet. If you changed that
+subnet, use its gateway instead — `docker network inspect` will show you.
 
 - **`rpclisten=`** — LND's gRPC listens on `localhost` only by default, so it never answers the
   bridge at all. Name the bridge gateway, which is the address you put in `LND_ADDRESS`.
@@ -310,9 +341,13 @@ tlsextraip=10.61.7.1
 The certificate is only rewritten if it is gone, so delete both halves and restart once:
 
 ```bash
-sudo rm /home/lnd/.lnd/tls.cert /home/lnd/.lnd/tls.key
-sudo systemctl restart lnd
+sudo rm "$LND_DIR"/tls.cert "$LND_DIR"/tls.key
 ```
+
+Then restart LND however you run it — `sudo systemctl restart lnd`, or
+`docker restart <container>`. **Anything else holding the old certificate needs the new one:**
+your own `lncli`, a mobile wallet, a web UI. They will fail verification exactly as the guard
+does below until they have it.
 
 **What each one looks like when it is missing.** Both arrive in `docker compose logs guard`, on
 the guard's `could not bake the receive macaroon yet; the server will ask again` line, in its
@@ -341,17 +376,34 @@ transport: Error while dialing: dial tcp 10.61.7.2:10009: connect: connection re
 Refused rather than timed out means the route is fine and nothing is listening on that
 interface. A **timeout** instead points at a firewall between the bridge and the host.
 
-**If you cannot restart LND right now, stop here.** Nothing further in this procedure works
-until you can, because the guard's first act is to dial the node. There is no
+**If you cannot restart LND, this is the step 1 prerequisite biting**, and there is nothing to
+do but wait for a window — the guard's first act is to dial the node. There is no
 skip-verification setting to reach for in the meantime: the app has none, and one would make
 the certificate check decorative — which is the check that stops the app handing an admin
 macaroon to whatever answered on that address.
 
 ### 5. Start, and what "up" looks like
 
+First ask compose whether every required value is set — the template's `${LND_DIR:?…}` and
+`${LND_NETWORK:?…}` exist so this fails with a sentence rather than mounting the filesystem
+root:
+
+```bash
+docker compose config -q && echo ok
+```
+
+`ok` means it is willing. Then:
+
 ```bash
 docker compose up -d
-docker compose logs -f guard server
+```
+
+Give it a minute, then look for the three signs rather than watching the stream — the guard
+retries with a widening backoff, so a failure loop and a slow success look alike while they
+scroll:
+
+```bash
+docker compose logs guard server | grep -E 'macaroon baked|listening|error='
 ```
 
 Three signs, in the order they arrive:
@@ -367,19 +419,33 @@ Three signs, in the order they arrive:
    and appears in a failed loop just as it does in a good one. `receive macaroon baked` is the
    one that means it worked, and the `ipaddr` caveat in it is the server's fixed address.
 
-2. **The server is listening.** `listening addr=[::]:8080` from the server, and from the host:
+2. **The server is listening.** `listening addr=[::]:8080` from the server — that is the port
+   *inside* the container, always 8080. From the host it is `HTTP_PORT`:
 
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/health
+   curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:${HTTP_PORT:-8080}/health"
    ```
 
-   `200`, on whatever `HTTP_PORT` you set.
+   `200`.
 
-3. **You can sign in** at `http://<host>:8080/` with the password you set at step 3. If you
-   left `ADMIN_PASSWORD` empty, this is where you find out: the login form appears, and the
-   password that would open it is on a page behind it. The way out is to stop the stack, set
-   `ADMIN_PASSWORD`, delete `${DATA_DIR}/server` and start again — which discards the nostr
-   identity the first start generated, so do it now rather than after the address is published.
+3. **You can sign in** at `http://<host>:${HTTP_PORT}/` with the password you set at step 3. If
+   you left `ADMIN_PASSWORD` empty, this is where you find out: the login form appears and the
+   password that would open it is on a page behind it. The way out is destructive — stop the
+   stack, set `ADMIN_PASSWORD`, delete `${DATA_DIR}/server`, start again — because a later
+   start does not re-seed the password once a hash exists. Deleting that directory discards the
+   nostr identity the first start generated, which is survivable now and not once the address
+   is published.
+
+**While it settles.** `depends_on` orders **startup**, not readiness, so the server can come up
+before the guard has baked anything. While that lasts the server logs
+
+```
+invoice stream dropped; reconnecting  error="lnd: node credentials are not present yet"
+  attempt=1  state=not_linked
+```
+
+with a widening gap — a second, then two, four, eight, capped at a minute. They stop of their
+own accord once `receive macaroon baked` appears in the guard's log and the stream connects.
 
 Then work through **First run** in [`README.md`](README.md#first-run): the public domain and
 address name are settings, not deployment values, and they live in the app.
@@ -402,8 +468,7 @@ With no `app_proxy` in front, decide deliberately:
   empty, which is the template's default. Client addresses are already real.
 - **A reverse proxy you run** — set the range the proxy connects *from*, not the range clients
   come from. If the proxy is a container on the template's own network, that is its subnet —
-  `.env.example` carries the value, commented out, because uncommenting it is a decision and
-  not a restore.
+  the value is in `.env.example`, commented out.
 - **A CDN or tunnel** — the connecting address is the tunnel daemon's, usually loopback or a
   container address. Name that.
 
@@ -415,18 +480,16 @@ procedure, including a negative control.
 
 ### 6. Where the confirmation code lives
 
-Enabling sending needs a one-time code the guard writes where only the host's operator can read
-it. There is no Files app here, so it is a path on the host:
+Sending is gated by a one-time code the guard writes to a file the server has no mount for —
+see [`OPERATING.md` §Sending](OPERATING.md#sending-and-the-two-caps). There is no Files app
+here, so it is a path on the host:
 
 ```
 ${DATA_DIR}/guard/authorisation.txt
 ```
 
 The Sending page prints that path for you, from `GUARD_AUTHORISATION_LOCATION` in the compose
-file — which is built out of `DATA_DIR` verbatim. Leave `DATA_DIR` at its `./data` default and
-the page says `./data/guard/authorisation.txt`, which is relative to wherever you ran
-`docker compose` from and is not much help months later. An absolute `DATA_DIR`, as step 3
-suggests, makes that sentence something you can paste into a shell.
+file, which is built out of `DATA_DIR` verbatim — which is why step 3 asks for an absolute one.
 
 ### 7. Updating
 
@@ -435,21 +498,12 @@ two image digests. Edit the two `image:` lines in `docker-compose.yml` to match 
 and the digest as well as the tag — then:
 
 ```bash
+grep image: docker-compose.yml       # both lines, to check against the release page
 docker compose pull && docker compose up -d
 ```
 
-`depends_on` in the template orders **startup**, not readiness: the server may come up before
-the guard has baked anything. That is normal, it clears itself, and while it lasts the server
-logs
-
-```
-invoice stream dropped; reconnecting  error="lnd: node credentials are not present yet"
-  attempt=1  state=not_linked
-```
-
-with a widening gap — a second, then two, four, eight, capped at a minute. They stop of their
-own accord once `receive macaroon baked` appears in the guard's log and the stream connects.
-The same lines on a *first* install are the same thing and equally harmless.
+The settling lines from step 5 reappear for a few seconds, and are as harmless here as on a
+first install.
 
 ### 8. Backups
 
@@ -457,8 +511,7 @@ Same two directories as everywhere else, and the same exclusion: see
 [`OPERATING.md` §Backups](OPERATING.md#backups-and-the-one-directory-left-out). Under this
 template they are `${DATA_DIR}/server` and `${DATA_DIR}/guard`, and `${DATA_DIR}/credentials`
 is the one left out. There is no umbrelOS here to run the backup for you, so it is a job you
-schedule — and the database in `${DATA_DIR}/server` holds the only copy of the zap-receipt
-signing key.
+schedule.
 
 ### 9. Not supported: LND on another machine
 
@@ -475,12 +528,23 @@ design change to how credentials are scoped rather than a setting to expose.
 
 ### 10. Testing beside an existing Umbrel install
 
-A footnote for one case: trying this template on a box that already runs the app under umbrelOS.
+**Record the node's root key ids before you start anything.** The put-back below is a diff
+against this list, and it cannot be taken afterwards:
 
-Stop **only** the BrollyZapper Umbrel app; leave the Lightning Node app running, since it is
-the node under test. Then join Umbrel's app network from a local override file — write it
-yourself, it is not shipped — and take a fixed address in that network that nothing has
-allocated:
+```bash
+lncli listmacaroonids > ~/macaroonids.before
+```
+
+Then stop **only** the BrollyZapper Umbrel app; leave the Lightning Node app running, since it
+is the node under test. Choose a fixed address in Umbrel's app network that nothing has
+allocated —
+
+```bash
+docker network inspect <umbrel's app network> --format '{{range .Containers}}{{.IPv4Address}} {{end}}'
+```
+
+— and join that network from a local override file, which you write yourself and which is not
+shipped:
 
 ```yaml
 # docker-compose.override.yml — local, never committed
@@ -489,13 +553,10 @@ services:
     environment:
       SERVER_IP: 10.21.21.90
       NETWORK_CIDR: 10.21.21.0/24
-      LND_ADDRESS: <the lightning app's address>:10009
     networks:
       brolly: {}
       umbrel: {}
   server:
-    environment:
-      LND_ADDRESS: <the lightning app's address>:10009
     networks:
       brolly: {}
       umbrel:
@@ -506,20 +567,26 @@ networks:
     name: <umbrel's app network>
 ```
 
-**Both** services join that network, not just the server: the guard is the one that dials the
-node, and the server dials it too. Only the server takes a fixed address there, and `SERVER_IP`
-must equal it — the guard bakes the first into the `ipaddr` caveat and LND checks the source
-address it actually sees, which on a container with two networks is the one it routed out of.
-The certificate still has to name whatever `LND_ADDRESS` says, exactly as at step 4.
+`LND_ADDRESS` stays in `.env` as usual — the base template already feeds it to both services —
+and it names the Lightning app. The certificate still has to name whatever it says, exactly as
+at step 4.
 
-**The put-back matters more than the test.** Stop the stack and remove its volumes, then
-**revoke the root keys this guard minted at the node** — the Umbrel app's guard cannot see them,
-because a guard only ever revokes keys it recorded itself, so anything left behind stays live
-and revocable by nobody:
+**Both** services join the network, not just the server: the guard is the one that dials the
+node, and the server dials it too. Only the server takes a fixed address there, and `SERVER_IP`
+must equal it, for the reason at §Not supported above — and on a container with two networks
+the address LND sees is the one it routed out of.
+
+**The put-back matters more than the test.** Stop the stack and delete the directories under
+its `DATA_DIR` — they are bind mounts, so `down -v` alone does not reach them. Then **revoke
+the root keys this guard minted at the node.** The Umbrel app's guard cannot see them, because a
+guard only ever revokes keys it recorded itself, so anything left behind stays live and
+revocable by nobody:
 
 ```bash
-lncli listmacaroonids          # before you start, and again afterwards
+diff ~/macaroonids.before <(lncli listmacaroonids)
 lncli deletemacaroonid <id>    # every id that appeared in between
 ```
 
-Then start the BrollyZapper app again.
+The ids are also in `${DATA_DIR}/guard/guard-state.json`, as `receive_root_key_id`,
+`spend_root_key_id` and `pending_root_key_ids` — the more reliable of the two, since it is what
+the guard itself recorded. Then start the BrollyZapper app again.
