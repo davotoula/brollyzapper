@@ -1,0 +1,150 @@
+# BrollyZapper beside an LND on the same host, without umbrelOS.
+#
+# Fill in deploy/.env (copy .env.example) and run:
+#
+#     docker compose --env-file .env -f docker-compose.yml up -d
+#
+# The app itself is not Umbrel-specific and never was — spec §19 required plain
+# Docker operation and internal/config reads only generic settings. What this
+# file adds is the SHAPE those settings need on a real host, which umbrelOS
+# otherwise supplies: a fixed container address, a network to put it on, and the
+# two single-file mounts from LND's data directory.
+#
+# LND MUST BE ON THIS HOST — in this compose project, or on the host itself with
+# the app reaching it over the bridge. LND on another machine is NOT supported,
+# and the reason is not effort: the guard bakes an `ipaddr` caveat into both
+# credentials and LND checks it against the gRPC connection's SOURCE address.
+# Across hosts that address is this machine's egress address, so the lock would
+# cover every process on the box rather than this container. See DEPLOYING.md.
+#
+# TWO SNAGS A FIRST INSTALL HITS, both with fixes in DEPLOYING.md:
+#   1. LND's TLS certificate must NAME the address the app dials. The app
+#      verifies the certificate with no ServerName override, and LND's default
+#      certificate names localhost and the hostname only — so dialling it by IP
+#      fails until lnd.conf gains a matching tlsextraip/tlsextradomain and the
+#      certificate is regenerated.
+#   2. The server needs a FIXED address, which is why the network below is
+#      user-defined with an explicit subnet rather than the default bridge.
+
+services:
+  # The credential broker. The ONLY container that mounts admin.macaroon, and it
+  # listens on nothing: its sole input is a unix socket in the shared credential
+  # volume (spec §3, §6). It publishes no port, and the lint asserts that.
+  guard:
+    image: ghcr.io/davotoula/brollyzapper-guard:0.1.20@sha256:63bc04a51b5c1ddf87bc3cc597df9f03f0fa91b31a0644f0efdc5c780d5a0a6b
+    user: "1000:1000"
+    volumes:
+      - ${DATA_DIR:-./data}/guard:/guard
+      - ${DATA_DIR:-./data}/credentials:/credentials
+      # TWO INDIVIDUAL FILES, NEVER THE DIRECTORY (spec §6, §20). Mounting
+      # ${LND_DIR} whole would also expose wallet.db, macaroons.db and
+      # channel.backup — and if the wallet password is the node's default,
+      # wallet.db is the seed. The lint asserts exactly these two.
+      #
+      # A missing bind-mount SOURCE is its own hazard: Docker creates a
+      # DIRECTORY at the path and the container then dies at exit 127. If the
+      # guard will not start, check these two paths exist on the host first.
+      - ${LND_DIR}/tls.cert:/lnd/tls.cert:ro
+      - ${LND_DIR}/data/chain/bitcoin/${LND_NETWORK}/admin.macaroon:/lnd/admin.macaroon:ro
+    environment:
+      LND_ADDRESS: ${LND_ADDRESS}
+      LND_CERT_FILE: /lnd/tls.cert
+      LND_ADMIN_MACAROON: /lnd/admin.macaroon
+      DATA_DIR: /guard
+      CREDENTIALS_DIR: /credentials
+      # Must equal the server's ipv4_address below: the guard bakes this into
+      # the `ipaddr` caveat on both credentials, and LND rejects a connection
+      # whose source address does not match. The lint asserts the two agree.
+      SERVER_IP: 10.61.7.20
+      NETWORK_CIDR: 10.61.7.0/24
+      # INITIAL VALUES, not ceilings: they seed the guard's stored caps on first
+      # start. The operator may lower either freely afterwards and raise either
+      # through the one-time code ceremony.
+      GUARD_MAX_SPEND_MSAT: ${GUARD_MAX_SPEND_MSAT:-100000000}
+      GUARD_MAX_PAYMENT_MSAT: ${GUARD_MAX_PAYMENT_MSAT:-25000000}
+      # May sending ever be enabled on this deployment at all. TRUE here only
+      # permits the ceremony; a fresh install still starts receive-only, and
+      # sending turns on solely via a one-time code the guard writes into its
+      # own volume — which the server has no mount for. Set false for a
+      # deployment that wants a hard "never".
+      GUARD_ALLOW_SENDING: ${GUARD_ALLOW_SENDING:-true}
+      # Where the operator will find the guard's one-time code. There is no
+      # Files app here, so this is the HOST path, and it is a DESCRIPTION the
+      # Security page renders rather than a path the app resolves.
+      GUARD_AUTHORISATION_LOCATION: "${DATA_DIR:-./data}/guard/authorisation.txt on the Docker host"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    restart: on-failure
+    stop_grace_period: 30s
+    networks:
+      - brolly
+
+  # All of the attack surface: HTTP, nostr relays, sqlite. It never sees
+  # admin.macaroon — adding that mount here would silently undo §3, §6 and half
+  # of §11, which is what the lint exists to prevent.
+  server:
+    image: ghcr.io/davotoula/brollyzapper:0.1.20@sha256:a175a274a3010702b0df9567aa31003cb342034505a17015ea2c2ecd2365baae
+    # The images run as uid 65532 (distroless/static:nonroot) by default; this
+    # overrides that. THE DIRECTORIES UNDER ${DATA_DIR} MUST BE OWNED BY THIS
+    # UID on the host — umbrelOS creates them as 1000:1000, a plain host does
+    # not, so create them yourself:
+    #
+    #     mkdir -p data/guard data/credentials data/server
+    #     sudo chown -R 1000:1000 data
+    #
+    # Get this wrong and the symptom is the guard failing to write recv.macaroon
+    # on first run, which reads like a bake failure and is not.
+    user: "1000:1000"
+    depends_on:
+      - guard
+    volumes:
+      - ${DATA_DIR:-./data}/server:/data
+      # Read-only: the server consumes what the guard bakes and writes nothing
+      # into the credential volume itself.
+      - ${DATA_DIR:-./data}/credentials:/credentials:ro
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      LND_ADDRESS: ${LND_ADDRESS}
+      CREDENTIALS_DIR: /credentials
+      GUARD_SOCKET: /credentials/guard.sock
+      DATA_DIR: /data
+      LISTEN_ADDR: 0.0.0.0:8080
+      # EMPTY BY DEFAULT, which trusts nothing: this template publishes a port
+      # directly and has no proxy in front, so the TCP peer IS the client and a
+      # forwarded-for header is a claim from a stranger. Put a reverse proxy on
+      # the brolly network and set this to that subnet — the value is in
+      # .env.example, commented — or the rate limiter counts every request
+      # against one address.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # Empty sends the first visit to /setup to choose one.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # May be left empty: the server generates one and persists it in DATA_DIR.
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    restart: on-failure
+    stop_grace_period: 1m
+    networks:
+      brolly:
+        # Must match SERVER_IP above, and the `ipaddr` caveat the guard bakes
+        # into both credentials.
+        ipv4_address: 10.61.7.20
+
+networks:
+  # USER-DEFINED AND EXPLICITLY ADDRESSED, because the ipaddr caveat needs the
+  # server's address to be stable — the default bridge assigns whatever is free.
+  #
+  # THE SUBNET IS CHOSEN TO STAY OUT OF THE WAY, and each avoidance is deliberate:
+  # Docker's own default pool for user-defined bridges is 172.17-172.31, so a
+  # 172.x choice can collide with a network Docker creates later on the same
+  # host. The low 192.168 ranges are what consumer routers hand out, so a
+  # machine on a home or office LAN is likely to be inside one already.
+  # 10.30.0.0/16 is this repo's regtest stack, which a developer may have up on
+  # the same machine. A /24 rather than a /16 asks for 254 addresses instead of
+  # 65,534, which is far less likely to overlap a route the host already has
+  # from a VPN. If it collides anyway, change the subnet, SERVER_IP,
+  # NETWORK_CIDR and the ipv4_address together — the lint asserts SERVER_IP and
+  # ipv4_address agree, so it will catch three of the four.
+  brolly:
+    ipam:
+      config:
+        - subnet: 10.61.7.0/24
