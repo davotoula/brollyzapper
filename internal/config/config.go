@@ -215,7 +215,7 @@ func LoadGuard(env Lookup) (*Guard, error) {
 	//
 	// "24-HOUR LIMIT", NOT "WINDOW CAP" (`eht`). Every other surface an operator
 	// or deployer reads says 24-hour limit — the guard's own refusal, the Sending
-	// page, MANUAL.html, OPERATING.md — and "window cap" appeared nowhere but
+	// page, OPERATING.md — and "window cap" appeared nowhere but
 	// here, leaving whoever hit it to map GUARD_MAX_SPEND_MSAT to a phrase and
 	// the phrase to a limit, unaided.
 	//

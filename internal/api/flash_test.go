@@ -210,7 +210,7 @@ func TestTheLogLevelOptionsAscend(t *testing.T) {
 //
 // WHAT THE MESSAGES SAY is not checked here. internal/arch's
 // TestTheCapPairRemediesReadTheSameEverywhere holds this copy to the guard's own
-// remedy, alongside the Sending hint, MANUAL.html and OPERATING.md; and
+// remedy, alongside the Sending hint and OPERATING.md; and
 // TestACapPairRefusalTellsTheOperatorWhichLimitToMove drives the real handler to
 // prove which control gets which message.
 func TestEveryCapControlHasACapPairMessage(t *testing.T) {

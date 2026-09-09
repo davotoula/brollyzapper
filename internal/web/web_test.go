@@ -402,7 +402,7 @@ func TestTheWalletRendersAnOutgoingZapsPayee(t *testing.T) {
 // passing against stale copy, which is exactly the drift it used to claim to
 // prevent. internal/arch's TestTheCapPairRemediesReadTheSameEverywhere is the
 // rule that actually holds it, because it reads the remedies out of the guard's
-// source and requires all four surfaces to contain them.
+// source and requires all three surfaces to contain them.
 func TestTheSendingPageNamesWhichLimitToMoveFirst(t *testing.T) {
 	renderer := newRenderer(t)
 	var buf bytes.Buffer

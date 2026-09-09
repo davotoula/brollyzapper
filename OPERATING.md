@@ -1,9 +1,8 @@
 # Operating BrollyZapper
 
-The reference. [`README.md`](README.md) gets a lightning address working and publishes
-it through Cloudflare; this covers everything you touch afterwards — every setting, what
-happens when you get one wrong, backups, credential rotation, and the hazards of adapting
-the package for a deployment it was not written for.
+The reference. [`README.md`](README.md) gets a lightning address working and
+[`DEPLOYING.md`](DEPLOYING.md) publishes it; this covers everything you touch afterwards — every
+setting, what happens when you get one wrong, backups and credential rotation.
 
 Read the README first. This assumes the app is installed and answering.
 
@@ -18,7 +17,6 @@ Read the README first. This assumes the app is installed and answering.
 - [Backups, and the one directory left out](#backups-and-the-one-directory-left-out)
 - [Rotating the node's macaroons](#rotating-the-nodes-macaroons)
 - [Uninstalling does not revoke anything](#uninstalling-does-not-revoke-anything)
-- [Running outside Umbrel](#running-outside-umbrel)
 - [Storage](#storage)
 
 ---
@@ -64,7 +62,7 @@ who can reach the app through it can claim any client IP they like, which makes 
 per-sender rate limits meaningless. **Get it wrong in the other direction** and every
 anonymous request shares one bucket, so one busy zapper exhausts the limit for everyone. On
 Umbrel the `app_proxy` sits in front and the package handles this; off Umbrel, see
-[Running outside Umbrel](#running-outside-umbrel).
+[`DEPLOYING.md` §Running outside Umbrel](DEPLOYING.md#running-outside-umbrel).
 
 ### Relays
 
@@ -313,53 +311,6 @@ unless you copy it — and the backup exclusion above is there so that "copy it"
 by accident.
 
 If you want it genuinely dead, rotate ([above](#rotating-the-nodes-macaroons)).
-
----
-
-## Running outside Umbrel
-
-The app itself takes generic settings — an LND address, a cert, a macaroon — so it runs
-against any LND. The published images are
-`ghcr.io/davotoula/brollyzapper` and `ghcr.io/davotoula/brollyzapper-guard`, and
-`regtest/docker-compose.yml` is a working reference stack: the two BrollyZapper services in
-it are the whole deployment; the rest is a test node and relay. The Umbrel-specific wiring
-lives only in the package. Two things need care.
-
-### The single-file mount hazard
-
-The package mounts two individual **files** from the node's data directory, read-only:
-
-```yaml
-- ${APP_LIGHTNING_NODE_DATA_DIR}/tls.cert:/lnd/tls.cert:ro
-- ${APP_LIGHTNING_NODE_DATA_DIR}/data/chain/bitcoin/${NETWORK}/admin.macaroon:/lnd/admin.macaroon:ro
-```
-
-**Never mount the directory instead.** Adapting this for a plain-Docker deployment, the
-convenient-looking change is to mount the parent and let the paths fall out of it. That
-directory also contains `wallet.db`, `macaroons.db` and `channel.backup` — and with a default
-wallet password, `wallet.db` is the seed. Mounting individual files is the whole reason a
-compromise of this app is not a compromise of the node.
-
-The same applies to which container gets what: `admin.macaroon` is mounted into the **guard**
-only, never the server. The server has no mount for it and cannot read it.
-
-### Trusted proxies
-
-With no `app_proxy` in front, decide deliberately:
-
-- **Nothing in front** — the app is reached directly. Leave `TRUSTED_PROXIES` empty. Client
-  addresses are already real.
-- **A reverse proxy you run** — set the range the proxy connects *from*, not the range clients
-  come from. On a single-host Docker setup that is the Docker bridge network, typically a
-  `/16` such as `172.17.0.0/16`; check your own network rather than copying that.
-- **A CDN or tunnel** — the connecting address is the tunnel daemon's, usually loopback or a
-  container address. Name that.
-
-Name the narrowest range that covers the hop you actually control. Anything wider is a range
-someone else can arrive from, and the per-sender limits stop meaning anything.
-
-Verify rather than assume: README §"Verify before trusting it" has the procedure, including a
-negative control.
 
 ---
 
