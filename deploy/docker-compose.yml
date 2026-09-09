@@ -1,5 +1,9 @@
 # BrollyZapper beside an LND on the same host, without umbrelOS.
 #
+# THE PROCEDURE IS DEPLOYING.md §Running outside Umbrel: prerequisites, the two
+# lnd.conf edits with the error each one produces when it is missing, what "up"
+# looks like, updating, and the case that is not supported.
+#
 # Fill in deploy/.env (copy .env.example) and run:
 #
 #     docker compose --env-file .env -f docker-compose.yml up -d
@@ -18,9 +22,8 @@
 # cover every process on the box rather than this container.
 #
 # TWO SNAGS A FIRST INSTALL HITS. The fix for each is inline below and in
-# .env.example; DEPLOYING.md gains the full procedure in 20i.2, and this comment
-# deliberately does not point at it until it does — a pointer to a section that
-# does not answer the question costs an operator more than no pointer.
+# .env.example; the procedure walks both, and quotes what each one looks like in
+# `docker compose logs guard`.
 #   1. LND's TLS certificate must NAME the address the app dials. The app
 #      verifies the certificate with no ServerName override, and LND's default
 #      certificate names localhost and the hostname only — so dialling it by IP
@@ -143,7 +146,9 @@ services:
       # .env.example, commented — or the rate limiter counts every request
       # against one address.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
-      # Empty sends the first visit to /setup to choose one.
+      # SET THIS. Empty makes the server invent a password and show it only on
+      # /setup, which is behind the login — off Umbrel that is a locked door.
+      # DEPLOYING.md §Running outside Umbrel step 3 has the whole of it.
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # May be left empty: the server generates one and persists it in DATA_DIR.
       SESSION_SECRET: ${SESSION_SECRET:-}
