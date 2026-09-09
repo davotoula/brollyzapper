@@ -1,6 +1,10 @@
 # BrollyZapper
 
 [![CI](https://github.com/davotoula/brollyzapper/actions/workflows/ci.yml/badge.svg)](https://github.com/davotoula/brollyzapper/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/davotoula/brollyzapper/actions/workflows/codeql.yml/badge.svg)](https://github.com/davotoula/brollyzapper/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/davotoula/brollyzapper)](https://github.com/davotoula/brollyzapper/releases/latest)
+[![Go](https://img.shields.io/github/go-mod/go-version/davotoula/brollyzapper)](go.mod)
+[![Licence](https://img.shields.io/github/license/davotoula/brollyzapper)](LICENSE)
 
 Nostr zap receiving (NIP-57) and Nostr Wallet Connect (NIP-47) for an **existing** LND node,
 packaged as an Umbrel app. Safety over features.
