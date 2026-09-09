@@ -7,12 +7,24 @@
 // a mistyped variable name is a silent default rather than an error, and a
 // release that re-pins the package without re-pinning here ships a template
 // that installs last month's binaries. Each check below is one of those.
+//
+// THE THIRD COMPOSE LOADER IN THIS REPOSITORY, and the threshold this repo wrote
+// down for itself is three. internal/arch/arch_test.go's duplication note argues
+// the trade for the secret predicates and ends "Two copies of forty lines is the
+// cheaper trade at two consumers. AT THREE IT IS NOT: that is the moment to make
+// the package." umbrel/lint_test.go and regtest/lint_test.go are the other two,
+// and the §6/§20 mount rule is now stated in three of them.
+//
+// NOT EXTRACTED HERE, and the reason is scope rather than disagreement: 20i.1's
+// brief rules out any change under umbrel/, and a shared test-support package
+// has to move that file to be worth making. internal/lnd/lndtest and
+// internal/lnurl/lnurltest are the precedent for where it would go. Named in
+// this bead's report for the PM rather than done quietly.
 package deploy
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
+	"errors"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +34,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/davotoula/brollyzapper/internal/config"
 )
 
 const (
@@ -29,20 +43,23 @@ const (
 	envPath     = ".env.example"
 	// The package this template must stay in step with.
 	packageCompose = "../umbrel/brollyzapper/docker-compose.yml"
-	// The one place the environment contract is actually declared.
-	configSource = "../internal/config/config.go"
 )
 
 type composeFile struct {
 	Services map[string]struct {
-		Image          string    `yaml:"image"`
-		User           string    `yaml:"user"`
-		Volumes        []string  `yaml:"volumes"`
-		Ports          []string  `yaml:"ports"`
-		Restart        string    `yaml:"restart"`
-		DependsOn      []string  `yaml:"depends_on"`
-		RawEnvironment yaml.Node `yaml:"environment"`
-		Networks       yaml.Node `yaml:"networks"`
+		Image       string            `yaml:"image"`
+		User        string            `yaml:"user"`
+		Volumes     []string          `yaml:"volumes"`
+		Ports       []string          `yaml:"ports"`
+		Restart     string            `yaml:"restart"`
+		DependsOn   []string          `yaml:"depends_on"`
+		Environment map[string]string `yaml:"environment"`
+		// A yaml.Node because the two services spell this differently: the server
+		// needs the mapping form to carry ipv4_address, the guard only names the
+		// network. Environment above needs no such treatment — the list spelling
+		// decodes into a map with a LOUD error, not a silent empty one, and
+		// loadCompose turns that into a Fatalf.
+		Networks yaml.Node `yaml:"networks"`
 	} `yaml:"services"`
 	Networks map[string]struct {
 		IPAM struct {
@@ -72,96 +89,80 @@ func loadCompose(t *testing.T) (composeFile, string) {
 				composePath, want)
 		}
 	}
+	for _, name := range []string{"guard", "server"} {
+		if len(compose.Services[name].Environment) == 0 {
+			t.Fatalf("the %s service declares no environment; this template sets one on "+
+				"both, so the settings checks below would assert nothing", name)
+		}
+	}
 	return compose, string(raw)
 }
 
-// environmentOf returns a service's environment as a map, whichever of compose's
-// two spellings it uses.
+// contract is what internal/config actually reads.
+type contract struct{ required, optional []string }
+
+// configContract asks the config package itself what it reads, by calling both
+// loaders with a Lookup that records every name and supplies nothing.
 //
-// THE MAPPING FORM AND THE LIST FORM are both legal and mean the same thing, and
-// a lint that understood only one would pass silently on a file written in the
-// other — which is the shape of every failure this file exists to catch.
-func environmentOf(t *testing.T, node yaml.Node) map[string]string {
+// THE BEHAVIOUR, NOT THE ARTIFACT. The first version of this parsed config.go
+// with go/ast and matched the p.required*/p.optional* call shape — which is
+// asserting the source's spelling rather than the package's behaviour, and it
+// needed its own floor guard because a parser that stopped matching would have
+// made every check below it vacuous. This cannot go vacuous: the names come from
+// the loader actually running, and if it asks for nothing the assertions below
+// fail rather than pass.
+//
+// REQUIRED FALLS OUT OF THE ERROR. With nothing set, p.err() is an errors.Join
+// of one *config.VarError per variable the loader insisted on, so the required
+// subset needs no second rule to identify it — and a variable that moves from
+// optional to required is picked up here the day it moves.
+//
+// It is also a fourth statement of nothing: regtest/lint_test.go keeps a
+// hand-written genericSettings list, and this is the form that could replace it.
+func configContract(t *testing.T) map[string]contract {
 	t.Helper()
-	out := map[string]string{}
-	switch node.Kind {
-	case yaml.MappingNode:
-		var m map[string]string
-		if err := node.Decode(&m); err != nil {
-			t.Fatalf("decoding an environment mapping: %v", err)
+	out := map[string]contract{}
+	for _, loader := range []struct {
+		which string
+		load  func(config.Lookup) error
+	}{
+		{"Server", func(l config.Lookup) error { _, err := config.LoadServer(l); return err }},
+		{"Guard", func(l config.Lookup) error { _, err := config.LoadGuard(l); return err }},
+	} {
+		var asked []string
+		err := loader.load(func(name string) (string, bool) {
+			asked = append(asked, name)
+			return "", false
+		})
+		if err == nil {
+			t.Fatalf("%s accepted an entirely empty environment; this derivation reads the "+
+				"required settings out of its complaint, and there is none", loader.which)
 		}
-		return m
-	case yaml.SequenceNode:
-		var list []string
-		if err := node.Decode(&list); err != nil {
-			t.Fatalf("decoding an environment list: %v", err)
+		var required []string
+		for _, e := range unwrapJoined(err) {
+			var varErr *config.VarError
+			if errors.As(e, &varErr) {
+				required = append(required, varErr.Var)
+			}
 		}
-		for _, entry := range list {
-			name, value, _ := strings.Cut(entry, "=")
-			out[name] = value
+		var optional []string
+		for _, name := range asked {
+			if !slices.Contains(required, name) {
+				optional = append(optional, name)
+			}
 		}
-	case 0:
-		t.Fatal("a service declares no environment at all; this template sets one on both")
+		out[loader.which] = contract{required: required, optional: optional}
 	}
 	return out
 }
 
-// contract is what internal/config actually reads, derived from its source.
-type contract struct{ required, optional []string }
-
-// configContract parses internal/config's LoadServer and LoadGuard and returns
-// the variables each one reads.
-//
-// DERIVED, NOT LISTED. A hand-kept copy here would be the THIRD statement of
-// this contract — after the config package and the App Store package — and the
-// failure of a stale one is silent in the direction that matters: a variable
-// the template stops setting reads as a default, and a variable the config
-// package starts requiring reads as a start-up error on the operator's host
-// rather than on this branch.
-//
-// It keys off the `p.requiredX("NAME")` / `p.optionalX("NAME")` call shape,
-// which is the same shape both loaders are written in. If that shape ever
-// changes, this returns fewer names than it should — so the test below asserts
-// a floor on the count rather than trusting whatever it finds.
-func configContract(t *testing.T) map[string]contract {
-	t.Helper()
-	parsed, err := parser.ParseFile(token.NewFileSet(), configSource, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parsing %s: %v", configSource, err)
+// unwrapJoined splits an errors.Join, and returns a lone error unchanged.
+func unwrapJoined(err error) []error {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return []error{err}
 	}
-	out := map[string]contract{}
-	for _, decl := range parsed.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || (fn.Name.Name != "LoadServer" && fn.Name.Name != "LoadGuard") {
-			continue
-		}
-		which := strings.TrimPrefix(fn.Name.Name, "Load")
-		found := out[which]
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || len(call.Args) == 0 {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			name := strings.Trim(lit.Value, `"`)
-			switch {
-			case strings.HasPrefix(sel.Sel.Name, "required"):
-				found.required = append(found.required, name)
-			case strings.HasPrefix(sel.Sel.Name, "optional"):
-				found.optional = append(found.optional, name)
-			}
-			return true
-		})
-		out[which] = found
-	}
-	return out
+	return joined.Unwrap()
 }
 
 // TestTheTemplateSetsEveryRequiredSettingAndNoInventedOne is check 1: the
@@ -176,21 +177,9 @@ func TestTheTemplateSetsEveryRequiredSettingAndNoInventedOne(t *testing.T) {
 	compose, _ := loadCompose(t)
 	contracts := configContract(t)
 
-	// A FLOOR ON WHAT WAS DERIVED, because a parser that silently matched
-	// nothing would make every assertion below vacuous — the failure this whole
-	// file is written against, one level up.
-	for _, which := range []string{"Server", "Guard"} {
-		c := contracts[which]
-		if len(c.required) < 3 || len(c.optional) < 3 {
-			t.Fatalf("derived only %d required and %d optional settings for %s from %s; "+
-				"the call shape this reads must have changed, and every check below would "+
-				"now be asserting nothing", len(c.required), len(c.optional), which, configSource)
-		}
-	}
-
 	for _, s := range []struct{ service, which string }{{"server", "Server"}, {"guard", "Guard"}} {
 		svc := compose.Services[s.service]
-		env := environmentOf(t, svc.RawEnvironment)
+		env := svc.Environment
 		c := contracts[s.which]
 		for _, name := range c.required {
 			if _, ok := env[name]; !ok {
@@ -231,8 +220,13 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		scanned++
+		// COMMENTS ARE EXEMPT, as they are in both neighbouring lints. This
+		// repository's convention is that comments record WHY, and the template
+		// cannot explain what it does differently from the Umbrel package without
+		// naming the package's variables. What matters is what compose
+		// INTERPOLATES, which is never a comment.
 		for _, needle := range umbrelOnly {
-			if strings.Contains(string(raw), needle) {
+			if strings.Contains(withoutComments(string(raw)), needle) {
 				t.Errorf("%s mentions %s, which only umbrelOS sets; here it interpolates to "+
 					"empty and the setting it was meant to make silently disappears",
 					e.Name(), needle)
@@ -247,6 +241,21 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 	}
 }
 
+// withoutComments blanks whole-line and trailing `#` comments. Both files this
+// scans are YAML or shell-shaped env, where `#` starts a comment and no value in
+// either legitimately contains one.
+func withoutComments(raw string) string {
+	var out strings.Builder
+	for _, line := range strings.Split(raw, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
 var imageRE = regexp.MustCompile(`ghcr\.io/davotoula/brollyzapper(-guard)?:[0-9][0-9a-zA-Z.\-]*@sha256:[0-9a-f]{64}`)
 
 // TestTheImagesEqualThePackages is check 3, and it is aimed at the release
@@ -257,10 +266,20 @@ var imageRE = regexp.MustCompile(`ghcr\.io/davotoula/brollyzapper(-guard)?:[0-9]
 // previous release — with an operator following a procedure that says nothing
 // is wrong. Equality here makes the pin step update both or go red.
 func TestTheImagesEqualThePackages(t *testing.T) {
-	_, raw := loadCompose(t)
+	compose, raw := loadCompose(t)
 	pkg, err := os.ReadFile(packageCompose)
 	if err != nil {
 		t.Fatalf("reading %s: %v", packageCompose, err)
+	}
+	// Both spellings: the regex over the raw file is what catches a digest written
+	// anywhere, and the parsed field is what proves the two services actually
+	// CARRY one — a file with the images commented out would otherwise match
+	// nothing in both places and compare equal.
+	for _, name := range []string{"guard", "server"} {
+		if !imageRE.MatchString(compose.Services[name].Image) {
+			t.Errorf("the %s service's image %q is not a digest-pinned ghcr.io reference; a tag "+
+				"alone can be moved under the operator", name, compose.Services[name].Image)
+		}
 	}
 	mine := imageRE.FindAllString(raw, -1)
 	theirs := imageRE.FindAllString(string(pkg), -1)
@@ -310,11 +329,38 @@ func TestTheServerHasAFixedAddressAndTheGuardBakesIt(t *testing.T) {
 		t.Errorf("network %q declares no subnet; without one Docker chooses, and the fixed "+
 			"address above may not be inside it", onNetwork)
 	}
-	guardEnv := environmentOf(t, compose.Services["guard"].RawEnvironment)
+	guardEnv := compose.Services["guard"].Environment
 	if got := guardEnv["SERVER_IP"]; got != fixed {
 		t.Errorf("the guard bakes SERVER_IP=%q into both credentials but the server answers on "+
 			"%q; LND checks the caveat against the connection's source address and will refuse "+
 			"every call", got, fixed)
+	}
+
+	// ALL FOUR PLACES THE RANGE APPEARS, not two. An earlier version of this
+	// checked SERVER_IP against ipv4_address and stopped, while the file's own
+	// comment claimed it caught three of the four — so changing the subnet and
+	// forgetting NETWORK_CIDR left the guard with a stale idea of its network and
+	// nothing went red. The subnet, the address and NETWORK_CIDR are one fact.
+	subnet, err := netip.ParsePrefix(compose.Networks[onNetwork].IPAM.Config[0].Subnet)
+	if err != nil {
+		t.Fatalf("network %q declares subnet %q, which is not a prefix: %v",
+			onNetwork, compose.Networks[onNetwork].IPAM.Config[0].Subnet, err)
+	}
+	addr, err := netip.ParseAddr(fixed)
+	if err != nil {
+		t.Fatalf("the server's ipv4_address %q is not an address: %v", fixed, err)
+	}
+	if !subnet.Contains(addr) {
+		t.Errorf("the server's fixed address %s is not inside the network's subnet %s; Docker "+
+			"will refuse to start it", addr, subnet)
+	}
+	cidr, err := netip.ParsePrefix(guardEnv["NETWORK_CIDR"])
+	if err != nil {
+		t.Fatalf("the guard's NETWORK_CIDR %q is not a prefix: %v", guardEnv["NETWORK_CIDR"], err)
+	}
+	if cidr != subnet {
+		t.Errorf("the guard is told NETWORK_CIDR=%s but the network's subnet is %s; change the "+
+			"range in one place and it must change in all of them", cidr, subnet)
 	}
 }
 
@@ -378,6 +424,27 @@ func TestTheGuardPublishesNoPort(t *testing.T) {
 // recv.macaroon into the credential volume that the server then reads, and a
 // mismatch shows up as a bake failure on first run rather than as a permission
 // error anyone would recognise.
+// TestBothServicesRestartAndTheServerWaitsForTheGuard — ported from
+// umbrel/lint_test.go, where `restart: on-failure` is required because the
+// guard's rotation recovery depends on it (spec §6): the guard exits when LND's
+// macaroons rotate under it and comes back with the new ones. Without the
+// restart policy that exit is permanent. depends_on is the ordering the server's
+// first socket call needs.
+func TestBothServicesRestartAndTheServerWaitsForTheGuard(t *testing.T) {
+	compose, _ := loadCompose(t)
+	for _, name := range []string{"guard", "server"} {
+		if got := compose.Services[name].Restart; got != "on-failure" {
+			t.Errorf("the %s service has restart: %q, want \"on-failure\" — the guard exits "+
+				"when LND's macaroons rotate and only a restart policy brings it back (spec §6)",
+				name, got)
+		}
+	}
+	if got := compose.Services["server"].DependsOn; !slices.Contains(got, "guard") {
+		t.Errorf("the server does not depend on the guard (%v); its first act is a call on the "+
+			"guard's socket", got)
+	}
+}
+
 func TestBothServicesRunAsTheUidThatOwnsTheData(t *testing.T) {
 	compose, _ := loadCompose(t)
 	for _, name := range []string{"guard", "server"} {
@@ -426,9 +493,11 @@ func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 func TestComposeValidatesTheTemplate(t *testing.T) {
 	bin, err := exec.LookPath("docker")
 	if err != nil {
-		t.Skip("SKIPPED: docker is not on PATH, so `docker compose config` could not be run " +
+		t.Skip("SKIPPED: no docker binary on PATH, so `docker compose config` could not be run " +
 			"against docker-compose.yml with .env.example. Every other check in this file ran; " +
-			"this one proves the file PARSES and interpolates, which nothing else here does.")
+			"this one proves the file PARSES and interpolates, which nothing else here does. " +
+			"It needs no daemon — `config` only reads and interpolates — so CI, which has the " +
+			"CLI, does run it; this skip is for a machine without docker installed.")
 	}
 	env := filepath.Join(t.TempDir(), ".env")
 	example, err := os.ReadFile(envPath)

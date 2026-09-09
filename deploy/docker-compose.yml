@@ -15,9 +15,12 @@
 # and the reason is not effort: the guard bakes an `ipaddr` caveat into both
 # credentials and LND checks it against the gRPC connection's SOURCE address.
 # Across hosts that address is this machine's egress address, so the lock would
-# cover every process on the box rather than this container. See DEPLOYING.md.
+# cover every process on the box rather than this container.
 #
-# TWO SNAGS A FIRST INSTALL HITS, both with fixes in DEPLOYING.md:
+# TWO SNAGS A FIRST INSTALL HITS. The fix for each is inline below and in
+# .env.example; DEPLOYING.md gains the full procedure in 20i.2, and this comment
+# deliberately does not point at it until it does — a pointer to a section that
+# does not answer the question costs an operator more than no pointer.
 #   1. LND's TLS certificate must NAME the address the app dials. The app
 #      verifies the certificate with no ServerName override, and LND's default
 #      certificate names localhost and the hostname only — so dialling it by IP

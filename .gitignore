@@ -49,4 +49,3 @@
 
 # The private half of public-scan: specific patterns that must not be published.
 /scripts/public-scan.local
-deploy/.env

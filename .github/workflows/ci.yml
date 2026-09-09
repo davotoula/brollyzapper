@@ -191,14 +191,17 @@ jobs:
       # the only instruction they get, so it must not be the forbidden one.
       - name: the compose file pins real digests
         run: |
-          if grep -q 'sha256:0\{64\}' umbrel/brollyzapper/docker-compose.yml; then
-            echo "umbrel/brollyzapper/docker-compose.yml still pins placeholder digests."
+          if grep -q 'sha256:0\{64\}' umbrel/brollyzapper/docker-compose.yml deploy/docker-compose.yml; then
+            echo "A compose file still pins placeholder digests (listed above)."
             echo
             echo "Publish from CI, never a laptop. Then pin what the registry actually has:"
             echo "  1. gh workflow run publish.yml -f version=<version>"
             echo "  2. docker buildx imagetools inspect ghcr.io/<owner>/brollyzapper:<version> \\"
             echo "       --format '{{.Manifest.Digest}}'   (and the same for -guard)"
-            echo "  3. pin both digests in umbrel/brollyzapper/docker-compose.yml, commit, re-tag."
+            echo "  3. pin both digests in BOTH compose files, commit, re-tag:"
+            echo "       umbrel/brollyzapper/docker-compose.yml   (the App Store package)"
+            echo "       deploy/docker-compose.yml                (the plain-Docker template)"
+            echo "     deploy/lint_test.go asserts the two are equal, so pinning one is a red build."
             echo
             echo "Full procedure: the Release section of the project notes."
             exit 1
