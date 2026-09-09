@@ -498,11 +498,29 @@ func TestBothServicesRestartAndTheServerWaitsForTheGuard(t *testing.T) {
 
 func TestBothServicesRunAsTheUidThatOwnsTheData(t *testing.T) {
 	compose, _ := loadCompose(t)
-	for _, name := range []string{"guard", "server"} {
-		if got := compose.Services[name].User; got != "1000:1000" {
-			t.Errorf("the %s service runs as %q, want \"1000:1000\" — the uid the data "+
-				"directories must be owned by", name, got)
-		}
+	guard, server := compose.Services["guard"].User, compose.Services["server"].User
+
+	// THE SAME VALUE, not a particular one. The uid is overridable because an
+	// Ubuntu host's LND files usually belong to an `lnd` user at mode 0600 and a
+	// guard running as 1000 cannot read them — so the number is the operator's.
+	// What is NOT theirs is letting the two drift: the guard writes
+	// recv.macaroon into the credential volume the server reads, and a
+	// mismatch shows up as a bake failure on first run rather than as anything
+	// resembling a permission error.
+	if guard != server {
+		t.Errorf("the guard runs as %q and the server as %q; they must be the same, or the "+
+			"credential the guard bakes is one the server cannot open", guard, server)
+	}
+	if guard == "" {
+		t.Fatal("neither service sets user:; the images default to uid 65532, which owns none " +
+			"of the data directories")
+	}
+	// AND THE SHIPPED DEFAULT IS STILL 1000, which is what every instruction in
+	// .env.example and the compose comments tells an operator to chown to. An
+	// override that changed the default would leave all of those wrong.
+	if !strings.Contains(guard, ":-1000") {
+		t.Errorf("the user: expression %q does not default to 1000; the ownership "+
+			"instructions in .env.example and this file's own comments all say 1000", guard)
 	}
 }
 

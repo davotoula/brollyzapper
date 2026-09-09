@@ -35,7 +35,19 @@ services:
   # volume (spec §3, §6). It publishes no port, and the lint asserts that.
   guard:
     image: ghcr.io/davotoula/brollyzapper-guard:0.1.20@sha256:63bc04a51b5c1ddf87bc3cc597df9f03f0fa91b31a0644f0efdc5c780d5a0a6b
-    user: "1000:1000"
+    # OVERRIDABLE, AND THE GUARD IS WHY. On umbrelOS the app data is created
+    # 1000:1000 and 1000 is simply right; on an Ubuntu host LND's own files
+    # usually belong to an `lnd` user at mode 0600, so a guard running as 1000
+    # cannot read tls.cert or admin.macaroon and dies at first start with
+    # permission denied on a read-only mount — the Ubuntu operator's first
+    # minute. Setting RUN_AS_UID to the uid that can read those two files fixes
+    # it; making them group-readable and setting RUN_AS_GID is the other way.
+    #
+    # BOTH SERVICES TAKE THE SAME VALUE, and the lint asserts they do rather
+    # than asserting the number: the guard WRITES recv.macaroon into the
+    # credential volume the server reads, so a template where the two drifted
+    # apart would bake a credential the server could not open.
+    user: "${RUN_AS_UID:-1000}:${RUN_AS_GID:-1000}"
     volumes:
       - ${DATA_DIR:-./data}/guard:/guard
       - ${DATA_DIR:-./data}/credentials:/credentials
@@ -105,8 +117,10 @@ services:
     #     sudo chown -R 1000:1000 data
     #
     # Get this wrong and the symptom is the guard failing to write recv.macaroon
-    # on first run, which reads like a bake failure and is not.
-    user: "1000:1000"
+    # on first run, which reads like a bake failure and is not. If you change
+    # RUN_AS_UID to reach LND's files, chown these to the same uid — the two are
+    # one decision.
+    user: "${RUN_AS_UID:-1000}:${RUN_AS_GID:-1000}"
     depends_on:
       - guard
     volumes:
