@@ -189,8 +189,8 @@ itself — with BrollyZapper in plain Docker Compose next to it. umbrelOS operat
 it: install from the App Store and the platform supplies every value below.
 
 The supported template is [`deploy/`](deploy/), and this section is the procedure for it.
-`regtest/docker-compose.yml` is the integration suite's stack — the two services surrounded by a
-test node, a payer and two relays — and is not a deployment.
+`regtest/docker-compose.yml` is the integration suite's stack — the two services surrounded by
+bitcoind, a test node, a payer, two relays and a setup job — and is not a deployment.
 
 **Steps 1 to 5 are the install**, done once and in order. Steps 6 to 10 are what you will want
 afterwards, and the two headings without a number — the mount hazard and trusted proxies — are
@@ -216,9 +216,9 @@ it uses, `mainnet`, `testnet` or `regtest`. Both go into `.env` at step 3.
 
 Two **files** come out of that directory, read-only, and only two: `tls.cert`, and
 `data/chain/bitcoin/<network>/admin.macaroon`. Why it is files and not the directory is
-immediately below — written in the Umbrel package's variable names, because the rule and the
-reason are the same wherever the paths come from. In `deploy/` they come from `LND_DIR` and
-`LND_NETWORK`.
+immediately below. That block is quoted from the Umbrel package, so the variable names in it
+are not this template's — here the two paths come from `LND_DIR` and `LND_NETWORK`. The rule
+and the reason are the same wherever the paths come from, which is the point of it.
 
 ### The single-file mount hazard
 
@@ -271,8 +271,9 @@ list does:
 - **`ADMIN_PASSWORD`** — the one of the four where empty is *wrong* here. **Set it before the
   first start:** left empty the server invents a password and shows it only on `/setup`, which
   is behind the login it would open. Its comment says why that is right on umbrelOS and not
-  here, and what a later start will not undo for you. Recovering from an empty first start is
-  at step 5, and it is not cheap.
+  here, and what a later start will not undo for you. **At least 8 characters** — the config
+  refuses to load a shorter one and the container exits at boot. Recovering from an empty first
+  start is at step 5, and it is not cheap.
 
 Two below the line are worth setting now rather than after the first start:
 
@@ -285,8 +286,10 @@ Two below the line are worth setting now rather than after the first start:
   so you set it once rather than after a restart.
 
 **Then pick the uid, and let the two files decide it.** The containers must be able to *read*
-what step 1 named, and LND usually writes those `0600` to its own user — a guard that cannot
-read them dies at first start:
+what step 1 named, and LND usually writes those `0600` to its own user. A guard that cannot
+read them does not crash — it stays up, answers the admin UI, and logs `could not copy tls.cert
+into the credential volume` and `could not bake the receive macaroon yet`, with the node tile
+never going ready. Getting the uid right now is cheaper than reading that back later:
 
 ```bash
 # the same values you just put in .env, so the two commands below can use them.
@@ -300,14 +303,16 @@ ls -l "$LND_DIR/tls.cert" "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaro
 ```
 
 This is also the check that both paths exist at all: a missing bind-mount source is not an
-error, it is a root-owned directory Docker creates for you and a container that dies at exit
-127. Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
+error to Docker, it is a root-owned **directory** it creates at that path for you. The guard
+refuses to start on that and names the path to remove, but not finding out is quicker.
+
+Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
 `RUN_AS_UID`'s comment in `.env.example` has the other way out, a group both can read through.
 Then create the data directories with that same decision, because it is one decision and not
 two:
 
 ```bash
-mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+sudo mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
 sudo chown -R 1000:1000 "$DATA_DIR"          # or the uid the `ls` above showed
 ```
 
@@ -315,17 +320,38 @@ sudo chown -R 1000:1000 "$DATA_DIR"          # or the uid the `ls` above showed
 
 **If LND runs in Docker on this project's network**, you dial it by service name and this step
 is nearly free — but the certificate rule still applies to that name, so read the
-`tlsextradomain=` bullet below and skip the rest. Everything else here is for an LND on the host, which answers on neither the
-right interface nor the right name until `lnd.conf` says so. Both edits together, then one
-restart:
+`tlsextradomain=` bullet below and skip the rest. Everything else here is for an LND on the
+host, which answers on neither the right interface nor the right name until `lnd.conf` says so.
+
+**Create the network before you touch `lnd.conf`.** The address you are about to bind LND to is
+the bridge's gateway, and the bridge does not exist until compose makes it — bind a listener to
+an address the host does not have and LND does not start at all. This makes the network, and
+the containers, without starting anything:
+
+```bash
+docker compose create
+```
+
+Now both edits, then one restart:
 
 ```ini
 rpclisten=10.61.7.1:10009
 tlsextraip=10.61.7.1
 ```
 
-`10.61.7.1` is the gateway of the template's default `brolly` subnet. If you changed that
-subnet, use its gateway instead — `docker network inspect` will show you.
+`10.61.7.1` is the gateway of the template's default `brolly` subnet. Confirm it — and learn
+the network's real name, which comes from the directory, so `deploy_brolly` if you followed
+step 2 — with:
+
+```bash
+docker network inspect deploy_brolly --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+```
+
+> **`docker compose down` deletes that bridge**, and while it is gone an LND restart fails: the
+> address in `rpclisten` is no longer one the host has. Use `docker compose stop` for routine
+> stops, and after a `down` run `docker compose create` again before restarting LND. If you
+> would rather not couple LND's startup to Docker at all, `rpclisten=0.0.0.0:10009` is the
+> escape — it answers on every interface, which is why it is not the first suggestion.
 
 - **`rpclisten=`** — LND's gRPC listens on `localhost` only by default, so it never answers the
   bridge at all. Name the bridge gateway, which is the address you put in `LND_ADDRESS`.
@@ -333,10 +359,9 @@ subnet, use its gateway instead — `docker network inspect` will show you.
   gateway first.
 - **`tlsextraip=` / `tlsextradomain=`** — LND's certificate has to *name* whatever `LND_ADDRESS`
   says: `tlsextraip=` for an address, `tlsextradomain=` for a name. LND fills the certificate in
-  with the interfaces that existed **when it generated it**, so a Docker bridge created later is
-  not in it however long the node has been running — and since `docker compose down` takes the
-  bridge away again, whether the address happens to be there is a matter of what order things
-  last restarted in. The `lnd.conf` line is what makes it certain.
+  with the interfaces that existed **when it generated it**, so a Docker bridge created later
+  is not in it however long the node has been running, and the callout above is why you cannot
+  count on it being there next time either. The `lnd.conf` line is what makes it certain.
 
 The certificate is only rewritten if it is gone, so delete both halves and restart once:
 
@@ -349,10 +374,20 @@ Then restart LND however you run it — `sudo systemctl restart lnd`, or
 your own `lncli`, a mobile wallet, a web UI. They will fail verification exactly as the guard
 does below until they have it.
 
+**If the stack is already up, restart the guard as well:**
+
+```bash
+docker compose restart guard
+```
+
+The guard tries to bake at startup and then **once an hour** — there is no fast retry — so a
+`lnd.conf` fix made while it is running otherwise looks like it did nothing for up to an hour.
+
 **What each one looks like when it is missing.** Both arrive in `docker compose logs guard`, on
-the guard's `could not bake the receive macaroon yet; the server will ask again` line, in its
-`error` field. Reproduced against this repository's regtest node, with the guard on a Docker
-bridge the node's certificate predates:
+the guard's `could not bake the receive macaroon yet; the server will ask again` line. The logs
+are JSON; what follows is the value of that line's `error` field, which is the part worth
+reading. Reproduced against this repository's regtest node, with the guard on a Docker bridge
+the node's certificate predates:
 
 *The certificate does not name the address* — here the guard dialled `10.61.7.2`, and the
 certificate had been generated before that bridge existed:
@@ -384,49 +419,55 @@ macaroon to whatever answered on that address.
 
 ### 5. Start, and what "up" looks like
 
-First ask compose whether every required value is set — the template's `${LND_DIR:?…}` and
-`${LND_NETWORK:?…}` exist so this fails with a sentence rather than mounting the filesystem
-root:
+First let compose check what it can. Only `LND_DIR` and `LND_NETWORK` carry the template's
+`:?` guard — they are the two with no safe default, and this is what makes an unset one fail
+with a sentence rather than mounting the filesystem root:
 
 ```bash
 docker compose config -q && echo ok
 ```
 
-`ok` means it is willing. Then:
+`ok` means those two are set and the file parses. It says nothing about `LND_ADDRESS` or
+`ADMIN_PASSWORD`, which have no such guard — an empty either passes this and fails later. Then:
 
 ```bash
 docker compose up -d
 ```
 
-Give it a minute, then look for the three signs rather than watching the stream — the guard
-retries with a widening backoff, so a failure loop and a slow success look alike while they
-scroll:
+Give it a minute, then look for the three signs rather than watching the stream — the server
+reconnects on a widening backoff while it waits for the guard, so a failure loop and a slow
+success look alike while they scroll:
 
 ```bash
-docker compose logs guard server | grep -E 'macaroon baked|listening|error='
+docker compose logs guard server | grep -E 'macaroon baked|"msg":"listening"|"error"'
 ```
+
+Both containers log **JSON**, one object per line, so match the quoted field names — a `grep`
+for `error=` finds nothing here however many errors there are.
 
 Three signs, in the order they arrive:
 
 1. **The guard baked a credential.** From the guard:
 
-   ```
-   receive macaroon baked  audit=macaroon.bake
-     caveats="time-before 2026-09-16T20:07:42Z, ipaddr 10.61.7.20"  permissions=5
+   ```json
+   {"level":"INFO","msg":"receive macaroon baked","audit":"macaroon.bake",
+    "caveats":"time-before 2026-09-16T20:07:42Z, ipaddr 10.61.7.20","permissions":"5"}
    ```
 
    Do not read `baking the receive macaroon` as this: that line is logged *before* the attempt
    and appears in a failed loop just as it does in a good one. `receive macaroon baked` is the
    one that means it worked, and the `ipaddr` caveat in it is the server's fixed address.
 
-2. **The server is listening.** `listening addr=[::]:8080` from the server — that is the port
-   *inside* the container, always 8080. From the host it is `HTTP_PORT`:
+2. **The server is listening.** `{"msg":"listening","addr":"[::]:8080"}` from the server —
+   that is the port *inside* the container, always 8080. From the host it is the port you set
+   as `HTTP_PORT`:
 
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' "http://localhost:${HTTP_PORT:-8080}/health"
+   curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/health   # or your HTTP_PORT
    ```
 
-   `200`.
+   `200`. Substitute the port by hand: nothing has put `HTTP_PORT` in this shell, and the
+   template's default is 8080.
 
 3. **You can sign in** at `http://<host>:${HTTP_PORT}/` with the password you set at step 3. If
    you left `ADMIN_PASSWORD` empty, this is where you find out: the login form appears and the
@@ -439,13 +480,16 @@ Three signs, in the order they arrive:
 **While it settles.** `depends_on` orders **startup**, not readiness, so the server can come up
 before the guard has baked anything. While that lasts the server logs
 
-```
-invoice stream dropped; reconnecting  error="lnd: node credentials are not present yet"
-  attempt=1  state=not_linked
+```json
+{"level":"WARN","msg":"invoice stream dropped; reconnecting",
+ "error":"lnd: node credentials are not present yet","attempt":1,"state":"not_linked"}
 ```
 
 with a widening gap — a second, then two, four, eight, capped at a minute. They stop of their
 own accord once `receive macaroon baked` appears in the guard's log and the stream connects.
+The **guard** has no equivalent retry — it bakes at startup and then hourly — so if its log
+shows a failure rather than a bake, fix the cause and `docker compose restart guard` rather
+than waiting it out.
 
 Then work through **First run** in [`README.md`](README.md#first-run): the public domain and
 address name are settings, not deployment values, and they live in the app.
