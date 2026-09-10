@@ -277,7 +277,7 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// pass through (hdu).
 	purse := wallet.New(db, wallet.Options{StartedAt: startedAt, Auditor: auditor, Log: log})
 	auth, err := api.NewAuth(ctx, db, api.AuthOptions{
-		AppPassword:     cfg.AdminPassword,
+		AdminPassword:   cfg.AdminPassword,
 		PasswordManaged: cfg.AdminPasswordManaged,
 		SessionSecret:   cfg.SessionSecret,
 	})

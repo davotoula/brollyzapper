@@ -621,9 +621,15 @@ type SettingsView struct {
 	NostrPubkey        string
 	CreditReceived     bool
 	PasswordChangeable bool
-	ProbeOK            bool
-	ProbeReason        string
-	ProbeAt            string
+	// PasswordMinLen drives the form's `minlength`, from the same constant the
+	// server enforces. It is a value rather than a literal in the template
+	// because the browser's guard and the server's refusal disagreeing is the
+	// exact shape config.MinAdminPasswordLen exists to prevent — the template
+	// said 12 while the loader said 8 until `20i.5`.
+	PasswordMinLen int
+	ProbeOK        bool
+	ProbeReason    string
+	ProbeAt        string
 }
 
 // Renderer renders the embedded templates.

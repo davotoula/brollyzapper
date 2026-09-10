@@ -205,16 +205,14 @@ func TestTheTemplateSetsEveryRequiredSettingAndNoInventedOne(t *testing.T) {
 // PROXY_ family carry no prefix and are exactly the ones a copy-paste from the
 // package would bring across.
 //
-// ADMIN_PASSWORD_MANAGED is the odd one out, and the reason it has to be here:
-// unlike the rest, internal/config DOES read it, so the "no invented setting"
-// check above would wave it through — it is a real setting that is simply never
-// right in this template. It says the PLATFORM supplies the admin password and
-// displays it, which is true of umbrelOS and false of a host where the operator
-// typed it into .env. Set here it would hide the Settings password field and
-// leave that operator unable to change a password nothing else is showing them
-// (`20i.5`).
-// passwordManagedVar is called out by name below: it is the one entry here
-// that internal/config actually reads, so it fails for a different reason.
+// passwordManagedVar is the odd one out in that list, and the reason it has to
+// be there: unlike the rest, internal/config DOES read it, so the "no invented
+// setting" check above would wave it through — it is a real setting that is
+// simply never right in this template. It says the PLATFORM supplies the admin
+// password and displays it, which is true of umbrelOS and false of a host where
+// the operator typed it into .env. Set here it would hide the Settings password
+// field and leave that operator unable to change a password nothing else is
+// showing them (`20i.5`).
 const passwordManagedVar = "ADMIN_PASSWORD_MANAGED"
 
 var umbrelOnly = []string{"APP_", "NETWORK_IP", "PROXY_", passwordManagedVar}
@@ -234,13 +232,16 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		scanned++
+		// Stripped ONCE, not once per needle: the strip rebuilds the whole file
+		// through a strings.Builder, and the result is the same for every needle.
+		cleaned := withoutComments(string(raw))
 		// COMMENTS ARE EXEMPT, as they are in both neighbouring lints. This
 		// repository's convention is that comments record WHY, and the template
 		// cannot explain what it does differently from the Umbrel package without
 		// naming the package's variables. What matters is what compose
 		// INTERPOLATES, which is never a comment.
 		for _, needle := range umbrelOnly {
-			if !strings.Contains(withoutComments(string(raw)), needle) {
+			if !strings.Contains(cleaned, needle) {
 				continue
 			}
 			// Two different failures wear the same name, and telling an operator

@@ -79,15 +79,13 @@ func TestChangingThePasswordEndsEverySession(t *testing.T) {
 	// variation this test turns on, so it is spelled out rather than shared —
 	// and since `20i.5` a password is supplied either way, so the flag is the
 	// only thing that separates the two.
-	const current = "the-current-password"
-	auth := newAuthOver(t, newTestStore(t), current, false, testSessionSecret,
-		func() time.Time { return authTime })
+	auth, _ := newPlainAuth(t, plainPassword)
 
 	rec := httptest.NewRecorder()
 	auth.StartSession(rec, httptest.NewRequest(http.MethodPost, "/login", nil))
 	cookie := rec.Result().Cookies()[0]
 
-	if err := auth.ChangePassword(t.Context(), secret.New(current), secret.New("a-much-longer-password")); err != nil {
+	if err := auth.ChangePassword(t.Context(), secret.New(plainPassword), secret.New("a-much-longer-password")); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
 	r := httptest.NewRequest(http.MethodGet, "/", nil)

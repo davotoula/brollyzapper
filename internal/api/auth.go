@@ -70,18 +70,21 @@ type SettingsStore interface {
 
 // AuthOptions configure Auth.
 type AuthOptions struct {
-	// AppPassword is the admin password the deployment supplied. It seeds the
-	// stored hash on a first run and nothing else; it is required, and
-	// internal/config refuses to start without one.
+	// AdminPassword is the password the deployment supplied. It seeds the stored
+	// hash on a first run and nothing else; it is required, and internal/config
+	// refuses to start without one.
 	//
-	// It does NOT decide whether the password is managed — PasswordManaged does.
-	AppPassword secret.String
+	// NAMED FOR THE VARIABLE IT COMES FROM, ADMIN_PASSWORD. It was AdminPassword
+	// until `20i.5`, after umbrelOS's $APP_PASSWORD — a name that quietly
+	// claimed the platform was the source, which is the inference this bead
+	// removed. PasswordManaged is what says who owns it.
+	AdminPassword secret.String
 	// PasswordManaged says the platform owns the password and displays it
 	// itself, so Settings must not offer to change it (§9).
 	//
-	// SEPARATE FROM AppPassword BEING SET, which is what this used to be
+	// SEPARATE FROM AdminPassword BEING SET, which is what this used to be
 	// inferred from. Off Umbrel the operator types the password into .env, so
-	// both cases arrive as a non-empty AppPassword and the value cannot tell
+	// both cases arrive as a non-empty AdminPassword and the value cannot tell
 	// them apart — the inference made every plain-Docker install look
 	// Umbrel-managed and denied its operator a password change for ever
 	// (`20i.5`).
@@ -155,7 +158,7 @@ func NewAuth(ctx context.Context, store SettingsStore, opts AuthOptions) (*Auth,
 		}
 		a.sessionSecret = persisted
 	}
-	if err := a.bootstrapPassword(ctx, opts.AppPassword); err != nil {
+	if err := a.bootstrapPassword(ctx, opts.AdminPassword); err != nil {
 		return nil, err
 	}
 	stored, _, err := a.store.Setting(ctx, SettingSessionGeneration)
@@ -220,11 +223,11 @@ func (a *Auth) persistedSessionSecret(ctx context.Context) (secret.String, error
 
 // bootstrapPassword seeds the stored hash if there is none.
 //
-// §9: APP_PASSWORD seeds it ONLY when no hash exists yet. A later start with a
-// different APP_PASSWORD must not reseed — the stored hash is the truth once it
-// exists, and reseeding would silently lock the operator out of their own
-// changed password.
-func (a *Auth) bootstrapPassword(ctx context.Context, appPassword secret.String) error {
+// §9: ADMIN_PASSWORD seeds it ONLY when no hash exists yet. A later start with a
+// different ADMIN_PASSWORD must not reseed — the stored hash is the truth once
+// it exists, and reseeding would silently lock the operator out of a password
+// they changed from Settings.
+func (a *Auth) bootstrapPassword(ctx context.Context, adminPassword secret.String) error {
 	stored, ok, err := a.store.Setting(ctx, SettingAdminPasswordHash)
 	if err != nil {
 		return err
@@ -239,11 +242,11 @@ func (a *Auth) bootstrapPassword(ctx context.Context, appPassword secret.String)
 	// this is the assertion that the two stay in step: a caller that reaches
 	// here with nothing gets an error rather than a random credential nobody
 	// can read.
-	if appPassword.IsZero() {
+	if adminPassword.IsZero() {
 		return errors.New("no admin password to seed the stored hash with; " +
 			"ADMIN_PASSWORD is required and the configuration should have refused first")
 	}
-	hash, err := HashPassword(appPassword)
+	hash, err := HashPassword(adminPassword)
 	if err != nil {
 		return err
 	}

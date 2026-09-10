@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/api"
+	"github.com/davotoula/brollyzapper/internal/config"
 	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 )
@@ -102,10 +104,9 @@ func TestTheNewPasswordMinimumIsTwelveCharacters(t *testing.T) {
 			// is allowed and the LENGTH is the only thing under test. It used
 			// to read the current password out of Auth.GeneratedPassword(),
 			// which no longer exists (`20i.5`).
-			const current = "the-current-password"
-			auth := newAuthOver(t, db, current, false, testSessionSecret,
+			auth := newAuthOver(t, db, plainPassword, false, testSessionSecret,
 				func() time.Time { return authTime })
-			err := auth.ChangePassword(t.Context(), secret.New(current),
+			err := auth.ChangePassword(t.Context(), secret.New(plainPassword),
 				secret.New(tc.password))
 			if tc.accepted && err != nil {
 				t.Errorf("a %d-character password was refused: %v", len(tc.password), err)
@@ -229,5 +230,42 @@ func TestTheProbeNowButtonAsksForAProbe(t *testing.T) {
 	default:
 		t.Error("the button redirected but asked for no probe; the operator is told " +
 			"'saved' and nothing happens")
+	}
+}
+
+// The browser's guard and the server's refusal must be the same number.
+//
+// `20i.5` unified two that had drifted — the loader accepted 8 while
+// ChangePassword demanded 12, so a password an operator set in .env was one the
+// app then refused to let them re-enter. The form's `minlength` was a THIRD
+// statement of it, a literal in the template, and this is what stops it
+// becoming a fourth: it reads the rendered attribute back and compares it to
+// the constant both other layers use.
+func TestTheFormsMinimumIsTheOneTheServerEnforces(t *testing.T) {
+	var auth *api.Auth
+	h := newHarness(t, func(opts *api.ServerOptions, db *store.Store) {
+		// Unmanaged, or the form is not rendered at all and this would pass
+		// while asserting over an absent element.
+		auth = newAuthOver(t, db, umbrelPassword, false, testSessionSecret,
+			func() time.Time { return authTime })
+		opts.Auth = auth
+	})
+	// The harness seeded the store before the override ran, and
+	// bootstrapPassword never re-seeds — so the credential in the database is
+	// still the harness's, and the override changed only who owns it. Same
+	// reasoning as TestChangingThePasswordThroughTheFormEndsTheOtherSessions.
+	page := h.get(t, "/settings", signIn(t, h, umbrelPassword)).Body.String()
+
+	want := fmt.Sprintf(`minlength="%d"`, config.MinAdminPasswordLen)
+	if !strings.Contains(page, want) {
+		t.Errorf("the settings form does not carry %s; the browser would accept a password "+
+			"the server refuses, and the form's own guard would be a lie:\n%s", want, page)
+	}
+	// And the server really does refuse one character short, which is what
+	// makes the attribute above worth agreeing with.
+	short := strings.Repeat("a", config.MinAdminPasswordLen-1)
+	if err := auth.ChangePassword(t.Context(), secret.New(umbrelPassword), secret.New(short)); err == nil {
+		t.Errorf("the server accepted a %d-character password while the form says the "+
+			"minimum is %d", len(short), config.MinAdminPasswordLen)
 	}
 }

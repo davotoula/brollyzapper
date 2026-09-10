@@ -131,12 +131,13 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 	// A line budget would have to grow every time the comment above the flag
 	// does, and a number that has to be maintained to keep meaning the same
 	// thing is a number that will be widened until it means nothing.
-	pwLine, managedLine := lineOf(t, raw, "ADMIN_PASSWORD:"), lineOf(t, raw, managed+":")
+	lines := strings.Split(raw, "\n")
+	pwLine, managedLine := lineOf(t, lines, "ADMIN_PASSWORD:"), lineOf(t, lines, managed+":")
 	if managedLine < pwLine {
 		t.Fatalf("%s is at line %d, ABOVE ADMIN_PASSWORD at line %d; the flag describes the "+
 			"password, so it reads after it", managed, managedLine, pwLine)
 	}
-	for i, line := range strings.Split(raw, "\n")[pwLine : managedLine-1] {
+	for i, line := range lines[pwLine : managedLine-1] {
 		if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 			t.Errorf("line %d, %q, sits between ADMIN_PASSWORD and %s. They are one decision "+
 				"— the value and who owns it — and a reader who finds another setting "+
@@ -146,17 +147,21 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 	}
 }
 
-// lineOf is the 1-based line carrying needle, for the adjacency check above.
-// It fails the test rather than returning a sentinel, so a needle that stopped
-// matching cannot quietly satisfy a comparison.
-func lineOf(t *testing.T, raw, needle string) int {
+// lineOf is the 1-based line whose SETTING is needle, for the adjacency check
+// above.
+//
+// It matches a trimmed PREFIX rather than a substring, so a comment mentioning
+// the variable — and this file has several — cannot be mistaken for the line
+// that sets it. It fails the test rather than returning a sentinel, so a needle
+// that stopped matching cannot quietly satisfy a comparison.
+func lineOf(t *testing.T, lines []string, needle string) int {
 	t.Helper()
-	for i, line := range strings.Split(raw, "\n") {
-		if strings.Contains(line, needle) {
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), needle) {
 			return i + 1
 		}
 	}
-	t.Fatalf("%q appears nowhere in the package compose", needle)
+	t.Fatalf("no line sets %q in the package compose", needle)
 	return 0
 }
 

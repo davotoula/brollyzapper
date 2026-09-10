@@ -154,19 +154,16 @@ func TestTheSetupPageShowsNoPasswordAndSaysWhoOwnsIt(t *testing.T) {
 		t.Errorf("the setup page does not say the password is managed: %s", buf.String())
 	}
 
-	// Unmanaged: no such sentence, and — the half worth pinning — no redaction
-	// placeholder either. A template still reaching for a secret.String that no
-	// longer exists renders "[redacted]", which is how a removed field shows up
-	// in a page rather than in a compiler error.
+	// Unmanaged: no such sentence. SetupView holds no secret at all now, so
+	// there is nothing here to assert about redaction — a template reaching for
+	// a field the struct does not have fails Execute, which the Render error
+	// above already catches.
 	buf.Reset()
 	if err := renderer.Render(&buf, "setup", web.PageData{Title: "Setup"}); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if strings.Contains(buf.String(), "managed by Umbrel") {
 		t.Errorf("the setup page claims the password is managed on a plain deployment: %s", buf.String())
-	}
-	if strings.Contains(buf.String(), "[redacted]") {
-		t.Errorf("the setup page rendered a redaction placeholder: %s", buf.String())
 	}
 }
 

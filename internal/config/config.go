@@ -215,9 +215,12 @@ func LoadServer(env Lookup) (*Server, error) {
 	// earlier, in a place the operator is already looking, and leaves no secret
 	// anywhere.
 	//
-	// p.ok guards against a second complaint about a password that was set but
-	// too short: optionalSecret has already failed and handed back a zero value.
-	if cfg.AdminPassword.IsZero() && p.ok("ADMIN_PASSWORD") {
+	// ASKED OF THE ENVIRONMENT, not of the parsed value. A zero AdminPassword
+	// means one of two things — unset, or set but below the minimum — and
+	// optionalSecret has already complained about the second. p.value reports
+	// set-ness directly, so a short password cannot collect a second error
+	// telling it that it is missing.
+	if _, set := p.value("ADMIN_PASSWORD"); !set {
 		if cfg.AdminPasswordManaged {
 			p.fail("ADMIN_PASSWORD", "is empty while ADMIN_PASSWORD_MANAGED is true; "+
 				"the platform is supposed to be supplying it, so either it did not or "+

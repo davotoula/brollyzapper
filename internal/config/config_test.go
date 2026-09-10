@@ -109,7 +109,7 @@ func TestLoadGuardAcceptsAFullyPopulatedEnvironment(t *testing.T) {
 // message naming it.
 func TestLoadServerRequiresVariables(t *testing.T) {
 	t.Parallel()
-	for _, v := range []string{"LND_ADDRESS", "CREDENTIALS_DIR", "DATA_DIR"} {
+	for _, v := range []string{"LND_ADDRESS", "CREDENTIALS_DIR", "DATA_DIR", "ADMIN_PASSWORD"} {
 		t.Run(v, func(t *testing.T) {
 			env := validServerEnv()
 			delete(env, v)
@@ -147,6 +147,7 @@ func TestLoadServerRejectsMalformedValues(t *testing.T) {
 		{"TRUSTED_PROXIES", "not-an-address"},
 		{"TRUSTED_PROXIES", "10.21.0.0/16, "}, // trailing empty entry
 		{"ADMIN_PASSWORD", "short"},           // below the minimum length
+		{"ADMIN_PASSWORD_MANAGED", "yes"},     // a bool this cannot parse; NOT read as false
 		{"SESSION_SECRET", "tooshort"},        // below the minimum length
 		{"LOG_LEVEL", "verbose"},
 	}
@@ -259,11 +260,8 @@ func TestTheServerRefusesToStartWithNoAdminPassword(t *testing.T) {
 	env := validServerEnv()
 	delete(env, "ADMIN_PASSWORD")
 
-	_, err := config.LoadServer(lookup(env))
-	if err == nil {
-		t.Fatal("LoadServer accepted an empty ADMIN_PASSWORD; the app would invent one, or " +
-			"start with no way to sign in")
-	}
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	assertNamesVariable(t, err, "ADMIN_PASSWORD")
 	for _, want := range []string{
 		"ADMIN_PASSWORD",
 		strconv.Itoa(config.MinAdminPasswordLen),
@@ -285,32 +283,13 @@ func TestTheServerRefusesAManagedPasswordThatIsAbsent(t *testing.T) {
 	delete(env, "ADMIN_PASSWORD")
 	env["ADMIN_PASSWORD_MANAGED"] = "true"
 
-	_, err := config.LoadServer(lookup(env))
-	if err == nil {
-		t.Fatal("LoadServer accepted ADMIN_PASSWORD_MANAGED=true with no password")
-	}
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	assertNamesVariable(t, err, "ADMIN_PASSWORD")
 	for _, want := range []string{"ADMIN_PASSWORD", "ADMIN_PASSWORD_MANAGED"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal %q does not name %q; both variables are involved and the "+
 				"operator cannot tell which one is wrong from one of them", err, want)
 		}
-	}
-}
-
-// The flag is a bool and a deployment that misspells its value must not be
-// quietly read as false — that would silently hand an Umbrel operator a
-// password form that fights the platform.
-func TestTheManagedFlagRefusesAValueItCannotParse(t *testing.T) {
-	t.Parallel()
-	env := validServerEnv()
-	env["ADMIN_PASSWORD_MANAGED"] = "yes"
-
-	_, err := config.LoadServer(lookup(env))
-	if err == nil {
-		t.Fatal("LoadServer accepted ADMIN_PASSWORD_MANAGED=yes")
-	}
-	if !strings.Contains(err.Error(), "ADMIN_PASSWORD_MANAGED") {
-		t.Errorf("the refusal %q does not name the variable", err)
 	}
 }
 
@@ -322,10 +301,7 @@ func TestAShortAdminPasswordIsRefusedExactlyOnce(t *testing.T) {
 	env := validServerEnv()
 	env["ADMIN_PASSWORD"] = strings.Repeat("a", config.MinAdminPasswordLen-1)
 
-	_, err := config.LoadServer(lookup(env))
-	if err == nil {
-		t.Fatalf("LoadServer accepted a %d-character password", config.MinAdminPasswordLen-1)
-	}
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
 	if got := strings.Count(err.Error(), "ADMIN_PASSWORD:"); got != 1 {
 		t.Errorf("the refusal names ADMIN_PASSWORD %d times, want 1:\n%v", got, err)
 	}

@@ -107,7 +107,7 @@ func redactionSubjects(t *testing.T) map[string]subject {
 	plain := secret.New(sentinel)
 	conn := store.NWCConnection{Name: "app", ServicePrivkey: secret.New(sentinel + "-privkey"), ClientSecret: secret.New(sentinel + "-client"), ServicePubkey: strings.Repeat("a", 64), Relays: []string{"wss://relay.example"}}
 	zap := store.SettledZap{PaymentHash: strings.Repeat("b", 64), Preimage: secret.New(sentinel + "-preimage")}
-	auth := api.AuthOptions{AppPassword: secret.New(sentinel + "-app"), SessionSecret: secret.New(sentinel + "-session")}
+	auth := api.AuthOptions{AdminPassword: secret.New(sentinel + "-app"), SessionSecret: secret.New(sentinel + "-session")}
 	pay := nwc.PayResult{Settled: true, FeeMsat: 21, Preimage: secret.New(sentinel + "-pay-preimage")}
 
 	// Hand-kept, and it is the arch rule TestEverySecretBearingStructRedactsItself
@@ -144,7 +144,7 @@ func redactionSubjects(t *testing.T) map[string]subject {
 		// no longer invents one, so the type holds no secret and the
 		// completeness rule no longer asks for it.
 		"api.AuthOptions": {auth, map[string]func() string{
-			"AppPassword":   auth.AppPassword.Reveal,
+			"AdminPassword": auth.AdminPassword.Reveal,
 			"SessionSecret": auth.SessionSecret.Reveal,
 		}},
 		"nwc.PayResult": {pay, map[string]func() string{"Preimage": pay.Preimage.Reveal}},
