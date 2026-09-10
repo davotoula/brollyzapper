@@ -193,8 +193,8 @@ The supported template is [`deploy/`](deploy/), and this section is the procedur
 bitcoind, a test node, a payer, two relays and a setup job — and is not a deployment.
 
 **Steps 1 to 5 are the install**, done once and in order. Steps 6 to 10 are what you will want
-afterwards, and the two headings without a number — the mount hazard and trusted proxies — are
-background, placed where the decision they inform gets made.
+afterwards. The headings without a number are background rather than steps, placed where the
+decision they inform gets made.
 
 ### 1. Before you start
 
@@ -279,9 +279,13 @@ list does:
   Change it from **Settings** instead, once you are in.
 
   **INTERIM — remove at the 0.1.21 pin:** the paragraph above describes `0.1.21`, and `deploy/`
-  still pins `0.1.20` images. On those, an empty first start locks the install out with no way
-  in, and a password set here cannot be changed afterwards. `deploy/.env.example` carries the
-  same note beside `ADMIN_PASSWORD`; both go when the two `image:` lines move.
+  still pins `0.1.20` images. On those, an empty first start comes up and locks the install out
+  — the password it invents is shown only on a page behind the login — and a password set here
+  cannot be changed from Settings afterwards. The only way back from an empty first start is
+  destructive: stop the stack, set `ADMIN_PASSWORD`, delete `${DATA_DIR}/server` and start
+  again, which discards the database and with it the nostr identity. So set one now.
+  `deploy/.env.example` carries the same note beside `ADMIN_PASSWORD`; both go when the two
+  `image:` lines move.
 
 Two below the line are worth setting now rather than after the first start:
 
@@ -305,7 +309,7 @@ never going ready. Getting the uid right now is cheaper than reading that back l
 # ADMIN_PASSWORD is in it.
 LND_DIR=/home/lnd/.lnd
 LND_NETWORK=mainnet
-DATA_DIR=$HOME/brollyzapper/data
+DATA_DIR=/home/YOU/brollyzapper/data     # absolute, and somewhere you own
 
 ls -l "$LND_DIR/tls.cert" "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
 ```
@@ -316,19 +320,30 @@ refuses to start on that and names the path to remove, but not finding out is qu
 
 Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
 `RUN_AS_UID`'s comment in `.env.example` has the other way out, a group both can read through.
-Read both numbers off the file, create the directories, and **`chown` only if they are not
-already right** — in the same shell as the block above, which set `$LND_DIR` and `$DATA_DIR`:
+Read both numbers off `admin.macaroon` — the file the guard actually has to open, and the one
+LND writes `0600` — create the directories, and **`chown` only if they do not already have that
+owner**. Same shell as the block above, which set `$LND_DIR`, `$LND_NETWORK` and `$DATA_DIR`:
 
 ```bash
-read -r RUN_AS_UID RUN_AS_GID <<<"$(stat -c '%u %g' "$LND_DIR/tls.cert")"
+MAC="$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
+read -r RUN_AS_UID RUN_AS_GID <<<"$(stat -c '%u %g' "$MAC")"
 
-mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
-[ "$(stat -c %u "$DATA_DIR")" = "$RUN_AS_UID" ] ||
-  sudo chown -R "$RUN_AS_UID:$RUN_AS_GID" "$DATA_DIR"
+mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server || \
+  sudo mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+
+for d in "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server; do
+  [ "$(stat -c '%u %g' "$d")" = "$RUN_AS_UID $RUN_AS_GID" ] ||
+    sudo chown -R "$RUN_AS_UID:$RUN_AS_GID" "$d"
+done
 
 echo "RUN_AS_UID=$RUN_AS_UID"    # put both of these
 echo "RUN_AS_GID=$RUN_AS_GID"    # into .env
 ```
+
+**If those print `0`, stop and pick a different uid.** An LND running as root in Docker owns its
+files `0:0`, and this template deliberately does not run the containers as root — see
+`RUN_AS_UID` in `.env.example` for the other way out, a group both can read through, which is
+the answer whenever the owning uid is one you do not want the app to be.
 
 **The `chown` is conditional because on many hosts it is both unnecessary and impossible.** If
 LND's files belong to the uid you are logged in as — the case on umbrelOS, where they are
@@ -338,12 +353,15 @@ non-interactive SSH session cannot answer, so an unconditional `sudo` is a step 
 rather than one that fails. Measured on the September 2026 field trip, where the unconditional
 form would have blocked a trip that needed no `chown` at all.
 
-**It tests the directories, not you**, which is what makes it right in the other direction too:
-if `$DATA_DIR` is somewhere you needed `sudo mkdir` for, those directories belong to root, the
-comparison fails, and the `chown` runs. `$HOME` avoids the question entirely, which is why the
-example uses it.
+**It tests each of the three directories, and both numbers.** One test on the parent would miss
+the case that actually happens: a first `up` that failed leaves Docker's own root-owned
+directories underneath a `$DATA_DIR` whose ownership is fine. And a gid-only mismatch is exactly
+the state the group route above produces.
 
 `stat -c` is GNU coreutils — this section already assumes a Linux host, which step 1 says.
+
+**If you regenerate `tls.cert` at step 4, check these numbers again**: LND writes the new file
+itself, and nothing guarantees the owner is the one you just read.
 
 ### 4. The two `lnd.conf` edits a host LND needs
 
@@ -616,6 +634,14 @@ design change to how credentials are scoped rather than a setting to expose.
 
 ### 10. Testing beside an existing Umbrel install
 
+**`lncli` is not on umbrelOS's PATH.** It lives in the Lightning Node app's container, so every
+`lncli` in this section is really `docker exec <the lightning app's container> lncli
+--network=mainnet …`. Shorten it once and the rest of the section reads as written:
+
+```bash
+lncli() { docker exec <the lightning app's container> lncli --network=mainnet "$@"; }
+```
+
 **Record the node's root key ids before you start anything.** The put-back below is a diff
 against this list, and it cannot be taken afterwards:
 
@@ -623,17 +649,13 @@ against this list, and it cannot be taken afterwards:
 lncli listmacaroonids > ~/macaroonids.before
 ```
 
-`lncli` is not on umbrelOS's PATH — it lives in the Lightning Node app's container, so every
-`lncli` in this section is really
-`docker exec <the lightning app's container> lncli --network=mainnet …`.
-
 Then stop **only** the BrollyZapper Umbrel app; leave the Lightning Node app running, since it
 is the node under test. Choose a fixed address in Umbrel's app network that nothing has
 allocated —
 
 ```bash
 docker network inspect <umbrel's app network> \
-  --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' | sort -t. -k4 -n
+  --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' | sort -t. -k3,3n -k4,4n
 ```
 
 Pick something well above the highest. **The list is running containers only**, so the
@@ -700,18 +722,24 @@ the app's port to this stack's has to go back *before* the teardown: the moment
 > longer match what they were told to expect. The September 2026 field trip opened exactly this
 > window; nothing arrived in it, which is luck rather than design.
 
-**2. Read the root key ids while they still exist.** The guard's own record is the reliable
-source, and step 3 deletes it:
+**2. Read the root key ids while the guard's own record still exists.** Step 3 deletes it, and
+it is the only list that names *this* guard's keys rather than every key the node holds:
 
 ```bash
-cat "$DATA_DIR"/guard/guard-state.json
-# receive_root_key_id, spend_root_key_id, pending_root_key_ids
+DATA_DIR=<the same absolute path you put in .env>    # this is a fresh shell
+grep -oE '"(receive|spend)_root_key_id":[0-9]+|"pending_root_key_ids":\[[^]]*\]' \
+  "$DATA_DIR/guard/guard-state.json"
 ```
 
+`grep` rather than `cat`: the same file holds any outstanding sending authorisation **and its
+one-time code**, and there is no reason to put that in your scrollback.
+
 **3. Stop the stack and delete its data.** The directories are bind mounts, so `down -v` alone
-does not reach them:
+does not reach them — and `$DATA_DIR` must be set, from the line above, or the `rm` below is
+pointed at the filesystem root:
 
 ```bash
+: "${DATA_DIR:?set DATA_DIR before running this}"
 docker compose down
 rm -rf "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
 ```
@@ -725,7 +753,9 @@ diff ~/macaroonids.before <(lncli listmacaroonids)
 lncli deletemacaroonid <id>    # every id that appeared in between
 ```
 
-The ids from step 2 are the better list: the `diff` also shows anything else that baked while
-you were testing, and cannot show a key whose file you have already deleted.
+Use step 2's ids where you have them — they name *this* guard's keys and nothing else. The
+`diff` is the fallback if you skipped step 2: it still works after the teardown, because it asks
+the node rather than the deleted file, but it also lists anything else that baked in the window,
+so read it rather than piping it.
 
 **5. Start the BrollyZapper app again.**

@@ -61,8 +61,10 @@ services:
       # wallet.db is the seed. The lint asserts exactly these two.
       #
       # A missing bind-mount SOURCE is its own hazard: Docker creates a
-      # DIRECTORY at the path and the container then dies at exit 127. If the
-      # guard will not start, check these two paths exist on the host first.
+      # DIRECTORY at the path rather than failing. The guard's preflight catches
+      # that and names the path to remove, which is what it exists for — before
+      # it, the symptom was exit 127 and nothing to go on. If the guard will not
+      # start, check these two paths exist on the host first.
       #
       # `:?` MAKES COMPOSE REFUSE rather than interpolate nothing, and that is not
       # decoration. With a plain ${LND_DIR} an .env that never sets it — one
@@ -85,14 +87,15 @@ services:
       # the `ipaddr` caveat on both credentials, and LND rejects a connection
       # whose source address does not match. The lint asserts the two agree.
       SERVER_IP: 10.61.7.20
-      # NOT READ WHILE SERVER_IP IS SET — but still keep it equal to the subnet
-      # below, and the lint requires that. internal/guard/caveats.go bakes
-      # `ipaddr <SERVER_IP>` when there is a server address and falls back to
-      # `iprange <NETWORK_CIDR>` only when there is not, so with the line above
-      # set this one is never the lock. It is here because a deployment that
-      # cannot pin a single address still needs the narrower-than-nothing
-      # option — and it tracks the subnet so that a deployment which drops
-      # SERVER_IP does not silently fall back to a range that means nothing.
+      # NOT THE LOCK, but still parsed: internal/config rejects a malformed
+      # value and the guard will not start, so this is not a field to put a
+      # placeholder in. What it is not is the CAVEAT — internal/guard/caveats.go
+      # bakes `ipaddr <SERVER_IP>` when there is a server address and reaches
+      # `iprange <NETWORK_CIDR>` only when there is none, and SERVER_IP is a
+      # required setting, so on any configured install this is never read for
+      # that. Keep it equal to the subnet below anyway: the lint requires it,
+      # and a value that disagrees with the network it names is a value the
+      # next reader has to work out the truth of.
       NETWORK_CIDR: 10.61.7.0/24
       # INITIAL VALUES, not ceilings: they seed the guard's stored caps on first
       # start. The operator may lower either freely afterwards and raise either
@@ -125,8 +128,9 @@ services:
     # UID on the host — umbrelOS creates them as 1000:1000, a plain host does
     # not, so create them yourself. DEPLOYING.md §Running outside Umbrel step 3
     # has the block: it reads the uid off LND's own files rather than assuming
-    # 1000, and chowns only when they are not already yours, because on a host
-    # where they are, `sudo` is both unnecessary and sometimes unavailable.
+    # 1000, and chowns only when the directories do not already have it —
+    # because where `mkdir` alone produced the right owner, `sudo` is both
+    # unnecessary and sometimes unavailable.
     #
     # Get this wrong and the symptom is the guard failing to write recv.macaroon
     # on first run, which reads like a bake failure and is not. If you change
@@ -185,8 +189,9 @@ networks:
   # the same machine. A /24 rather than a /16 asks for 254 addresses instead of
   # 65,534, which is far less likely to overlap a route the host already has
   # from a VPN. If it collides anyway, change the subnet, SERVER_IP,
-  # NETWORK_CIDR and the ipv4_address together — the lint asserts SERVER_IP and
-  # ipv4_address agree, so it will catch three of the four.
+  # NETWORK_CIDR and the ipv4_address together — and the lint now checks all
+  # four: the subnet parses, it contains the address, SERVER_IP equals the
+  # ipv4_address, and NETWORK_CIDR equals the subnet.
   #
   # AN OVERRIDE THAT JOINS ANOTHER NETWORK LEAVES THE SERVER DUAL-HOMED: it
   # keeps this network and gains the other, so SERVER_IP has to name its address

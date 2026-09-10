@@ -686,7 +686,18 @@ var interimFiles = []string{envPath, composePath, "../DEPLOYING.md"}
 // release it was meant to be removed from.
 func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 	compose, _ := loadCompose(t)
+	// BOTH IMAGES, AND THE NEWER OF THE TWO. The notes say they go "when the two
+	// `image:` lines move", and nothing in this file asserts the two tags equal
+	// each other — TestTheImagesEqualThePackages compares each service to the
+	// package, not the two to one another. So a half-done bump has to fire:
+	// taking the OLDER would stay green while the server already shipped the
+	// behaviour the note says is not there yet, which is the failure this check
+	// exists for. Firing one commit early costs a deletion; firing late ships
+	// the note.
 	pinned := imageTag(t, compose.Services["server"].Image)
+	if guardTag := imageTag(t, compose.Services["guard"].Image); olderThan(pinned, guardTag) {
+		pinned = guardTag
+	}
 
 	for _, path := range interimFiles {
 		raw, err := os.ReadFile(path)
@@ -730,16 +741,28 @@ func imageTag(t *testing.T, image string) string {
 //
 // FIELD BY FIELD, not string comparison, because "0.1.9" sorts above "0.1.21"
 // as text and this check would then never fire on the release it exists for.
+//
+// A MISSING FIELD IS ZERO, not "older". `1.0` against a note naming `0.1.21`
+// has to read as NEWER, or a major bump disarms every interim note silently —
+// which is the failure this function exists to prevent, one release later.
+//
+// AN UNPARSEABLE FIELD READS AS NEWER TOO, so the caller fires. imageRE admits
+// a `-` in a tag, so `0.1.21-rc1` is reachable by construction, and the safe
+// reading of "I cannot tell whether this release has happened" is to make
+// somebody look. Saying nothing would leave the note in the release.
 func olderThan(pinned, want string) bool {
 	p, w := strings.Split(pinned, "."), strings.Split(want, ".")
-	for i := 0; i < len(w); i++ {
-		if i >= len(p) {
-			return true
+	for i := range w {
+		a, b := 0, 0
+		if i < len(p) {
+			var err error
+			if a, err = strconv.Atoi(p[i]); err != nil {
+				return false
+			}
 		}
-		a, errA := strconv.Atoi(p[i])
-		b, errB := strconv.Atoi(w[i])
-		if errA != nil || errB != nil {
-			return false // unparseable: say nothing rather than the wrong thing
+		var err error
+		if b, err = strconv.Atoi(w[i]); err != nil {
+			return false
 		}
 		if a != b {
 			return a < b
