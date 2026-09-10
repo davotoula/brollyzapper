@@ -357,9 +357,12 @@ func (s *Store) SettledZapFor(ctx context.Context, paymentHash string) (SettledZ
 	var z SettledZap
 	var settledAt sql.NullInt64
 	// STRAIGHT INTO THE FIELD (twt): secret.String is a sql.Scanner, so the
-	// preimage is never a local string on its way there. The COALESCE above still
-	// earns its place — it turns a NULL into "", which Scan reads as the zero
-	// value, the same answer it would give for the NULL itself.
+	// preimage is never a local string on its way there.
+	//
+	// The COALESCE above is now redundant FOR THIS COLUMN and kept for symmetry
+	// with its neighbours, not because Scan needs it — Scan answers the zero value
+	// for a NULL and for "" alike. An earlier version of this comment said the
+	// COALESCE still earned its place and then gave the reason it does not.
 	err := s.db.QueryRowContext(ctx, q, paymentHash, KindInvoiceIn).
 		Scan(&z.PaymentHash, &z.MintedMsat, &z.PaidMsat, &z.Bolt11, &z.Preimage,
 			&z.ZapRequest, &settledAt)

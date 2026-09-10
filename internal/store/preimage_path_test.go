@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -64,24 +65,66 @@ func TestAPreimageSurvivesTheReceivePathAsASecret(t *testing.T) {
 		t.Fatalf("no txn row for %s; the settlement did not land", hash)
 	}
 
-	// AND AN ABSENT PREIMAGE STAYS ABSENT, which is the half a Valuer could break
-	// silently: nullString used to write NULL for "", and a Valuer returning ""
-	// instead would make every unsettled row match `preimage IS NOT NULL`.
-	const bare = "no-preimage"
-	if err := s.CreateInvoice(ctx, openInvoice(bare, 1_000, time.Unix(1_700_003_600, 0).UTC())); err != nil {
-		t.Fatalf("CreateInvoice: %v", err)
+	// THE ABSENT-PREIMAGE CASE IS NOT HERE, deliberately. It was, and it could not
+	// fail: both readers select COALESCE(t.preimage, ''), which flattens NULL and ''
+	// to the same answer, so a Valuer returning "" for the zero value would have
+	// left IsZero() true and the assertion green. The property is real and is
+	// asserted where it can be seen — secretsql_internal_test.go asks the column
+	// directly with `SELECT v IS NULL`.
+
+}
+
+// The other half of the Valuer's nil-for-zero, which is NOT a no-op (twt).
+//
+// nwc_connections.service_privkey and client_secret are TEXT NOT NULL and were
+// bound as .Reveal() before this bead, so an empty secret stored ” and the
+// insert succeeded — a pairing with no service key, which cannot sign a single
+// NIP-47 response. Binding the secret.String directly makes the same call violate
+// the constraint, which is the right outcome by the wrong route: a raw driver
+// error reaches the operator as a bare refusal.
+//
+// So the refusal says what is wrong, and this is what pins it. Unreachable from
+// the UI today — both halves are minted by nostr.NewPairingKey — which is why it
+// needs a test and not a comment.
+func TestAConnectionWithAMissingKeyHalfIsRefusedByName(t *testing.T) {
+	s, _ := open(t)
+	base := store.NWCConnection{
+		Name:           "half a pairing",
+		ServicePrivkey: secret.New("aa"),
+		ServicePubkey:  "service-pub",
+		ClientPubkey:   "client-pub",
+		ClientSecret:   secret.New("bb"),
+		Relays:         []string{"wss://relay.example"},
+		CreatedAt:      time.Unix(1_700_000_000, 0).UTC(),
 	}
-	if _, err := s.CreditSettledInvoice(ctx, bare, secret.String{}, 1_000, settledAt, true); err != nil {
-		t.Fatalf("CreditSettledInvoice with no preimage: %v", err)
+	for _, c := range []struct {
+		name string
+		of   func(store.NWCConnection) store.NWCConnection
+	}{
+		{"no service key", func(c store.NWCConnection) store.NWCConnection {
+			c.ServicePrivkey = secret.String{}
+			return c
+		}},
+		{"no client secret", func(c store.NWCConnection) store.NWCConnection {
+			c.ClientSecret = secret.String{}
+			return c
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := s.CreateNWCConnection(t.Context(), c.of(base), store.DefaultLimits)
+			if err == nil {
+				t.Fatal("a connection with a missing key half was created; it cannot sign a " +
+					"NIP-47 response and the operator has no way to tell")
+			}
+			if !strings.Contains(err.Error(), "both key halves are required") {
+				t.Errorf("refused with %q; the operator sees this as a bare flash unless the "+
+					"message says what is wrong, and a NOT NULL constraint error does not", err)
+			}
+		})
 	}
-	txns, err = s.Txns(ctx, store.TxnFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("Txns: %v", err)
-	}
-	for _, txn := range txns {
-		if txn.PaymentHash == bare && !txn.Preimage.IsZero() {
-			t.Errorf("an unsettled-proof row came back with preimage %q; the zero value must "+
-				"stay NULL in the column", txn.Preimage.Reveal())
-		}
+
+	// And the whole pairing still works, so the guard did not refuse the fix.
+	if _, err := s.CreateNWCConnection(t.Context(), base, store.DefaultLimits); err != nil {
+		t.Fatalf("a complete pairing was refused: %v", err)
 	}
 }

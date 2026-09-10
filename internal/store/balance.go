@@ -661,9 +661,11 @@ func (s *Store) CountUnresolvedPaymentsBefore(ctx context.Context, before time.T
 // proof-of-payment in this app's ledger, permanently. LND keeps its own copy;
 // this app's history does not, and cannot be backfilled honestly.
 //
-// secret.String all the way in, so the one place it becomes a plain string is
-// this INSERT's argument list. §12 lists preimages with the macaroons, and a
-// plain string parameter would put it in every %v between here and the driver.
+// secret.String all the way in, and since twt it never becomes a plain string
+// here at all: the type is a driver.Valuer, so the UPDATE below binds it directly
+// and the conversion happens inside the driver. §12 lists preimages with the
+// macaroons, and a plain string parameter would put it in every %v between here
+// and the driver — which is what the receive path did until twt typed it too.
 // It reports the fee EXCESS it had to adjust for, so the one caller that has an
 // auditor can raise §12's row. Returned rather than audited here because this
 // package writes no security events — the Auditor is the server's, and the store

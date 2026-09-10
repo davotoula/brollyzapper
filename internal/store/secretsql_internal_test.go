@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"encoding/json"
 	"testing"
 
@@ -33,13 +32,13 @@ func TestASecretRoundTripsThroughSQL(t *testing.T) {
 	// version deleted in a t.Cleanup, whose t.Context() is already CANCELLED by
 	// the time cleanup runs — so the DELETE failed, its error was discarded, and
 	// the second case hit a UNIQUE violation. Distinct ids need no teardown at all.
-	for id, c := range map[int]struct {
+	for id, c := range []struct {
 		name     string
 		in       secret.String
 		wantNull bool
 	}{
-		1: {"a secret", secret.New("s3cr3t-preimage-aabbcc"), false},
-		2: {"the zero value", secret.String{}, true},
+		{"a secret", secret.New("s3cr3t-preimage-aabbcc"), false},
+		{"the zero value", secret.String{}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if _, err := db.ExecContext(t.Context(),
@@ -128,5 +127,4 @@ func TestTheValuerDidNotWeakenTheRedactions(t *testing.T) {
 		t.Errorf("Value = %v, want the revealed secret; a Valuer that redacted would write "+
 			"[redacted] into the database", v)
 	}
-	var _ sql.Scanner = (*secret.String)(nil)
 }

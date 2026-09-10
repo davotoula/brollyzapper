@@ -669,6 +669,24 @@ const (
 // one tests and the regtest arc seed through in the meantime.
 func (s *Store) CreateNWCConnection(ctx context.Context, conn NWCConnection,
 	limits LimitPolicy) (NWCConnection, error) {
+	// BOTH KEY HALVES ARE REQUIRED, refused here by name (twt).
+	//
+	// service_privkey and client_secret are TEXT NOT NULL. Until twt they were
+	// bound as .Reveal(), so an empty secret wrote '' and the INSERT succeeded —
+	// a pairing with no service key, which cannot sign a single NIP-47 response.
+	// Binding the secret.String directly changed that: its Valuer answers nil for
+	// the zero value, so the same call now fails on the NOT NULL constraint.
+	//
+	// That is the better outcome and the wrong way to reach it. A raw driver
+	// error at this depth reaches the operator as `?flash=refused` and nothing
+	// more (pages_connections.go does not wrap it), so the refusal says what is
+	// wrong instead. Unreachable from the UI today — both halves are minted by
+	// nostr.NewPairingKey — which is exactly why it needed a test rather than a
+	// comment.
+	if conn.ServicePrivkey.IsZero() || conn.ClientSecret.IsZero() {
+		return NWCConnection{}, fmt.Errorf(
+			"creating the NWC connection %q: both key halves are required", conn.Name)
+	}
 	conn = withDefaultLimits(conn, limits)
 	permissions, err := encodePermissions(conn.Permissions)
 	if err != nil {
@@ -870,7 +888,6 @@ const nwcConnectionColumns = `SELECT id, name, service_privkey, service_pubkey, 
 func scanNWCConnection(row *sql.Rows) (NWCConnection, error) {
 	var (
 		conn                        NWCConnection
-		privkey, clientSecret       string
 		permissions, relays         string
 		budgetMsat, maxPayment      sql.NullInt64
 		budgetPeriod                string
@@ -883,8 +900,12 @@ func scanNWCConnection(row *sql.Rows) (NWCConnection, error) {
 		pausedReason                string
 		pausedAt                    int64
 	)
-	if err := row.Scan(&conn.ID, &conn.Name, &privkey, &conn.ServicePubkey, &conn.ClientPubkey,
-		&clientSecret, &relays, &permissions, &budgetMsat, &budgetPeriod, &budgetUsed,
+	// STRAIGHT INTO THE FIELDS, like the preimage readers (twt's "Also fixed"):
+	// secret.String is a sql.Scanner, so the nostr private key and the client
+	// secret are never locals holding a plain string on their way to the struct.
+	// Both columns are TEXT NOT NULL, so there is no nil case to reason about.
+	if err := row.Scan(&conn.ID, &conn.Name, &conn.ServicePrivkey, &conn.ServicePubkey,
+		&conn.ClientPubkey, &conn.ClientSecret, &relays, &permissions, &budgetMsat, &budgetPeriod, &budgetUsed,
 		&budgetRenews, &maxPayment, &createdAt, &lastUsedAt, &revoked,
 		&refusalCode, &refusalMessage, &refusedAt,
 		&panicCount, &pausedReason, &pausedAt); err != nil {
@@ -909,8 +930,6 @@ func scanNWCConnection(row *sql.Rows) (NWCConnection, error) {
 	if budgetRenews != 0 {
 		conn.BudgetRenewsAt = time.Unix(budgetRenews, 0).UTC()
 	}
-	conn.ServicePrivkey = secret.New(privkey)
-	conn.ClientSecret = secret.New(clientSecret)
 	pairing, err := decodeRelays(relays)
 	if err != nil {
 		return NWCConnection{}, err

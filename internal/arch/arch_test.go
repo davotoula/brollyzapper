@@ -1404,6 +1404,15 @@ type creds struct {
 // preimage travelling as a string, and a rename to evade the rule is exactly the
 // kind of edit a reviewer notices — which is not true of a type change.
 //
+// PREIMAGE ONLY, AND THAT IS A SCOPE AND NOT AN OVERSIGHT. The sibling's
+// vocabulary is wider — password, secret, privkey, macaroon — and applying this
+// rule to all of it goes red today on nostr.NewPairingKey, whose `(privkey,
+// pubkey string, err error)` is deliberate and documented, and on
+// store.scanNWCConnection. Widening it is therefore a decision about those call
+// sites rather than a rule change, and twt was scoped to the preimage. If you are
+// here to widen it, that is the work: the predicate below already takes the same
+// carriers as the field rule, so only the name test moves.
+//
 // WHAT IT DOES NOT COVER, and why that is not a hole: a short declaration,
 // `preimage := somethingReturningAString()`, has no written type, and deciding
 // whether the right-hand side is a string needs go/types — the boundary this
@@ -1425,8 +1434,15 @@ func checkPreimagesAreNeverPlainStrings(t *testing.T, files []sourceFile) []prob
 			// renders as "string" here and needs no carrier of its own — which is
 			// asserted below rather than assumed, because that is precisely the
 			// case this rule's sibling was missing.
+			//
+			// THE SAME CARRIERS AS checkSecretBearingFields, []string included: a
+			// slice of preimages is as much a leak as one, and the two rules
+			// disagreeing about what can carry a secret is how the next gap gets
+			// made. They are not shared as one list because that rule's carriers
+			// are entangled with its locationSuffixes exemption, which has no
+			// meaning for a parameter — see the scope note on the check.
 			rendered := typeString(typ)
-			if rendered != "string" && rendered != "[]byte" {
+			if !slices.Contains([]string{"string", "[]byte", "[]string"}, rendered) {
 				return
 			}
 			for _, name := range names {
@@ -1467,10 +1483,19 @@ func checkPreimagesAreNeverPlainStrings(t *testing.T, files []sourceFile) []prob
 }
 
 func TestAPreimageIsNeverAPlainString(t *testing.T) {
-	// internal/lnd/lnrpc is generated from LND's protos and calls the raw bytes
-	// RPreimage; lndtest builds fixtures in the shape lnrpc hands them over. The
-	// seam that converts is cmd/brollyzapper's settlement handler, and it is the
-	// line that decides the type — see the comment there.
+	// ONLY lndtest IS LOAD-BEARING here, and the difference is worth writing down
+	// because a skip that protects nothing is an exemption nobody can audit.
+	// lndtest builds fixtures in the shape LND hands them over
+	// (SucceededWithPreimage(feeMsat int64, preimage string)) and this rule really
+	// does fire on it. internal/lnd/lnrpc is generated and calls the raw bytes
+	// RPreimage — but those are struct FIELDS and UNNAMED results
+	// (`GetRPreimage() []byte`), and this rule reads named parameters, named
+	// results and typed vars, so it never looks at either. The entry stays as
+	// future-proofing against a regenerated stub with named results, labelled as
+	// such rather than implying it is holding something back today.
+	//
+	// The seam that converts is cmd/brollyzapper's settlement handler, and it is
+	// the line that decides the type — see the comment there.
 	clean(t, checkPreimagesAreNeverPlainStrings(t,
 		sourceFiles(t, "internal/lnd/lnrpc", "internal/lnd/lndtest")))
 
@@ -1628,9 +1653,15 @@ func (s *Store) settle(preimage secret.String) {
 			if src == "" {
 				t.Fatalf("%s is not in the module any more; this rule's list is stale", c.file)
 			}
-			if !strings.Contains(src, c.needs) {
-				t.Errorf("%s no longer contains %s, so its entry in the allowed list is "+
-					"protecting nothing", c.file, c.needs)
+			// COUNTED, not merely present. The list bounds FILES; the rule's own
+			// comment claims to inventory CALL SITES, and a fourth reveal added
+			// inside internal/nwc/service.go — the likeliest place, since it
+			// already handles preimages — would be invisible to a Contains. This
+			// is what makes the two claims the same claim.
+			if got := strings.Count(src, c.needs); got != 1 {
+				t.Errorf("%s contains %d %s, want exactly 1. The allowed list bounds files; "+
+					"this is what bounds exits, and a second reveal in an allowed file is "+
+					"still a fourth exit", c.file, got, c.needs)
 			}
 		})
 	}

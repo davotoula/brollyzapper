@@ -2,6 +2,7 @@ package secret
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
@@ -57,6 +58,14 @@ func (s String) LogValue() slog.Value { return slog.StringValue(Redacted) }
 // still Redacted after the Valuer landed (twt).
 func (s String) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted) }
 
+// The export seam, asserted at the definition rather than from a test in another
+// package — and the pair also shows the receiver split a reader has to know:
+// Value is on the value, Scan on the pointer, because Scan writes.
+var (
+	_ driver.Valuer = String{}
+	_ sql.Scanner   = (*String)(nil)
+)
+
 // Value implements driver.Valuer, so a secret can be bound to SQL directly.
 //
 // THIS IS THE EXPORT SEAM, and it is the one place a secret is revealed without
@@ -75,10 +84,17 @@ func (s String) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted) }
 // sites left on a preimage are the three the protocols require.
 //
 // NIL FOR THE ZERO VALUE, not the empty string, matching the nullString helper it
-// replaces. Every column this type binds to was already NULL-when-absent, and a
-// Valuer that wrote "" instead would silently change the shape of stored data on
-// the day it landed — an unset preimage would start matching `WHERE preimage IS
-// NOT NULL`.
+// replaces on the columns that used it: an unset preimage stays NULL, where a
+// Valuer writing "" would have made it start matching `WHERE preimage IS NOT
+// NULL` on the day this landed.
+//
+// IT IS NOT A NO-OP EVERYWHERE, and an earlier draft of this paragraph claimed it
+// was. nwc_connections.service_privkey and client_secret are TEXT NOT NULL and
+// were bound as .Reveal() before twt, so an empty secret stored ” there and the
+// insert succeeded. Through this Valuer the same call violates the constraint.
+// That is the right answer — a pairing with no service key cannot sign a NIP-47
+// response — but it is a decision, so store.CreateNWCConnection now refuses it by
+// name rather than letting a driver error surface as a bare refusal.
 func (s String) Value() (driver.Value, error) {
 	if s.v == "" {
 		return nil, nil
