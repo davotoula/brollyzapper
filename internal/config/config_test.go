@@ -612,3 +612,32 @@ func TestServerLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 		}
 	}
 }
+
+// Both problems are reported when both exist, and neither is swallowed by the
+// other.
+//
+// The combination raised by `20i.5`'s review: an unparseable
+// ADMIN_PASSWORD_MANAGED makes optionalBool fall back to false, so the missing
+// password is then described by the UNMANAGED message even though the
+// deployment was trying to say it is managed. That is the right way round — a
+// flag the loader could not read is not a claim the loader can act on — but it
+// is only harmless because BOTH errors come back. LoadServer's contract is
+// "every problem, not just the first", and this is the case where relying on it
+// changes what the operator reads.
+func TestAnUnparseableManagedFlagAndAMissingPasswordAreBothReported(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	delete(env, "ADMIN_PASSWORD")
+	env["ADMIN_PASSWORD_MANAGED"] = "yes"
+
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	for _, want := range []string{
+		`ADMIN_PASSWORD_MANAGED: "yes" is not true or false`,
+		"ADMIN_PASSWORD: is required",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not carry %q, so fixing one problem would reveal the "+
+				"other on the next restart instead of now:\n%v", want, err)
+		}
+	}
+}
