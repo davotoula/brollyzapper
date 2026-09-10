@@ -2,7 +2,6 @@ package guard
 
 import (
 	"log/slog"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,11 +110,10 @@ func TestASweepOnAStaleSnapshotLeavesTheCurrentGrantAlone(t *testing.T) {
 //
 // DRIVEN BY HAND, as its neighbour above is: the interleaving is the defect, and
 // a test that raced for it would reproduce it on some runs and certify nothing
-// on the others. THE CLOCK IS THE INJECTION POINT because it is called between
-// the load and the lock and nothing else here is — RequestAuthorisation reads
-// the clock to stamp the new grant's expiry, and that is the last thing it does
-// before updateIf. Using it this way is a test seam, not a claim about
-// production ordering.
+// on the others. THE CLOCK IS THE INJECTION POINT, on READ #1 — which is
+// sweepExpired's own expiry check, the first thing RequestAuthorisation does
+// after loading state and well before it takes the lock. Using a clock read this
+// way is a test seam, not a claim about production ordering.
 func TestASupersedeOnAStaleSnapshotClaimsNothing(t *testing.T) {
 	dir := t.TempDir()
 	data := filepath.Join(dir, "guard-data")
@@ -126,33 +124,22 @@ func TestASupersedeOnAStaleSnapshotClaimsNothing(t *testing.T) {
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 
 	var g *Guard
-	// consumed fires ONCE, on the clock read that stamps the new grant, which is
-	// after RequestAuthorisation has loaded state and before it takes the lock.
-	var consumed bool
+	reads := 0
 	clock := func() time.Time {
-		if g != nil && !consumed {
-			if current, err := g.state.load(); err == nil && current.Authorisation != nil {
-				consumed = true
-				// The other connection redeems A: row and file together, which
-				// is what consumeAuthorisation does.
-				if err := g.state.update(func(st *State) {
-					g.clearAuthorisationFile()
-					st.Authorisation = nil
-				}); err != nil {
-					t.Error(err)
-				}
+		reads++
+		if reads == 1 {
+			// The other connection redeems A: row and file together, which is
+			// what consumeAuthorisation does.
+			if err := g.state.update(func(st *State) {
+				g.clearAuthorisationFile()
+				st.Authorisation = nil
+			}); err != nil {
+				t.Error(err)
 			}
 		}
 		return now
 	}
-	g = &Guard{
-		state:           store,
-		dataDir:         data,
-		serverIP:        netip.MustParseAddr("10.21.0.17"),
-		rotation:        NewRotationDetector(clock, 0, 0),
-		authoriseBudget: logging.NewRefusalBudget(auditAuthorisationBound, clock),
-		log:             logging.New(os.Stderr, logging.NewLevelVar(slog.LevelError)),
-	}
+	g = newAuthorisationTestGuard(t, store, data, clock)
 
 	// Grant A is live and stored: the state this call will load.
 	a := &Authorisation{
@@ -167,7 +154,7 @@ func TestASupersedeOnAStaleSnapshotClaimsNothing(t *testing.T) {
 	if err := g.RequestAuthorisation(t.Context(), Change{Control: ControlSpendCap, Msat: 200_000_000}); err != nil {
 		t.Fatal(err)
 	}
-	if !consumed {
+	if reads == 0 {
 		t.Fatal("the interleaving never fired, so this test asserts nothing about a stale " +
 			"snapshot; RequestAuthorisation's clock reads have moved")
 	}
@@ -225,14 +212,7 @@ func TestAGrantThatExpiresBeforeTheLockIsNotCalledSuperseded(t *testing.T) {
 		}
 		return base.Add(authorisationTTL + time.Minute)
 	}
-	g := &Guard{
-		state:           store,
-		dataDir:         data,
-		serverIP:        netip.MustParseAddr("10.21.0.17"),
-		rotation:        NewRotationDetector(clock, 0, 0),
-		authoriseBudget: logging.NewRefusalBudget(auditAuthorisationBound, clock),
-		log:             logging.New(os.Stderr, logging.NewLevelVar(slog.LevelError)),
-	}
+	g := newAuthorisationTestGuard(t, store, data, clock)
 	a := &Authorisation{
 		Change:    Change{Control: ControlSending, On: true},
 		Code:      "1111-1111",
@@ -252,19 +232,36 @@ func TestAGrantThatExpiresBeforeTheLockIsNotCalledSuperseded(t *testing.T) {
 			outcomes = append(outcomes, event.Attrs["outcome"])
 		}
 	}
-	// THE SWEEP MUST NOT HAVE TAKEN IT, or this test is exercising the ordinary
-	// expired path and the guard it is about never ran.
 	for _, got := range outcomes {
-		if got == "expired" {
-			t.Fatalf("the sweep took the grant, so the closure never met an expired one and "+
-				"this test asserts nothing: %v", outcomes)
-		}
-	}
-	for _, got := range outcomes {
-		if got == "superseded by a new request" {
+		switch got {
+		case "expired":
+			// The sweep took it, so the closure never met an expired grant and
+			// the guard this test is about never ran.
+			t.Fatalf("the sweep took the grant, so this test asserts nothing: %v", outcomes)
+		case "superseded by a new request":
 			t.Errorf("a grant that ran out of time was recorded as superseded: %v. The "+
 				"operator's second request did not end it; the clock did, and the trail "+
 				"would name the wrong cause", outcomes)
 		}
+	}
+}
+
+// newAuthorisationTestGuard is the Guard the ceremony tests in this file drive.
+//
+// ONE LITERAL, not three. The three hand-built ones had already drifted on their
+// first duplication — two set serverIP and the original did not — and serverIP
+// is read only by the caveat and bake paths, which none of these tests touch, so
+// setting it made the fixture claim coverage it does not have. authoriseBudget
+// is the field that IS load-bearing here: a nil RefusalBudget would change what
+// these tests observe, and the next field like it should be one edit.
+func newAuthorisationTestGuard(t *testing.T, store *stateStore, data string,
+	clock func() time.Time) *Guard {
+	t.Helper()
+	return &Guard{
+		state:           store,
+		dataDir:         data,
+		rotation:        NewRotationDetector(clock, 0, 0),
+		authoriseBudget: logging.NewRefusalBudget(auditAuthorisationBound, clock),
+		log:             logging.New(os.Stderr, logging.NewLevelVar(slog.LevelError)),
 	}
 }

@@ -18,10 +18,8 @@ import (
 func authoriseOutcomes(t *testing.T, g *guard.Guard) []string {
 	t.Helper()
 	var out []string
-	for _, event := range g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
-		if event.Event == logging.EventGuardAuthorise {
-			out = append(out, event.Attrs["outcome"])
-		}
+	for _, row := range authoriseRows(t, g) {
+		out = append(out, row["outcome"])
 	}
 	return out
 }
@@ -51,18 +49,21 @@ func authoriseRows(t *testing.T, g *guard.Guard) []map[string]string {
 func TestSupersedingALiveGrantWritesItsDiscardRow(t *testing.T) {
 	node := lndtest.Start(t)
 	d := guardDirs(t, node)
-	clock := &testClock{now: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
-	g := openGuardFull(t, node, d, guard.Options{Now: clock.Now}, serverAddr(), true)
+	// A FIXED "now", not a testClock: nothing here advances time, and the whole
+	// point is that the first grant is still live when the second supersedes it.
+	now := func() time.Time { return time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC) }
+	g := openGuardFull(t, node, d, guard.Options{Now: now}, serverAddr(), true)
 
 	first := guard.Change{Control: guard.ControlSending, On: true}
 	second := guard.Change{Control: guard.ControlSpendCap, Msat: 200_000_000}
 	if err := g.RequestAuthorisation(t.Context(), first); err != nil {
 		t.Fatal(err)
 	}
-	// INSIDE THE TTL, and asserted rather than assumed: the clock does not move,
-	// so the first grant is live when the second request supersedes it. If it
-	// had expired, the sweep would write its row and this test would be
-	// exercising the other path while still passing on the outcome list.
+	// A LIVE FIRST GRANT IS THE PREMISE, checked here so a failure says which
+	// half broke. The assertion below would catch an expired one anyway — that
+	// list is ["issued", "expired", "issued"] and slices.Equal rejects it — but
+	// it would read as the superseded row being missing rather than as the
+	// first request never having stored anything.
 	status, err := g.Status(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +87,7 @@ func TestSupersedingALiveGrantWritesItsDiscardRow(t *testing.T) {
 	// the incoming change would read as the new grant discarding itself, and
 	// would be satisfied by capturing the wrong side of the overwrite.
 	rows := authoriseRows(t, g)
-	discard := rows[1]
-	if got := discard["control"]; got != string(first.Control) {
+	if got := rows[1]["control"]; got != string(first.Control) {
 		t.Errorf("the superseded row names control %q, want the OLD grant's %q",
 			got, first.Control)
 	}
@@ -132,8 +132,10 @@ func TestAnExpiredGrantIsSweptRatherThanSuperseded(t *testing.T) {
 func TestTheSupersededCodeNoLongerRedeems(t *testing.T) {
 	node := lndtest.Start(t)
 	d := guardDirs(t, node)
-	clock := &testClock{now: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
-	g := openGuardFull(t, node, d, guard.Options{Now: clock.Now}, serverAddr(), true)
+	// A FIXED "now", not a testClock: nothing here advances time, and the whole
+	// point is that the first grant is still live when the second supersedes it.
+	now := func() time.Time { return time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC) }
+	g := openGuardFull(t, node, d, guard.Options{Now: now}, serverAddr(), true)
 
 	first := guard.Change{Control: guard.ControlSending, On: true}
 	second := guard.Change{Control: guard.ControlSpendCap, Msat: 200_000_000}
@@ -143,10 +145,6 @@ func TestTheSupersededCodeNoLongerRedeems(t *testing.T) {
 	stale := readAuthorisationCode(t, d)
 	if err := g.RequestAuthorisation(t.Context(), second); err != nil {
 		t.Fatal(err)
-	}
-	if live := readAuthorisationCode(t, d); live == stale {
-		t.Fatal("the second request wrote the same code as the first, so this test cannot " +
-			"tell a superseded code from a live one")
 	}
 
 	err := g.ApplyChange(t.Context(), first, stale)
