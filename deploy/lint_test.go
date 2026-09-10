@@ -552,15 +552,54 @@ func TestBothServicesRunAsTheUidThatOwnsTheData(t *testing.T) {
 	}
 }
 
-// TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
-// complete: a variable the compose file reads and the example never mentions is
-// one the operator cannot know to set, and it interpolates to empty.
-func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
-	_, raw := loadCompose(t)
-	example, err := os.ReadFile(envPath)
+// assignedInExample is every variable .env.example ASSIGNS, commented or not.
+//
+// AN ASSIGNMENT, NOT A MENTION, and that distinction is the whole of `20i.6`.
+// The first version of this check was strings.Contains over the whole file with
+// comments included — and .env.example documents every variable by name in its
+// own prose, so the check passed on the paragraph and never looked at the line.
+// Measured twice: renaming the ASSIGNMENT `ADMIN_PASSWORD=` to `ADMIN_PASWORD=`
+// left the example setting nothing and the test green. It certified nothing for
+// any variable the file mentions, which is all of them.
+//
+// A LEADING `#` COUNTS, deliberately. `#HTTP_PORT=8080` is how this file shows
+// an optional setting at its real default: the operator can see the name, the
+// shape and the value, and uncommenting it is the whole edit. That is being
+// SHOWN the setting, which is what this check is about — the failure it exists
+// to catch is a variable the operator never sees at all.
+//
+// COLUMN ONE AND NO SPACE AFTER THE `#`, which is tighter than it first looks
+// necessary — and the brief's `^#?\s*` was measured letting prose back in. This
+// file explains the caps with an indented example:
+//
+//	#     GUARD_MAX_PAYMENT_MSAT=1000000
+//
+// which `\s*` reads as an assignment, so deleting the real `#GUARD_MAX_PAYMENT_MSAT=`
+// line left the check green — the same failure this rule exists to fix, one
+// comment later. The file's own convention for a commented setting is
+// `#NAME=value` with nothing between, so that is what counts.
+func assignedInExample(t *testing.T) map[string]bool {
+	t.Helper()
+	raw, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatalf("reading %s: %v", envPath, err)
 	}
+	assignment := regexp.MustCompile(`^#?([A-Z_][A-Z0-9_]*)=`)
+	out := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if m := assignment.FindStringSubmatch(line); m != nil {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
+// complete: a variable the compose file reads and the example never SETS is one
+// the operator cannot know to set, and it interpolates to empty.
+func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
+	_, raw := loadCompose(t)
+	assigned := assignedInExample(t)
 	// ${NAME} and ${NAME:-default} alike; the default half is this file's own
 	// business and not the operator's.
 	interpolated := regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)`).FindAllStringSubmatch(raw, -1)
@@ -571,14 +610,24 @@ func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 			continue
 		}
 		seen[name] = true
-		if !strings.Contains(string(example), name) {
-			t.Errorf("%s interpolates ${%s} and %s never mentions it; the operator cannot "+
-				"set what they are not shown, and it interpolates to empty", composePath, name, envPath)
+		if !assigned[name] {
+			t.Errorf("%s interpolates ${%s} and %s has no assignment line for it — a mention "+
+				"in a comment is not one. The operator cannot set what they are not shown, "+
+				"and it interpolates to empty. A commented `#%s=<default>` counts.",
+				composePath, name, envPath, name)
 		}
 	}
 	if len(seen) < 4 {
 		t.Errorf("found %d interpolated variables in %s; the template takes at least the four "+
 			"an operator must fill, so this check is reading the wrong thing", len(seen), composePath)
+	}
+	// ANTI-VACUITY, on the new half. The old shape could only go vacuous by
+	// failing to find interpolations; this one can also go vacuous by parsing no
+	// assignments at all — a regexp that stopped matching would make every check
+	// above pass by reporting nothing to compare against.
+	if len(assigned) < 4 {
+		t.Errorf("found %d assignments in %s; it sets at least the four an operator must "+
+			"fill, so the assignment parser is reading the wrong thing", len(assigned), envPath)
 	}
 }
 
