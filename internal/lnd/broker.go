@@ -2,7 +2,6 @@ package lnd
 
 import (
 	"context"
-	"slices"
 	"time"
 )
 
@@ -86,14 +85,14 @@ type BrokerStatus struct {
 	SpendLimitMsat int64
 	LNDReachable   bool
 	// RefusalKind names WHY the guard last declined to bake, as one fixed token
-	// from RefusalKinds — never a message. Empty means it has nothing separate
-	// to say, which is every refusal the server has written no copy for.
+	// from the guard's ErrorKinds — never a message. Empty means it has nothing
+	// separate to say, which is every refusal the server has written no copy for.
 	//
-	// It is `0vk.53`'s shape applied one struct over: the guard owns the set,
-	// the server maps a token to copy it wrote and tested, and an unrecognised
-	// token reads as no kind. What it is NOT is the guard's sentence — that
-	// already reaches the operator through the Security page's audit row, and
-	// relaying it to a page is the thing §12 and the arch rules forbid.
+	// It is `0vk.53`'s vocabulary, not a second one: internal/guard aliases this
+	// type, so there is one closed set, one gate that admits a token, and one
+	// test pinning what a page has copy for. What it is NOT is the guard's
+	// sentence — that already reaches the operator through the Security page's
+	// audit row, and relaying it to a page is what §12 and the arch rules forbid.
 	RefusalKind RefusalKind
 	// CredentialAddress is the address the guard locks both credentials to,
 	// relayed as a VALUE rather than as prose. The page needs it to say which
@@ -102,43 +101,13 @@ type BrokerStatus struct {
 	CredentialAddress string
 }
 
-// RefusalKind is a fixed token naming one kind of bake refusal.
+// RefusalKind is a fixed token naming one kind of guard refusal.
 //
-// DECLARED HERE, not in internal/guard, and the reason is the layering rather
-// than taste: internal/guard imports this package to describe what it brokers,
-// so a type in internal/guard could not appear on BrokerStatus without a cycle
-// (§3, and broker.go's own note that the dependency runs one way). It is the
-// same consumer-declares-the-interface rule that put CredentialBroker here.
+// ONLY THE TYPE LIVES HERE, and the vocabulary does not: internal/guard aliases
+// this as ErrorKind and owns the tokens, the ErrorKinds list and the gate that
+// admits one. The type has to be declared in this package because BrokerStatus
+// carries it and internal/guard imports THIS package rather than the reverse
+// (§3, and the note at the top of this file) — but a second closed set beside
+// `0vk.53`'s would be two lists to keep in step, two "known" gates and two
+// pinning tests, which is the fork that pattern exists to prevent.
 type RefusalKind string
-
-// RefusalAddressMismatch is the guard declining to re-bake because the
-// credential on disk already meets the policy and the node still honours its
-// root key — so the rejection is about the ADDRESS the node observes, and a
-// fresh macaroon would carry the same caveats.
-//
-// It is the one kind the server has separate copy for, and it earns that
-// because the state it produces is actively misleading without it: every RPC
-// fails, the client moves to StateRelink, and the Node page offers a Re-link
-// button whose own documentation says "typically rotation". An operator reads
-// that and re-links for ever, because re-linking cannot change what address
-// the node sees (`20i.3`).
-const RefusalAddressMismatch RefusalKind = "address_mismatch"
-
-// RefusalKinds is every token this field may carry. A second entry is a
-// decision about what a page says, not an implementation detail — see the test
-// that pins this list.
-var RefusalKinds = []RefusalKind{RefusalAddressMismatch}
-
-// KnownRefusalKind is the wire token, admitted only if this build knows it.
-//
-// A guard newer than the server can name a kind this server has no copy for,
-// and the safe reading of an unrecognised token is "no kind" — the state the
-// page already handles — rather than a token that flows into a map lookup and
-// renders a blank panel. It also stops the field becoming a channel for
-// arbitrary text by way of a caller that forgets to check.
-func KnownRefusalKind(raw string) RefusalKind {
-	if slices.Contains(RefusalKinds, RefusalKind(raw)) {
-		return RefusalKind(raw)
-	}
-	return ""
-}

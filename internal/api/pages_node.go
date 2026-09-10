@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/davotoula/brollyzapper/internal/guard"
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/preflight"
 	"github.com/davotoula/brollyzapper/internal/web"
@@ -26,12 +27,22 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 			view.ReceiveMacaroonPresent = status.ReceiveMacaroonPresent
 			view.SpendMacaroonPresent = status.SpendMacaroonPresent
 			view.ReceiveExpiry = status.ReceiveExpiry
-			// ONE TOKEN, MAPPED HERE. The guard's own reason is already on the
-			// Security page as an audit row; what this reads is a kind from a
-			// closed set, and anything outside it is no kind at all — which
-			// renders exactly as the page always did (`20i.3`).
-			view.AddressMismatch = status.RefusalKind == lnd.RefusalAddressMismatch
-			view.LockedAddress = status.CredentialAddress
+			// TWO FACTS, AND NEITHER IS ENOUGH ALONE (`20i.3`).
+			//
+			// The guard's kind means "a re-bake would change nothing" — which
+			// is equally true of an operator who pressed Re-link twice on a
+			// healthy install inside MinBakeInterval, and measuring that was
+			// what caught this: a working deployment was being told its address
+			// was wrong, with its only recovery button removed, until the next
+			// renewal days later.
+			//
+			// The other half is the node ACTUALLY rejecting the credential,
+			// which this guard never observes and the server does. Together
+			// they are the condition; apart they are a guess.
+			if status.RefusalKind == guard.KindAddressMismatch &&
+				view.State == string(lnd.StateRelink) {
+				view.MismatchedAddress = status.CredentialAddress
+			}
 		}
 	}
 	data.Node = view

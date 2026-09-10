@@ -5812,6 +5812,11 @@ func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []pr
 		"ControlSending": true, "ControlSpendCap": true, "ControlPaymentCap": true,
 		"Controls": true,
 		"KindOf":   true, "KindCapPair": true, "KindAuthorisationRequired": true,
+		// KindAddressMismatch joined in `20i.3`, on the same grounds again: the
+		// Node page has a different thing to say about a node refusing the
+		// credential for its ADDRESS than about a rotated macaroon, and the
+		// alternative was reading the guard's sentence off BrokerStatus.
+		"KindAddressMismatch": true,
 	}
 	reference := regexp.MustCompile(`\bguard\.([A-Z]\w*)`)
 

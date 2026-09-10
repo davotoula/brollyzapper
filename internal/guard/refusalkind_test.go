@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/guard"
-	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
 )
 
@@ -54,9 +53,9 @@ func TestTheRefusalKindIsSetOnRefusalAndClearedByASuccessfulBake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status over the socket: %v", err)
 	}
-	if status.RefusalKind != lnd.RefusalAddressMismatch {
+	if status.RefusalKind != guard.KindAddressMismatch {
 		t.Errorf("RefusalKind = %q after the address-mismatch refusal, want %q",
-			status.RefusalKind, lnd.RefusalAddressMismatch)
+			status.RefusalKind, guard.KindAddressMismatch)
 	}
 	// The address travels with it, as a VALUE — the page needs it to say which
 	// address the node is disagreeing with, and that is a fact rather than a
@@ -64,9 +63,6 @@ func TestTheRefusalKindIsSetOnRefusalAndClearedByASuccessfulBake(t *testing.T) {
 	if status.CredentialAddress == "" {
 		t.Error("CredentialAddress is empty, so the page cannot name what the credential is " +
 			"locked to — the one fact the operator has to compare against their node")
-	} else if strings.ContainsAny(status.CredentialAddress, " ,") {
-		t.Errorf("CredentialAddress = %q is prose rather than an address; kinds and values "+
-			"cross this boundary and words do not", status.CredentialAddress)
 	}
 
 	// And past MinBakeInterval the bake proceeds, which must clear it. Without
@@ -83,39 +79,5 @@ func TestTheRefusalKindIsSetOnRefusalAndClearedByASuccessfulBake(t *testing.T) {
 	if status.RefusalKind != "" {
 		t.Errorf("RefusalKind = %q after a successful bake, want empty — the page would keep "+
 			"explaining a refusal that has been repaired", status.RefusalKind)
-	}
-}
-
-// `20i.3` criterion 3's plant, in the shape `0vk.53` established: a token from a
-// guard newer than this build reads as NO kind rather than flowing on into a
-// page that has no copy for it.
-func TestAnUnknownRefusalTokenReadsAsNoKind(t *testing.T) {
-	t.Parallel()
-	for _, raw := range []string{"", "address_mismatched", "ADDRESS_MISMATCH", "something_new"} {
-		if got := lnd.KnownRefusalKind(raw); got != "" {
-			t.Errorf("KnownRefusalKind(%q) = %q, want empty — a kind this build has no copy "+
-				"for must render as the page always did, not as a blank panel", raw, got)
-		}
-	}
-	if got := lnd.KnownRefusalKind(string(lnd.RefusalAddressMismatch)); got != lnd.RefusalAddressMismatch {
-		t.Errorf("KnownRefusalKind rejected its own token: %q", got)
-	}
-}
-
-// The vocabulary is a CLOSED SET, and its size is a decision about what a page
-// says rather than an implementation detail. This is the test the type's own
-// doc comment points at.
-func TestTheRefusalVocabularyIsExactlyWhatThePagesHaveCopyFor(t *testing.T) {
-	t.Parallel()
-	want := []lnd.RefusalKind{lnd.RefusalAddressMismatch}
-	if len(lnd.RefusalKinds) != len(want) {
-		t.Fatalf("RefusalKinds = %v, want %v. A new token needs copy on the page that renders "+
-			"it — a kind nobody has written a sentence for renders as nothing at all",
-			lnd.RefusalKinds, want)
-	}
-	for i, kind := range want {
-		if lnd.RefusalKinds[i] != kind {
-			t.Errorf("RefusalKinds[%d] = %q, want %q", i, lnd.RefusalKinds[i], kind)
-		}
 	}
 }

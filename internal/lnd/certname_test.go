@@ -50,7 +50,7 @@ func writeCert(t *testing.T, dnsNames []string, ips []string) string {
 	if err != nil {
 		t.Fatalf("creating certificate: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "tls.cert")
+	path := filepath.Join(t.TempDir(), CertFile)
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		t.Fatalf("writing certificate: %v", err)
 	}
@@ -95,6 +95,23 @@ func TestACertificateThatDoesNotNameTheDialledHostIsRefusedWithTheFix(t *testing
 	}
 }
 
+// A certificate naming NOTHING is the degenerate case, and the sentence has to
+// stay readable: "it names " with an empty list reads as a truncation, so the
+// fallback says so in a word. Reachable — LND will not produce such a
+// certificate, but a hand-made or truncated one is what an operator debugging
+// this most plausibly has.
+func TestACertificateNamingNothingSaysSo(t *testing.T) {
+	t.Parallel()
+	err := verifyCertificateNames(writeCert(t, nil, nil), "10.61.7.2:10009")
+	if err == nil {
+		t.Fatal("a certificate naming nothing at all verified against an address")
+	}
+	if !strings.Contains(err.Error(), "it names nothing") {
+		t.Errorf("the hint reads as truncated rather than saying the certificate names "+
+			"nothing:\n%s", err)
+	}
+}
+
 // A HOSTNAME gets the other directive. Two fixtures, because the whole value of
 // choosing for the operator is lost if it chooses the same one every time.
 func TestADialledNameGetsTheDomainDirective(t *testing.T) {
@@ -134,14 +151,21 @@ func TestACertificateThatNamesTheHostPasses(t *testing.T) {
 // The preflight decides nothing it cannot decide. Each of these is a DIFFERENT
 // failure with its own diagnosis elsewhere, and a confident wrong hint is worse
 // than none — so each must pass rather than invent a certificate-name verdict.
+//
+// ONLY THE FIRST ROW IS REACHABLE FROM connection(): credentials.NewClientTLSFromFile
+// runs one line earlier and returns "loading %s" for an absent, non-PEM or
+// non-DER file, so those three never reach here in the running process. They are
+// kept as the FUNCTION's contract rather than the caller's, because the ordering
+// that makes them unreachable is one line in another file — and if it ever moves,
+// this is what says what the answer should be.
 func TestThePreflightDeclinesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	good := writeCert(t, []string{"localhost"}, []string{"127.0.0.1"})
-	notPEM := filepath.Join(t.TempDir(), "tls.cert")
+	notPEM := filepath.Join(t.TempDir(), CertFile)
 	if err := os.WriteFile(notPEM, []byte("this is not a certificate"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	badDER := filepath.Join(t.TempDir(), "tls.cert")
+	badDER := filepath.Join(t.TempDir(), CertFile)
 	if err := os.WriteFile(badDER,
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not DER")}), 0o600); err != nil {
 		t.Fatal(err)
@@ -173,35 +197,13 @@ func TestThePreflightDeclinesWhatItCannotRead(t *testing.T) {
 // still passes — they exercise verifyCertificateNames directly.
 func TestTheDialIsRefusedBeforeAnythingConnects(t *testing.T) {
 	t.Parallel()
-	// A REAL listener, so "nothing connected" is a measurement rather than the
-	// absence of a service. It accepts in the background and counts.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening: %v", err)
-	}
-	defer listener.Close()
-	connected := make(chan struct{}, 8)
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			connected <- struct{}{}
-			conn.Close()
-		}
-	}()
-
-	dir := t.TempDir()
-	macaroon := filepath.Join(dir, "admin.macaroon")
-	if err := os.WriteFile(macaroon, []byte("not-a-real-macaroon"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// 127.0.0.1 is what we dial; the certificate names only a name, so the
-	// address is absent from it.
-	cert := writeCert(t, []string{"lnd"}, nil)
-	client := New(listener.Addr().String(), FileCredentials(cert, macaroon), Options{})
-	t.Cleanup(func() { _ = client.Close() })
+	// NO LISTENER, and that is the point rather than a shortcut: grpc.NewClient
+	// does no I/O at all, so a test that watched a socket for connections would
+	// see none WITH the preflight and none without it — an observer that cannot
+	// observe the thing it is named for. What distinguishes the two worlds is
+	// whether connection() hands back a usable *grpc.ClientConn for a
+	// certificate that can never verify, and that is what is asserted here.
+	client := newTestClient(t, writeCert(t, []string{"lnd"}, nil), "127.0.0.1:1")
 
 	conn, err := client.connection()
 	if conn != nil {
@@ -214,12 +216,63 @@ func TestTheDialIsRefusedBeforeAnythingConnects(t *testing.T) {
 			"nothing at construction, so without the preflight this returns nil and the "+
 			"mismatch surfaces at the first RPC as an untyped status string", err)
 	}
+}
 
-	select {
-	case <-connected:
-		t.Error("something connected to the node before the certificate was checked; the " +
-			"preflight is meant to run before any I/O")
-	case <-time.After(100 * time.Millisecond):
+// newTestClient is a Client with real credential FILES, so Ready() is true and
+// the paths under test are the ones a running process takes.
+func newTestClient(t *testing.T, certPath, address string) *Client {
+	t.Helper()
+	macaroon := filepath.Join(t.TempDir(), "admin.macaroon")
+	if err := os.WriteFile(macaroon, []byte("not-a-real-macaroon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := New(address, FileCredentials(certPath, macaroon), Options{})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// The verdict is remembered for the life of the connection, and forgotten with
+// it.
+//
+// A refused connection never populates c.conn, so without this every later RPC
+// re-reads and re-parses tls.cert — on the public LNURL callback, in a state
+// that lasts until the operator edits lnd.conf. Caching it must not cost the
+// property the check was put in connection() for: a regenerated certificate is
+// still picked up, at the next reconnect and no later.
+func TestTheCertificateVerdictIsCachedUntilTheConnectionIsDropped(t *testing.T) {
+	t.Parallel()
+	certPath := writeCert(t, []string{"lnd"}, nil)
+	client := newTestClient(t, certPath, "127.0.0.1:1")
+
+	if _, err := client.connection(); err == nil {
+		t.Fatal("the mismatched certificate was accepted; this test needs the refusal")
+	}
+	// Repair the file in place, as LND regenerating its certificate would.
+	replaceCert(t, certPath, writeCert(t, nil, []string{"127.0.0.1"}))
+
+	if _, err := client.connection(); err == nil {
+		t.Error("the repaired certificate was picked up without a reconnect; the verdict is " +
+			"supposed to last as long as the connection attempt it was made for, or every " +
+			"RPC pays for a fresh read")
+	}
+	// reconnect() is what the stream's backoff calls, and it is what makes the
+	// repair take effect.
+	client.reconnect()
+	if _, err := client.connection(); err != nil {
+		t.Errorf("a repaired certificate was still refused after a reconnect, so fixing "+
+			"lnd.conf would need a restart of the process: %v", err)
+	}
+}
+
+// replaceCert overwrites dst with src's bytes, in place.
+func replaceCert(t *testing.T, dst, src string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -228,7 +281,16 @@ func TestTheDialIsRefusedBeforeAnythingConnects(t *testing.T) {
 // operator whose Node page said "relink" would press a button for ever.
 func TestACertificateMismatchDoesNotAskForAReBake(t *testing.T) {
 	t.Parallel()
-	client := New("10.61.7.2:10009", FileCredentials("/nonexistent", "/nonexistent"), Options{})
+	// REAL CREDENTIAL FILES. With absent ones, recordState takes its
+	// !creds.Ready() branch and returns false before it ever looks at the error
+	// — so this passed for any error at all, including one with nothing to do
+	// with certificates, and would have gone on passing if the switch were
+	// reordered so IsAuthFailure caught this first.
+	client := newTestClient(t, writeCert(t, nil, []string{"127.0.0.1"}), "127.0.0.1:1")
+	if !client.creds.Ready() {
+		t.Fatal("the fixture's credentials are not Ready, so recordState would short-circuit " +
+			"and this test would assert nothing about the error it is named for")
+	}
 	if got := client.recordState(&CertificateNameError{Dialled: "10.61.7.2"}); got {
 		t.Error("a certificate-name mismatch asked the guard to re-bake; a fresh macaroon " +
 			"carries the same caveats and cannot change what the certificate names")

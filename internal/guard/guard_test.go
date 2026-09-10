@@ -1116,7 +1116,8 @@ func TestSpendCaveatsAreVerifiedBeforeAMacaroonIsAccepted(t *testing.T) {
 // give: a token no refusal ever carries is copy the operator can never be shown,
 // and this repo has already shipped two flash messages nothing could trigger.
 func TestTheErrorKindsAreExactlyThese(t *testing.T) {
-	want := []guard.ErrorKind{guard.KindCapPair, guard.KindAuthorisationRequired}
+	want := []guard.ErrorKind{guard.KindCapPair, guard.KindAuthorisationRequired,
+		guard.KindAddressMismatch}
 	if got := guard.ErrorKinds; !slices.Equal(got, want) {
 		t.Errorf("guard.ErrorKinds = %v, want %v", got, want)
 	}
@@ -1134,7 +1135,16 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 	// KindAuthorisationRequired is raised: 80k sats is above the standing 50k
 	// per-payment cap and below the 100k window, so it passes the cap pair, is a
 	// loosening, and reaches redeem with nothing to redeem.
+	//
+	// And the bake that would change nothing (`20i.3`): the FIRST OpBakeReceive
+	// below succeeds and is not in this list, because a response with no error
+	// would fail the guard above; the second, moments later, is the refusal.
+	if resp := g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive}); resp.Error != "" {
+		t.Fatalf("the first bake was refused, so the second cannot be the refusal this test "+
+			"needs: %+v", resp)
+	}
 	for _, resp := range []guard.Response{
+		g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive}),
 		g.Handle(t.Context(), guard.Request{Op: guard.OpApplyChange,
 			Change: &guard.Change{Control: guard.ControlSpendCap, Msat: 40_000}}),
 		g.Handle(t.Context(), guard.Request{Op: guard.OpRequestAuthorisation,
