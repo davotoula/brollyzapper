@@ -90,7 +90,7 @@ var (
 //
 // IT IS NOT A NO-OP EVERYWHERE, and an earlier draft of this paragraph claimed it
 // was. nwc_connections.service_privkey and client_secret are TEXT NOT NULL and
-// were bound as .Reveal() before twt, so an empty secret stored ” there and the
+// were bound as .Reveal() before twt, so an empty secret stored the empty string there and the
 // insert succeeded. Through this Valuer the same call violates the constraint.
 // That is the right answer — a pairing with no service key cannot sign a NIP-47
 // response — but it is a decision, so store.CreateNWCConnection now refuses it by

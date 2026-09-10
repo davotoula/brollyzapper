@@ -1456,16 +1456,28 @@ func checkPreimagesAreNeverPlainStrings(t *testing.T, files []sourceFile) []prob
 						where, name.Name, rendered)})
 			}
 		}
+		// EVERY FuncType, however it is written down. Matching *ast.FuncDecl alone
+		// misses two shapes the go-review pass found by planting them, and one of
+		// them is in this bead's own diff: an INTERFACE method signature is an
+		// *ast.Field inside an InterfaceType whose Type is a FuncType, never a
+		// FuncDecl — so `crediter` in cmd/brollyzapper, the interface twt retyped,
+		// was invisible to the rule that exists to hold it. A closure's parameters
+		// are the other, and that one has no backstop at all: an interface whose
+		// method reverts to `string` usually breaks the build at its implementer,
+		// which a FuncLit does not.
+		//
+		// Inspecting FuncType directly covers all three at once and needs no case
+		// per shape, which is why this is not three cases.
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch d := n.(type) {
-			case *ast.FuncDecl:
-				if d.Type.Params != nil {
-					for _, field := range d.Type.Params.List {
+			case *ast.FuncType:
+				if d.Params != nil {
+					for _, field := range d.Params.List {
 						report(field.Names, field.Type, "parameter")
 					}
 				}
-				if d.Type.Results != nil {
-					for _, field := range d.Type.Results.List {
+				if d.Results != nil {
+					for _, field := range d.Results.List {
 						report(field.Names, field.Type, "result")
 					}
 				}
@@ -1538,6 +1550,24 @@ func settle(rawPreimage []byte) {}
 	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
 
 func credit(preimage (string)) {}
+`)}), "parameter preimage is typed string")
+
+	// AN INTERFACE METHOD, which the rule could not see until the go-review pass
+	// planted it — and the interface it could not see was crediter in
+	// cmd/brollyzapper, the one this bead retyped.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("cmd/brollyzapper", `package main
+
+type crediter interface {
+	CreditInvoice(ctx context.Context, paymentHash, preimage string) (bool, error)
+}
+`)}), "parameter preimage is typed string")
+
+	// A CLOSURE, which is the shape with no backstop: an interface whose method
+	// reverts to string usually breaks the build at its implementer; a func
+	// literal has nobody to disagree with it.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+var record = func(preimage string) {}
 `)}), "parameter preimage is typed string")
 
 	// A NAME THAT IS NOT A PREIMAGE is left alone, and so is a preimage that is

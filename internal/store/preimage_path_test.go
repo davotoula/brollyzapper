@@ -77,7 +77,7 @@ func TestAPreimageSurvivesTheReceivePathAsASecret(t *testing.T) {
 // The other half of the Valuer's nil-for-zero, which is NOT a no-op (twt).
 //
 // nwc_connections.service_privkey and client_secret are TEXT NOT NULL and were
-// bound as .Reveal() before this bead, so an empty secret stored ” and the
+// bound as .Reveal() before this bead, so an empty secret stored the empty string and the
 // insert succeeded — a pairing with no service key, which cannot sign a single
 // NIP-47 response. Binding the secret.String directly makes the same call violate
 // the constraint, which is the right outcome by the wrong route: a raw driver
