@@ -226,10 +226,12 @@ var errAuthorisationRequired error = &Refusal{
 // where only the operator can read it.
 //
 // A NEW REQUEST SUPERSEDES AN OUTSTANDING ONE, including one for a different
-// change. Two live codes would mean two sentences on disk describing two pending
-// operations, and an operator typing the code they can see for the change they
-// did not read — which is the phishing this design exists to prevent, assembled
-// out of two honest halves.
+// change, AND RECORDS THAT IT DID. Two live codes would mean two sentences on
+// disk describing two pending operations, and an operator typing the code they
+// can see for the change they did not read — which is the phishing this design
+// exists to prevent, assembled out of two honest halves. The one that goes gets
+// its own row, so §12's trail can say what became of it rather than showing a
+// request and then nothing (`0vk.56`).
 //
 // IT RETURNS NOTHING BUT AN ERROR, and in particular it does not return the code:
 // the server must not learn it, and a return value is the easiest possible way
@@ -249,13 +251,19 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// the trail records an abandoned grant's expiry as an expiry rather than
 	// letting the overwrite below swallow it.
 	//
-	// ONLY THE EXPIRED HALF. Superseding a LIVE grant — an operator who asks for
-	// a code, does not use it, and asks again inside the TTL — still writes no
-	// discard row, so §12 cannot answer "what happened to that one" for that
-	// path. That is a gap this call does not close and does not pretend to; it is
-	// filed rather than fixed here, because auditing supersession means a new
-	// outcome word in the trail, which is a decision about §12's vocabulary.
-	// Found by review, which caught this comment claiming the whole of it.
+	// ONLY THE EXPIRED HALF, and that is still true of this call: a LIVE grant
+	// superseded below writes its own row, from its own capture, further down
+	// (`0vk.56`).
+	//
+	// THE TWO ARE NOT FOLDED, deliberately. They report different facts — a
+	// grant that ran out of time against one the operator replaced — and they
+	// differ in a way that matters more than the word: this sweep runs on the
+	// POLLED path too, where discardAuthorisation's audit-even-if-the-write-
+	// failed behaviour would turn one unwritable state file into a row every
+	// five minutes for ever. Routing supersession through the sweep, or the
+	// sweep through discardAuthorisation, would inherit that on a path that
+	// cannot afford it. See sweepExpired's own note and
+	// TestASweepThatCannotWriteClaimsNothing.
 	state = g.sweepExpired(ctx, state)
 	if !state.loosens(change) {
 		// Refused rather than issued. A grant for a change that needs none would
@@ -317,11 +325,29 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// lock the payment path takes per request. If anything ever puts a
 	// credential-sized write or a network call in here, this is the line to move
 	// back out and solve differently.
+	// superseded is the grant this request displaces, captured INSIDE the lock
+	// for the same reason sweepExpired captures its own: the row has to name
+	// what was actually overwritten, not what this call's snapshot happened to
+	// hold. Another connection can redeem or sweep the old grant between the
+	// load above and this lock, and then there is nothing to supersede and
+	// nothing to say (`0vk.54`'s stale-snapshot HIGH, in a second coat).
+	//
+	// NOT EXPIRED, because the sweep above has already recorded those as
+	// `expired` and a second row here would report one discard twice.
+	var superseded *Change
 	var wrote error
 	if err := g.state.updateIf(func(st *State) bool {
 		if wrote = g.writeAuthorisationFile(grant, now); wrote != nil {
 			return false
 		}
+		if current := st.Authorisation; current != nil && !current.expired(now) {
+			change := current.Change
+			superseded = &change
+		}
+		// The overwrite IS the clear: one grant, one file, and
+		// writeAuthorisationFile above has already replaced the old code with
+		// the new one. clearAuthorisationFile here would delete the file this
+		// closure just wrote.
 		st.Authorisation = grant
 		return true
 	}); err != nil {
@@ -329,6 +355,23 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	}
 	if wrote != nil {
 		return wrote
+	}
+	// SUPERSEDED FIRST, THEN ISSUED, so the trail reads in the order the facts
+	// happened: the old grant ended because this one replaced it.
+	//
+	// AFTER the file write's error return above, so a request that failed to
+	// write its file — and therefore superseded nothing, the closure having
+	// returned false — says nothing about a grant that is still live.
+	//
+	// TWO ROWS FOR ONE RE-REQUEST, and that is a real cost against
+	// auditAuthorisationBound's eight an hour: four re-requests fill it. It is
+	// acceptable here and would not be on a polled path — this call is
+	// operator-driven, authenticated, and paced by a human deciding to ask
+	// again. The bound is not raised; the reason it is eight is written where
+	// it is declared.
+	if superseded != nil {
+		g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded",
+			*superseded, discarded("superseded by a new request"))
 	}
 	// Audited: an authorisation request is the app asking for more authority
 	// than it has, which is worth a durable row whether or not it is redeemed.
@@ -694,6 +737,15 @@ func (g *Guard) consumeAuthorisation() error {
 // 32 slots and nothing drains it. EXPIRY CONDITION: the same one. If
 // maxRetainedAuditEvents grows, both bounds grow with it; the ratio is the fact,
 // not either number.
+//
+// WHAT EIGHT BUYS, since `0vk.56` made one operator action cost two rows: a
+// re-request inside the TTL writes `superseded` for the old grant and `issued`
+// for the new, so FOUR re-requests in an hour fill this. A single ceremony —
+// request, then redeem — is still two rows, so four complete ceremonies fill it
+// too. That is the shape of the trade, and it is why the answer to a flood is
+// the bound doing its job rather than a larger number: the rows this evicts are
+// other ceremony rows, never the guard.reject rows a compromised server would
+// be generating, which have their own budget.
 const auditAuthorisationBound = 8
 
 // auditAuthorisation raises one ceremony event. It exists so that no call site
