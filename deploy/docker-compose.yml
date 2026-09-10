@@ -85,6 +85,12 @@ services:
       # the `ipaddr` caveat on both credentials, and LND rejects a connection
       # whose source address does not match. The lint asserts the two agree.
       SERVER_IP: 10.61.7.20
+      # INERT WHILE SERVER_IP IS SET, so do not tune it. internal/guard/caveats.go
+      # bakes `ipaddr <SERVER_IP>` when there is a server address and falls back
+      # to `iprange <NETWORK_CIDR>` only when there is not — one lock, not two.
+      # It is here because a deployment that cannot pin a single address still
+      # needs the narrower-than-nothing option, and because a reader who finds
+      # only the address wonders what bounds a network.
       NETWORK_CIDR: 10.61.7.0/24
       # INITIAL VALUES, not ceilings: they seed the guard's stored caps on first
       # start. The operator may lower either freely afterwards and raise either
@@ -179,6 +185,15 @@ networks:
   # from a VPN. If it collides anyway, change the subnet, SERVER_IP,
   # NETWORK_CIDR and the ipv4_address together — the lint asserts SERVER_IP and
   # ipv4_address agree, so it will catch three of the four.
+  #
+  # AN OVERRIDE THAT JOINS ANOTHER NETWORK LEAVES THE SERVER DUAL-HOMED, and
+  # that is worth knowing before it matters: the container keeps this network
+  # AND gains the other, so it has two addresses and LND sees whichever one the
+  # route to the node came out of. The `ipaddr` caveat names one. If a bake
+  # succeeds and calls then fail for the address, this is the first thing to
+  # look at — SERVER_IP has to be the address on the network the node is
+  # reached over, not this one. Observed on the September 2026 field trip,
+  # where it was harmless because the node was on the joined network.
   brolly:
     ipam:
       config:
