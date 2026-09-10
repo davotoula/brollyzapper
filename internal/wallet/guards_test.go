@@ -130,7 +130,7 @@ func TestEveryInputGuardRefusesAndWritesNothing(t *testing.T) {
 			return 0
 		},
 		call: func(ctx context.Context, w *localSpender, _ ReservationID) error {
-			_, err := w.CreditInvoice(ctx, "hash", "preimage", 21_000, testTime)
+			_, err := w.CreditInvoice(ctx, "hash", secret.New("preimage"), 21_000, testTime)
 			return err
 		},
 	}} {

@@ -437,7 +437,9 @@ func (w *localSpender) Adjust(ctx context.Context, deltaMsat int64, note string)
 // settle time, so a zero means the node said something unexpected; stamping
 // 1970 into a public event would look deliberate to every client that rendered
 // it.
-func (w *localSpender) CreditInvoice(ctx context.Context, paymentHash, preimage string, amountPaidMsat int64, settledAt time.Time) (bool, error) {
+func (w *localSpender) CreditInvoice(ctx context.Context, paymentHash string,
+	preimage secret.String, amountPaidMsat int64, settledAt time.Time,
+) (bool, error) {
 	credit, err := w.CreditReceived(ctx)
 	if err != nil {
 		return false, err

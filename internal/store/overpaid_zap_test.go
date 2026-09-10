@@ -3,6 +3,8 @@ package store_test
 import (
 	"testing"
 	"time"
+
+	"github.com/davotoula/brollyzapper/internal/secret"
 )
 
 // 0vk.15: an OVERPAID zap keeps both numbers, and the receipt is built from the
@@ -30,7 +32,7 @@ func TestAnOverpaidZapKeepsTheMintedAmountAndThePaidAmount(t *testing.T) {
 		t.Fatalf("CreateInvoice: %v", err)
 	}
 	settledAt := time.Unix(1_700_000_000, 0).UTC()
-	if _, err := s.CreditSettledInvoice(ctx, "overpaid", "preimage", paid, settledAt, true); err != nil {
+	if _, err := s.CreditSettledInvoice(ctx, "overpaid", secret.New("preimage"), paid, settledAt, true); err != nil {
 		t.Fatalf("CreditSettledInvoice: %v", err)
 	}
 
@@ -67,7 +69,7 @@ func TestAZapPaidExactlyReportsTheSameAmountTwice(t *testing.T) {
 	if err := s.CreateInvoice(ctx, invoice); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreditSettledInvoice(ctx, "exact", "preimage", 21_000,
+	if _, err := s.CreditSettledInvoice(ctx, "exact", secret.New("preimage"), 21_000,
 		time.Unix(1_700_000_000, 0).UTC(), true); err != nil {
 		t.Fatal(err)
 	}

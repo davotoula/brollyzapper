@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/davotoula/brollyzapper/internal/secret"
 )
 
 // §5: a shortfall freezes OUTBOUND payments. Receiving stays enabled — a wallet
@@ -43,7 +45,7 @@ func TestAShortfallFreezesSpendingAndNothingElse(t *testing.T) {
 	}
 
 	// Inbound is untouched: the zap still lands and still credits.
-	credited, err := w.CreditInvoice(ctx, "hash-frozen", "preimage", 21_000, testTime)
+	credited, err := w.CreditInvoice(ctx, "hash-frozen", secret.New("preimage"), 21_000, testTime)
 	if err != nil || !credited {
 		t.Fatalf("CreditInvoice during a shortfall = %v, %v; receiving must stay enabled", credited, err)
 	}

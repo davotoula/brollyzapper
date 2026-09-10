@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 )
 
@@ -199,7 +200,7 @@ func TestSettlementCreatesTheTxnAndCreditsTheBalance(t *testing.T) {
 		t.Fatalf("an unsettled invoice created %d txns; want 0 (%v)", n, err)
 	}
 
-	credited, err := s.CreditSettledInvoice(ctx, "hash-a", "preimage-a", 21_000, now, true)
+	credited, err := s.CreditSettledInvoice(ctx, "hash-a", secret.New("preimage-a"), 21_000, now, true)
 	if err != nil {
 		t.Fatalf("CreditSettledInvoice: %v", err)
 	}
@@ -231,10 +232,10 @@ func TestReplayedSettlementDoesNotCreditTwice(t *testing.T) {
 	if err := s.CreateInvoice(ctx, openInvoice("hash-b", 50_000, now.Add(time.Hour))); err != nil {
 		t.Fatalf("CreateInvoice: %v", err)
 	}
-	if _, err := s.CreditSettledInvoice(ctx, "hash-b", "preimage-b", 50_000, now, true); err != nil {
+	if _, err := s.CreditSettledInvoice(ctx, "hash-b", secret.New("preimage-b"), 50_000, now, true); err != nil {
 		t.Fatalf("first CreditSettledInvoice: %v", err)
 	}
-	credited, err := s.CreditSettledInvoice(ctx, "hash-b", "preimage-b", 50_000, now.Add(time.Minute), true)
+	credited, err := s.CreditSettledInvoice(ctx, "hash-b", secret.New("preimage-b"), 50_000, now.Add(time.Minute), true)
 	if err != nil {
 		t.Fatalf("replayed CreditSettledInvoice: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestReplayedSettlementDoesNotCreditTwice(t *testing.T) {
 
 func TestSettlingAnUnknownInvoiceIsAnError(t *testing.T) {
 	s, _ := open(t)
-	_, err := s.CreditSettledInvoice(t.Context(), "never-seen", "p", 1, time.Unix(1, 0), true)
+	_, err := s.CreditSettledInvoice(t.Context(), "never-seen", secret.New("p"), 1, time.Unix(1, 0), true)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("CreditSettledInvoice for an unknown hash = %v, want ErrNotFound", err)
 	}
@@ -271,7 +272,7 @@ func TestExpireInvoicesMovesOnlyPastDueOpenRows(t *testing.T) {
 	if err := s.CreateInvoice(ctx, openInvoice("paid", 1_000, now.Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreditSettledInvoice(ctx, "paid", "p", 1_000, now.Add(-2*time.Hour), true); err != nil {
+	if _, err := s.CreditSettledInvoice(ctx, "paid", secret.New("p"), 1_000, now.Add(-2*time.Hour), true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -462,7 +463,7 @@ func TestCountingOpenInvoicesExcludesSettledExpiredAndPastDue(t *testing.T) {
 			t.Fatalf("CreateInvoice(%s): %v", inv.PaymentHash, err)
 		}
 	}
-	if _, err := s.CreditSettledInvoice(t.Context(), settled.PaymentHash, "preimage",
+	if _, err := s.CreditSettledInvoice(t.Context(), settled.PaymentHash, secret.New("preimage"),
 		settled.AmountMsat, now, false); err != nil {
 		t.Fatalf("CreditSettledInvoice: %v", err)
 	}

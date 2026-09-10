@@ -1387,6 +1387,316 @@ type creds struct {
 `)}), "must be secret.String")
 }
 
+// §12 has a gap the FIELD rule cannot cover, and twt is what closes it.
+//
+// checkSecretBearingFields makes a struct field named *preimage* a secret.String.
+// It says nothing about the value in FLIGHT: before twt the preimage travelled
+// from cmd/brollyzapper through internal/wallet into internal/store as a plain
+// `string` parameter, and what stopped a log line or an error message carrying it
+// on that path was discipline. The type is the whole protection, and it applied
+// only after the value had already arrived.
+//
+// So this rule reads the same name in the other three places a type is DECLARED:
+// a parameter, a result, and a `var`. A value called a preimage does not get to be
+// a string anywhere it is written down.
+//
+// NAME-BASED ON PURPOSE, like its sibling. The hazard is a value called a
+// preimage travelling as a string, and a rename to evade the rule is exactly the
+// kind of edit a reviewer notices — which is not true of a type change.
+//
+// PREIMAGE ONLY, AND THAT IS A SCOPE AND NOT AN OVERSIGHT. The sibling's
+// vocabulary is wider — password, secret, privkey, macaroon — and applying this
+// rule to all of it goes red today on nostr.NewPairingKey, whose `(privkey,
+// pubkey string, err error)` is deliberate and documented, and on
+// store.scanNWCConnection. Widening it is therefore a decision about those call
+// sites rather than a rule change, and twt was scoped to the preimage. If you are
+// here to widen it, that is the work: the predicate below already takes the same
+// carriers as the field rule, so only the name test moves.
+//
+// WHAT IT DOES NOT COVER, and why that is not a hole: a short declaration,
+// `preimage := somethingReturningAString()`, has no written type, and deciding
+// whether the right-hand side is a string needs go/types — the boundary this
+// family closed on. It is bounded from the other side instead:
+// TestThePreimageLeavesTheTypeOnlyWhereAProtocolDemandsIt counts the reveals, so a
+// new local can only be fed by an existing legitimate exit, and there are three.
+func checkPreimagesAreNeverPlainStrings(t *testing.T, files []sourceFile) []problem {
+	var found []problem
+	fset := token.NewFileSet()
+	for _, f := range files {
+		file, err := parser.ParseFile(fset, f.path, f.src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		report := func(names []*ast.Ident, typ ast.Expr, where string) {
+			// The carriers a hex preimage can actually travel in. A bool saying one
+			// exists is not the preimage, exactly as the field rule reasons.
+			// typeString strips parentheses (0vk.52), so `preimage (string)`
+			// renders as "string" here and needs no carrier of its own — which is
+			// asserted below rather than assumed, because that is precisely the
+			// case this rule's sibling was missing.
+			//
+			// THE SAME CARRIERS AS checkSecretBearingFields, []string included: a
+			// slice of preimages is as much a leak as one, and the two rules
+			// disagreeing about what can carry a secret is how the next gap gets
+			// made. They are not shared as one list because that rule's carriers
+			// are entangled with its locationSuffixes exemption, which has no
+			// meaning for a parameter — see the scope note on the check.
+			rendered := typeString(typ)
+			if !slices.Contains([]string{"string", "[]byte", "[]string"}, rendered) {
+				return
+			}
+			for _, name := range names {
+				if !strings.Contains(strings.ToLower(name.Name), "preimage") {
+					continue
+				}
+				found = append(found, problem{f.rel, fset.Position(name.Pos()).Line,
+					fmt.Sprintf("%s %s is typed %s; a preimage travels as secret.String from "+
+						"the node inward (twt), so that the type is what keeps it out of a log "+
+						"line rather than the discipline of everyone on the path",
+						where, name.Name, rendered)})
+			}
+		}
+		// EVERY FuncType, however it is written down. Matching *ast.FuncDecl alone
+		// misses two shapes the go-review pass found by planting them, and one of
+		// them is in this bead's own diff: an INTERFACE method signature is an
+		// *ast.Field inside an InterfaceType whose Type is a FuncType, never a
+		// FuncDecl — so `crediter` in cmd/brollyzapper, the interface twt retyped,
+		// was invisible to the rule that exists to hold it. A closure's parameters
+		// are the other, and that one has no backstop at all: an interface whose
+		// method reverts to `string` usually breaks the build at its implementer,
+		// which a FuncLit does not.
+		//
+		// Inspecting FuncType directly covers all three at once and needs no case
+		// per shape, which is why this is not three cases.
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch d := n.(type) {
+			case *ast.FuncType:
+				if d.Params != nil {
+					for _, field := range d.Params.List {
+						report(field.Names, field.Type, "parameter")
+					}
+				}
+				if d.Results != nil {
+					for _, field := range d.Results.List {
+						report(field.Names, field.Type, "result")
+					}
+				}
+			case *ast.ValueSpec:
+				// `var preimage string`, at package level or inside a function.
+				if d.Type != nil {
+					report(d.Names, d.Type, "variable")
+				}
+			}
+			return true
+		})
+	}
+	slices.SortFunc(found, func(a, b problem) int { return strings.Compare(a.String(), b.String()) })
+	return found
+}
+
+func TestAPreimageIsNeverAPlainString(t *testing.T) {
+	// ONLY lndtest IS LOAD-BEARING here, and the difference is worth writing down
+	// because a skip that protects nothing is an exemption nobody can audit.
+	// lndtest builds fixtures in the shape LND hands them over
+	// (SucceededWithPreimage(feeMsat int64, preimage string)) and this rule really
+	// does fire on it. internal/lnd/lnrpc is generated and calls the raw bytes
+	// RPreimage — but those are struct FIELDS and UNNAMED results
+	// (`GetRPreimage() []byte`), and this rule reads named parameters, named
+	// results and typed vars, so it never looks at either. The entry stays as
+	// future-proofing against a regenerated stub with named results, labelled as
+	// such rather than implying it is holding something back today.
+	//
+	// The seam that converts is cmd/brollyzapper's settlement handler, and it is
+	// the line that decides the type — see the comment there.
+	clean(t, checkPreimagesAreNeverPlainStrings(t,
+		sourceFiles(t, "internal/lnd/lnrpc", "internal/lnd/lndtest")))
+
+	// THE EXACT SHAPE THIS BEAD REMOVED, replanted. Before twt this was
+	// store.CreditSettledInvoice's signature.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+func (s *Store) CreditSettledInvoice(ctx context.Context, paymentHash, preimage string) error {
+	return nil
+}
+`)}), "parameter preimage is typed string")
+
+	// A RESULT, which is the same hazard read backwards: a function that HANDS
+	// OUT a preimage as a string has made every caller a place it can escape.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+func (s *Store) PreimageFor(hash string) (preimage string, err error) {
+	return "", nil
+}
+`)}), "result preimage is typed string")
+
+	// A LOCAL with a written type — what SettledZapFor had until twt.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+func (s *Store) read() {
+	var preimage string
+	_ = preimage
+}
+`)}), "variable preimage is typed string")
+
+	// []byte carries it just as well as string, and the name is what matters.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/lnd", `package lnd
+
+func settle(rawPreimage []byte) {}
+`)}), "parameter rawPreimage is typed []byte")
+
+	// AND THE PARENTHESISED FORM, because 0vk.52 was exactly this rule's sibling
+	// missing one. It needs no carrier entry — typeString strips the parens — and
+	// this plant is what says so rather than leaving the next reader to check.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+func credit(preimage (string)) {}
+`)}), "parameter preimage is typed string")
+
+	// AN INTERFACE METHOD, which the rule could not see until the go-review pass
+	// planted it — and the interface it could not see was crediter in
+	// cmd/brollyzapper, the one this bead retyped.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("cmd/brollyzapper", `package main
+
+type crediter interface {
+	CreditInvoice(ctx context.Context, paymentHash, preimage string) (bool, error)
+}
+`)}), "parameter preimage is typed string")
+
+	// A CLOSURE, which is the shape with no backstop: an interface whose method
+	// reverts to string usually breaks the build at its implementer; a func
+	// literal has nobody to disagree with it.
+	catches(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+var record = func(preimage string) {}
+`)}), "parameter preimage is typed string")
+
+	// A NAME THAT IS NOT A PREIMAGE is left alone, and so is a preimage that is
+	// already the right type — the rule must not fire on the fix.
+	clean(t, checkPreimagesAreNeverPlainStrings(t, []sourceFile{planted("internal/store", `package store
+
+func credit(paymentHash string, preimage secret.String) {
+	var bolt11 string
+	_ = bolt11
+}
+`)}))
+}
+
+// THE PREIMAGE LEAVES THE TYPE IN EXACTLY THREE PLACES, and this counts them.
+//
+// The sibling rule above stops the value travelling as a string. This one bounds
+// the EXITS: a Reveal on a preimage-typed value is a place the plain string comes
+// back into existence, and each one has to be a protocol requirement rather than
+// a convenience. Three are:
+//
+//   - internal/zap/receipt.go — NIP-57's `preimage` tag on the zap receipt.
+//   - internal/nwc/pay.go — the pay_invoice result, which NIP-47 defines as
+//     carrying the preimage; it is the client's proof it paid.
+//   - internal/nwc/service.go — lookup_invoice and list_transactions, same NIP.
+//
+// The bead this came from said "exactly one Reveal", which was stale: it counted
+// the receipt and not the two NWC responses, which the protocol requires and
+// which predate it. The brief corrected it to three, and the correction is the
+// reason this rule counts rather than forbids.
+//
+// WHY A COUNT AND NOT A BAN. checkLogValueBodiesNeverReveal forbids Reveal inside
+// the five RENDERING seams, where it is never legitimate. Here it sometimes is —
+// a preimage that never comes back out cannot be handed to the client that paid
+// for it — so the rule that fits is an inventory: these three, and a fourth is a
+// decision somebody has to take deliberately.
+//
+// MATCHED ON THE RECEIVER'S SPELLING, not on types: `.Preimage.Reveal()` and a
+// local whose name contains preimage. That is the same trade the sibling takes,
+// and it errs the same way — a preimage revealed through a differently-named
+// variable is missed, and renaming to evade is conspicuous.
+func checkPreimageRevealsAreTheProtocolOnes(t *testing.T, files []sourceFile) []problem {
+	// Where a preimage may become a string again, and the protocol that says so.
+	allowed := map[string]string{
+		"internal/zap/receipt.go": "NIP-57's preimage tag on the zap receipt",
+		"internal/nwc/pay.go":     "NIP-47's pay_invoice result",
+		"internal/nwc/service.go": "NIP-47's lookup_invoice and list_transactions",
+	}
+	var found []problem
+	fset := token.NewFileSet()
+	for _, f := range files {
+		file, err := parser.ParseFile(fset, f.path, f.src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Reveal" {
+				return true
+			}
+			// The thing being revealed, as written: `z.Preimage`, `result.Preimage`.
+			if !strings.Contains(strings.ToLower(typeString(sel.X)), "preimage") {
+				return true
+			}
+			if _, ok := allowed[f.rel]; ok {
+				return true
+			}
+			found = append(found, problem{f.rel, fset.Position(sel.Pos()).Line,
+				fmt.Sprintf("%s reveals a preimage; the plain string exists in exactly three "+
+					"places, each because a protocol requires it (NIP-57's receipt tag, "+
+					"NIP-47's pay_invoice result, NIP-47's lookup and list). A fourth is a "+
+					"decision to take deliberately, not a convenience (twt)",
+					typeString(sel.X)+".Reveal()")})
+			return true
+		})
+	}
+	slices.SortFunc(found, func(a, b problem) int { return strings.Compare(a.String(), b.String()) })
+	return found
+}
+
+func TestThePreimageLeavesTheTypeOnlyWhereAProtocolDemandsIt(t *testing.T) {
+	clean(t, checkPreimageRevealsAreTheProtocolOnes(t, sourceFiles(t)))
+
+	// A FOURTH EXIT. This is the shape twt removed from internal/store: a reveal
+	// that existed only to hand the value to something that could not take the
+	// type. It is red now, and the answer is a Valuer, not a Reveal.
+	catches(t, checkPreimageRevealsAreTheProtocolOnes(t, []sourceFile{planted("internal/store", `package store
+
+func (s *Store) settle(preimage secret.String) {
+	_ = preimage.Reveal()
+}
+`)}), "reveals a preimage")
+
+	// THE THREE ARE REAL, not just an allow-list of filenames that happen to be
+	// green. Each is asserted to contain the reveal it is listed for, so deleting
+	// one and leaving the entry behind is caught — the stale-exemption failure
+	// this repo has paid for on markers and on skip lists.
+	for _, c := range []struct{ file, needs string }{
+		{"internal/zap/receipt.go", "Preimage.Reveal()"},
+		{"internal/nwc/pay.go", "Preimage.Reveal()"},
+		{"internal/nwc/service.go", "Preimage.Reveal()"},
+	} {
+		t.Run(c.file, func(t *testing.T) {
+			var src string
+			for _, f := range sourceFiles(t) {
+				if f.rel == c.file {
+					src = string(f.src)
+				}
+			}
+			if src == "" {
+				t.Fatalf("%s is not in the module any more; this rule's list is stale", c.file)
+			}
+			// COUNTED, not merely present. The list bounds FILES; the rule's own
+			// comment claims to inventory CALL SITES, and a fourth reveal added
+			// inside internal/nwc/service.go — the likeliest place, since it
+			// already handles preimages — would be invisible to a Contains. This
+			// is what makes the two claims the same claim.
+			if got := strings.Count(src, c.needs); got != 1 {
+				t.Errorf("%s contains %d %s, want exactly 1. The allowed list bounds files; "+
+					"this is what bounds exits, and a second reveal in an allowed file is "+
+					"still a fourth exit", c.file, got, c.needs)
+			}
+		})
+	}
+}
+
 // The fail-closed default, pinned (0vk.49). The model
 // (internal/logging/redaction_completeness_plants_test.go) carries the same
 // plant and the reasoning; this is the arch half, kept because the two copies

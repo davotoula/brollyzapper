@@ -87,7 +87,11 @@ func Build(z store.SettledZap) (*gonostr.Event, []string, error) {
 	if request.TargetKind != "" {
 		tags = append(tags, gonostr.Tag{"k", request.TargetKind})
 	}
-	// The ONE place the preimage is revealed. §11 keeps preimages out of logs;
+	// ONE OF THREE places the preimage is revealed, each because a protocol
+	// requires it: NIP-57's tag here, and NIP-47's pay_invoice result and its
+	// lookup/list responses in internal/nwc. This said "the ONE place" until twt,
+	// which counted them — internal/arch now holds the inventory and a fourth is
+	// red. §11 keeps preimages out of logs;
 	// NIP-57 puts this one in a public event on purpose, as the sender's proof
 	// that the invoice they paid actually settled. Deliberate, named, and not
 	// something a formatted struct can do by accident.

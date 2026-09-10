@@ -506,7 +506,8 @@ func (s *Service) payInvoice(ctx context.Context, conn *connection, req Request)
 	s.log.Info("an NWC payment settled", "connection", limits.ID,
 		"payment_hash", invoice.PaymentHash, "amount_msat", amount,
 		"fee_msat", result.FeeMsat, "unbooked", result.Unbooked)
-	// THE one reveal. NIP-47 returns the preimage and the client that asked for
+	// One of the three reveals the protocols require (twt counts them in
+	// internal/arch). NIP-47 returns the preimage and the client that asked for
 	// the payment is entitled to its proof; §11 keeps it out of logs, not out of
 	// the answer.
 	return Response{ResultType: req.Method, Result: map[string]any{
