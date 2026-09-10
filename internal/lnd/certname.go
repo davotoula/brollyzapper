@@ -24,6 +24,13 @@ import (
 // built, where the answer is still typed. This is a PREFLIGHT, not a
 // replacement: gRPC's own verification still runs on every connection, and a
 // certificate that passes here can still fail there for any other reason.
+//
+// ITS MESSAGE NAMES INTERNAL ADDRESSES — the dial host and every name in the
+// node's certificate — so it is for the operator's log and the operator's log
+// only. Nothing renders it on a page, and the public LNURL callback cannot: it
+// shows a reason only for *lnurl.Rejection, and everything else takes the
+// branch whose comment reads "the caller learns that it failed, never why".
+// A future author reaching for this text on a page is the thing to stop.
 type CertificateNameError struct {
 	// Dialled is the host out of LND_ADDRESS, without the port.
 	Dialled string
@@ -82,6 +89,12 @@ func verifyCertificateNames(certPath, address string) error {
 	if err != nil {
 		return nil // connection() reports this itself, with the path
 	}
+	// THE FIRST BLOCK, and LND's tls.cert is a single self-signed leaf, so that
+	// is the leaf. Were it ever a chain, the first block might not be the leaf
+	// and the HINT could name the wrong certificate's SANs — it could not
+	// weaken anything, because gRPC verifies the real chain either way, but it
+	// could send an operator looking in the wrong place. If LND starts shipping
+	// a chain here, this needs to pick the leaf rather than the first block.
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
 		return nil
