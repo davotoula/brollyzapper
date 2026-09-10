@@ -183,6 +183,16 @@ func (c *Client) connection() (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading %s: %w", c.creds.CertPath(), err)
 	}
+	// BEFORE grpc.NewClient, because after it the answer is no longer typed.
+	// See CertificateNameError: the constructor verifies nothing, so a name
+	// mismatch would otherwise arrive at the first RPC as a flattened status
+	// string. Once per CONNECTION rather than once per process — reconnect()
+	// drops c.conn so a regenerated certificate is re-read, and this is re-run
+	// on the same schedule, so fixing lnd.conf takes effect at the next
+	// reconnect instead of needing a restart of this process.
+	if err := verifyCertificateNames(c.creds.CertPath(), c.address); err != nil {
+		return nil, err
+	}
 	conn, err := grpc.NewClient(c.address,
 		grpc.WithTransportCredentials(transport),
 		// Connection-level, not per-call. grpc-go applies BOTH sets when a call

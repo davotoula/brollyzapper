@@ -212,6 +212,16 @@ type Status struct {
 	SpendUsedMsat  int64 `json:"spend_used_msat,omitempty"`
 	SpendLimitMsat int64 `json:"spend_limit_msat,omitempty"`
 	LNDReachable   bool  `json:"lnd_reachable"`
+	// RefusalKind is the kind of the last bake refusal, as one token from
+	// lnd.RefusalKinds. A STRING ON THE WIRE, deliberately: this struct is the
+	// serialised protocol, and typing the field would mean a build that
+	// receives a token it does not know could not represent what it was sent.
+	// SocketClient.Status puts it through lnd.KnownRefusalKind, which is where
+	// an unrecognised token becomes "no kind" rather than an error.
+	RefusalKind string `json:"refusal_kind,omitempty"`
+	// CredentialAddress is the address the guard locks both credentials to —
+	// SERVER_IP, or the network CIDR when only that is set. A value, not prose.
+	CredentialAddress string `json:"credential_address,omitempty"`
 }
 
 // ErrMacaroonRotated is returned by Serve when the node stopped accepting

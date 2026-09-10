@@ -131,6 +131,12 @@ func (c *SocketClient) Status(ctx context.Context) (lnd.BrokerStatus, error) {
 		SpendUsedMsat:              resp.Status.SpendUsedMsat,
 		SpendLimitMsat:             resp.Status.SpendLimitMsat,
 		LNDReachable:               resp.Status.LNDReachable,
+		// THROUGH THE GATE, not straight across. A guard newer than this server
+		// can name a kind this build has no copy for, and the safe reading is
+		// "no kind" — the same shape knownKind gives the socket's error field
+		// (`0vk.53`).
+		RefusalKind:       lnd.KnownRefusalKind(resp.Status.RefusalKind),
+		CredentialAddress: resp.Status.CredentialAddress,
 	}, nil
 }
 

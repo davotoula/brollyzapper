@@ -12,8 +12,25 @@
   <dt>Spend macaroon</dt>
   <dd>{{if .Node.SpendMacaroonPresent}}present{{else}}absent — sending is off{{end}}</dd>
 </dl>
-{{if .Node.GuardError}}<p class="error">Guard: {{.Node.GuardError}}</p>{{end}}
+{{if .Node.GuardError}}<p class="error">Guard: {{.Node.GuardError}}</p>{{end}}{{if .Node.AddressMismatch}}
+<section class="explain">
+  <h2>The node is refusing the credential for the address it sees</h2>
+  <p>
+    The credential is locked to
+    {{if .Node.LockedAddress}}<strong>{{.Node.LockedAddress}}</strong>{{else}}the address this
+    deployment configured{{end}}, and your node is seeing the connection arrive from a
+    different one. <strong>Re-linking will not change this</strong> — a fresh credential
+    carries the same address, which is why the button is not offered here.
+  </p>
+  <p>
+    Fix the address or the network so the app reaches the node from the address above, then
+    restart the guard. On a plain-Docker install that is <code>SERVER_IP</code> and the
+    container's fixed address on its network, which have to agree.
+  </p>
+</section>
+{{else}}
 <form method="post" action="/node/relink">
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
   <button type="submit">Re-link to the node</button>
 </form>
+{{end -}}

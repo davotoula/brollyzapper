@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/preflight"
 	"github.com/davotoula/brollyzapper/internal/web"
 )
@@ -25,6 +26,12 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 			view.ReceiveMacaroonPresent = status.ReceiveMacaroonPresent
 			view.SpendMacaroonPresent = status.SpendMacaroonPresent
 			view.ReceiveExpiry = status.ReceiveExpiry
+			// ONE TOKEN, MAPPED HERE. The guard's own reason is already on the
+			// Security page as an audit row; what this reads is a kind from a
+			// closed set, and anything outside it is no kind at all — which
+			// renders exactly as the page always did (`20i.3`).
+			view.AddressMismatch = status.RefusalKind == lnd.RefusalAddressMismatch
+			view.LockedAddress = status.CredentialAddress
 		}
 	}
 	data.Node = view

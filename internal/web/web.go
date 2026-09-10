@@ -536,6 +536,15 @@ type NodeView struct {
 	ReceiveExpiry          time.Time
 	GuardReachable         bool
 	GuardError             string
+	// AddressMismatch is the node refusing the credential for the address it
+	// observes, rather than for anything a re-bake could change (`20i.3`).
+	//
+	// A BOOL AND AN ADDRESS, not a sentence. The copy lives in the template
+	// where it can be read and reviewed; what crosses from the guard is a token
+	// and a value. LockedAddress is the address the credentials carry, which is
+	// the half an operator needs to compare against what their node reports.
+	AddressMismatch bool
+	LockedAddress   string
 }
 
 // SecurityView drives the security page.
