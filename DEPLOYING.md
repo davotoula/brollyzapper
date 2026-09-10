@@ -209,6 +209,10 @@ background, placed where the decision they inform gets made.
   without it.
 - **A non-root user in the `docker` group**, so `docker compose` needs no `sudo`. The containers
   do not run as root either — that is `RUN_AS_UID`, at step 3.
+- **A Linux host.** Docker Desktop on macOS cannot run this template as shipped: its shared
+  filesystem refuses the `chmod` the guard puts on its socket, so the guard exits and restarts
+  for ever. The regtest stack works around it with a named volume; this template does not,
+  because a node worth pairing with is not on a laptop.
 
 Find LND's data directory — `/home/lnd/.lnd` for a systemd install, `~/.lnd` for a user-run node,
 or whatever host path sits behind its container's `/root/.lnd` — and note which chain directory
