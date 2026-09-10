@@ -1,5 +1,7 @@
 # BrollyZapper beside an LND on the same host, without umbrelOS.
 #
+# The full procedure is DEPLOYING.md §Running outside Umbrel.
+#
 # Fill in deploy/.env (copy .env.example) and run:
 #
 #     docker compose --env-file .env -f docker-compose.yml up -d
@@ -18,9 +20,8 @@
 # cover every process on the box rather than this container.
 #
 # TWO SNAGS A FIRST INSTALL HITS. The fix for each is inline below and in
-# .env.example; DEPLOYING.md gains the full procedure in 20i.2, and this comment
-# deliberately does not point at it until it does — a pointer to a section that
-# does not answer the question costs an operator more than no pointer.
+# .env.example; the procedure walks both, and quotes what each one looks like in
+# `docker compose logs guard`.
 #   1. LND's TLS certificate must NAME the address the app dials. The app
 #      verifies the certificate with no ServerName override, and LND's default
 #      certificate names localhost and the hostname only — so dialling it by IP
@@ -38,10 +39,13 @@ services:
     # OVERRIDABLE, AND THE GUARD IS WHY. On umbrelOS the app data is created
     # 1000:1000 and 1000 is simply right; on an Ubuntu host LND's own files
     # usually belong to an `lnd` user at mode 0600, so a guard running as 1000
-    # cannot read tls.cert or admin.macaroon and dies at first start with
-    # permission denied on a read-only mount — the Ubuntu operator's first
-    # minute. Setting RUN_AS_UID to the uid that can read those two files fixes
-    # it; making them group-readable and setting RUN_AS_GID is the other way.
+    # gets permission denied on a read-only mount — the Ubuntu operator's first
+    # minute. It does NOT crash: the preflight only stats the two files, and the
+    # read fails later, so the guard stays up logging `could not copy tls.cert
+    # into the credential volume` and `could not bake the receive macaroon yet`
+    # while the node never links. Setting RUN_AS_UID to the uid that can read
+    # those two files fixes it; making them group-readable and setting
+    # RUN_AS_GID is the other way.
     #
     # BOTH SERVICES TAKE THE SAME VALUE, and the lint asserts they do rather
     # than asserting the number: the guard WRITES recv.macaroon into the
@@ -143,7 +147,9 @@ services:
       # .env.example, commented — or the rate limiter counts every request
       # against one address.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
-      # Empty sends the first visit to /setup to choose one.
+      # SET THIS. Empty makes the server invent a password and show it only on
+      # /setup, which is behind the login — off Umbrel that is a locked door.
+      # DEPLOYING.md §Running outside Umbrel step 3 has the whole of it.
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # May be left empty: the server generates one and persists it in DATA_DIR.
       SESSION_SECRET: ${SESSION_SECRET:-}
