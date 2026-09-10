@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/logging"
 )
 
@@ -212,6 +213,15 @@ type Status struct {
 	SpendUsedMsat  int64 `json:"spend_used_msat,omitempty"`
 	SpendLimitMsat int64 `json:"spend_limit_msat,omitempty"`
 	LNDReachable   bool  `json:"lnd_reachable"`
+	// RefusalKind is the kind of the last bake refusal, as one token from
+	// ErrorKinds. Typed like Response.ErrorKind one struct over, and for the
+	// same reason: the type is a string underneath, so a build that receives a
+	// token it does not know still carries it faithfully — knownKind is what
+	// turns an unrecognised one into "no kind", on the way out of the socket.
+	RefusalKind ErrorKind `json:"refusal_kind,omitempty"`
+	// CredentialAddress is the address the guard locks both credentials to —
+	// SERVER_IP, or the network CIDR when only that is set. A value, not prose.
+	CredentialAddress string `json:"credential_address,omitempty"`
 }
 
 // ErrMacaroonRotated is returned by Serve when the node stopped accepting
@@ -276,7 +286,12 @@ var SpendPermissions = []string{
 // token to copy it wrote and tested, so nothing the guard says reaches an
 // operator unread. A free-text field here would be the relayed reason again
 // under a new name (`0vk.53`).
-type ErrorKind string
+// It ALIASES lnd.RefusalKind rather than declaring its own string type, so the
+// token that travels on lnd.BrokerStatus and the token that travels on Response
+// are one type with one vocabulary below. internal/lnd cannot import this
+// package — the dependency runs the other way (§3) — so the type is declared
+// there and the meaning is kept here, where the refusals are.
+type ErrorKind = lnd.RefusalKind
 
 // KindCapPair is §6's cap-pair invariant refusing a one-control change: the
 // per-payment limit would end up above the 24-hour one, where it could never be
@@ -297,10 +312,21 @@ const KindCapPair ErrorKind = "cap_pair"
 // condition whose whole remedy is "ask for a code". The app can simply say so.
 const KindAuthorisationRequired ErrorKind = "authorisation_required"
 
-// ErrorKinds is every token this field may carry. A third entry is a decision
+// KindAddressMismatch is the guard declining to re-bake because the credential
+// on disk already meets the policy and the node still lists its root key — so a
+// fresh macaroon would carry the same caveats and change nothing.
+//
+// IT IS HALF AN ANSWER AND MUST BE READ AS ONE. Those facts are all local; this
+// guard never observes the node rejecting anything, and the same three hold when
+// an operator presses Re-link twice on a perfectly healthy install. The server
+// holds the other half — the node actually refusing the credential — and the
+// page joins them before saying anything about an address (`20i.3`).
+const KindAddressMismatch ErrorKind = "address_mismatch"
+
+// ErrorKinds is every token this field may carry. A fourth entry is a decision
 // about what the page says, not an implementation detail — see the test that
 // pins this list, and ErrorKind's expiry condition on Response.
-var ErrorKinds = []ErrorKind{KindCapPair, KindAuthorisationRequired}
+var ErrorKinds = []ErrorKind{KindCapPair, KindAuthorisationRequired, KindAddressMismatch}
 
 // Refusal is an error that carries its kind.
 //

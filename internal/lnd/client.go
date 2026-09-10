@@ -78,6 +78,17 @@ type Client struct {
 
 	mu   sync.Mutex
 	conn *grpc.ClientConn
+	// certErr is the last certificate-name verdict, remembered so a REFUSED
+	// connection costs no more than a successful one.
+	//
+	// Without it the failure path is unbounded work on the public callback: a
+	// refused connection never populates c.conn, so every later RPC re-reads and
+	// re-parses tls.cert — measured at ~52us and 153 allocations each, on the
+	// path an anonymous LNURL caller drives, in a state that persists until the
+	// operator edits lnd.conf. Cleared by closeLocked, which is the same
+	// invalidation a regenerated certificate already rides, so a fixed
+	// configuration is still picked up at the next reconnect and no sooner.
+	certErr error
 }
 
 // New builds a client for the node at address, reading its credentials from
@@ -144,6 +155,9 @@ func (c *Client) Close() error {
 func (c *Client) closeLocked() error {
 	conn := c.conn
 	c.conn = nil
+	// The certificate is re-read on the next connection, so its verdict goes
+	// with the connection it was made for.
+	c.certErr = nil
 	if conn == nil {
 		return nil
 	}
@@ -182,6 +196,19 @@ func (c *Client) connection() (*grpc.ClientConn, error) {
 	transport, err := credentials.NewClientTLSFromFile(c.creds.CertPath(), "")
 	if err != nil {
 		return nil, fmt.Errorf("loading %s: %w", c.creds.CertPath(), err)
+	}
+	// BEFORE grpc.NewClient, because after it the answer is no longer typed.
+	// See CertificateNameError: the constructor verifies nothing, so a name
+	// mismatch would otherwise arrive at the first RPC as a flattened status
+	// string. Once per CONNECTION rather than once per process — closeLocked
+	// drops both c.conn and this verdict, so a regenerated certificate is
+	// re-read on the same schedule and fixing lnd.conf takes effect at the next
+	// reconnect instead of needing a restart of this process.
+	if c.certErr == nil {
+		c.certErr = verifyCertificateNames(c.creds.CertPath(), c.address)
+	}
+	if c.certErr != nil {
+		return nil, c.certErr
 	}
 	conn, err := grpc.NewClient(c.address,
 		grpc.WithTransportCredentials(transport),

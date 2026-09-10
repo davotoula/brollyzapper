@@ -12,8 +12,30 @@
   <dt>Spend macaroon</dt>
   <dd>{{if .Node.SpendMacaroonPresent}}present{{else}}absent — sending is off{{end}}</dd>
 </dl>
-{{if .Node.GuardError}}<p class="error">Guard: {{.Node.GuardError}}</p>{{end}}
+{{/* The two branches are jammed against the GuardError line and the file ends
+     with a trim marker so that the UNCHANGED branch renders byte for byte what
+     this page rendered before `20i.3`. That is a real contract, measured
+     against main for a healthy fixture, not a formatting preference: an
+     install with nothing wrong must not be able to tell this release from the
+     last by looking at its own admin page. */ -}}
+{{if .Node.GuardError}}<p class="error">Guard: {{.Node.GuardError}}</p>{{end}}{{if .Node.MismatchedAddress}}
+<section class="explain">
+  <h2>The node is refusing the credential for the address it sees</h2>
+  <p>
+    The credential is locked to <strong>{{.Node.MismatchedAddress}}</strong>, and your node is
+    seeing the connection arrive from a different one.
+    <strong>Re-linking will not change this</strong> — a fresh credential carries the same
+    address, which is why the button is not offered here.
+  </p>
+  <p>
+    Fix the address or the network so the app reaches the node from the address above, then
+    restart the guard. On a plain-Docker install that is <code>SERVER_IP</code> and the
+    container's fixed address on its network, which have to agree.
+  </p>
+</section>
+{{else}}
 <form method="post" action="/node/relink">
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
   <button type="submit">Re-link to the node</button>
 </form>
+{{end -}}

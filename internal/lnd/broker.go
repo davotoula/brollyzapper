@@ -84,4 +84,30 @@ type BrokerStatus struct {
 	SpendUsedMsat  int64
 	SpendLimitMsat int64
 	LNDReachable   bool
+	// RefusalKind names WHY the guard last declined to bake, as one fixed token
+	// from the guard's ErrorKinds — never a message. Empty means it has nothing
+	// separate to say, which is every refusal the server has written no copy for.
+	//
+	// It is `0vk.53`'s vocabulary, not a second one: internal/guard aliases this
+	// type, so there is one closed set, one gate that admits a token, and one
+	// test pinning what a page has copy for. What it is NOT is the guard's
+	// sentence — that already reaches the operator through the Security page's
+	// audit row, and relaying it to a page is what §12 and the arch rules forbid.
+	RefusalKind RefusalKind
+	// CredentialAddress is the address the guard locks both credentials to,
+	// relayed as a VALUE rather than as prose. The page needs it to say which
+	// address the node is disagreeing with, and an address is a fact rather
+	// than a sentence — the rule is against relaying the guard's WORDS.
+	CredentialAddress string
 }
+
+// RefusalKind is a fixed token naming one kind of guard refusal.
+//
+// ONLY THE TYPE LIVES HERE, and the vocabulary does not: internal/guard aliases
+// this as ErrorKind and owns the tokens, the ErrorKinds list and the gate that
+// admits one. The type has to be declared in this package because BrokerStatus
+// carries it and internal/guard imports THIS package rather than the reverse
+// (§3, and the note at the top of this file) — but a second closed set beside
+// `0vk.53`'s would be two lists to keep in step, two "known" gates and two
+// pinning tests, which is the fork that pattern exists to prevent.
+type RefusalKind string

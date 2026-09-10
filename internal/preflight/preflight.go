@@ -444,7 +444,15 @@ func nodeCheck(in Inputs) Check {
 	case lnd.StateNotLinked:
 		c.OK, c.Detail = false, "No credentials for your Lightning node yet — the guard writes them once it can reach LND."
 	case lnd.StateRelink:
-		c.OK, c.Detail = false, "Your node rejected the macaroon. It has most likely been rotated; the guard is being asked for a new one."
+		// IT DOES NOT ASSERT A CAUSE, since `20i.3`. This used to say the
+		// macaroon "has most likely been rotated" — which is usually true, and
+		// is exactly wrong for the case that bead is about: a node refusing the
+		// credential for the ADDRESS it observes produces this same state, and
+		// the Node page now says so and hides the Re-link button. Two pages
+		// naming different causes for one state is the drift this package's own
+		// doc warns about, so this one names the state and sends the operator
+		// to the page that has the other half.
+		c.OK, c.Detail = false, "Your node rejected the macaroon. A rotation is the usual cause and the guard repairs it by itself; if this persists, the Node page says what else it can be."
 	default:
 		c.OK, c.Detail = false, "Connecting to your Lightning node."
 	}

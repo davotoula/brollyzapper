@@ -77,6 +77,23 @@ type Guard struct {
 	// sending while it is false, and it is atomic because the middleware
 	// goroutine sets it while the socket's goroutines read it in Status.
 	middlewareUp atomic.Bool
+	// lastRefusal is the kind of the most recent bake refusal, or "" when the
+	// last bake succeeded. Status relays it so the Node page can say something
+	// the operator can act on instead of "relink" (`20i.3`).
+	//
+	// A KIND, NEVER THE SENTENCE. The reason itself already reaches the operator
+	// through the Security page's audit row, which is where prose belongs; what
+	// travels here is a token from ErrorKinds and nothing else.
+	//
+	// IT IS HALF AN ANSWER, deliberately. KindAddressMismatch means "a re-bake
+	// would change nothing", which is also true of an operator who pressed
+	// Re-link twice on a healthy install. The server holds the other half — the
+	// node actually rejecting the credential — and the page joins them.
+	//
+	// Atomic for the same reason middlewareUp is: bake writes it under bakeMu
+	// while the socket's per-connection goroutines read it in Status, which
+	// takes no such lock.
+	lastRefusal atomic.Value // ErrorKind
 	// runNonce namespaces spend-window records to this process, so a restart
 	// cannot decrement a record it did not make (Ruling 2).
 	runNonce string
@@ -286,6 +303,10 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 		// the operator otherwise sees "most likely rotated", which is wrong.
 		g.audit(ctx, slog.LevelWarn, "not re-baking the "+c.kind+" macaroon",
 			logging.EventPreflightRefuse, map[string]string{"reason": err.Error()})
+		// The kind comes off the error rather than being asserted here, so the
+		// only place that decides what a refusal MEANS is the place that
+		// decides to refuse.
+		g.setLastRefusal(KindOf(err))
 		return err
 	}
 
@@ -368,6 +389,10 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 	}); err != nil {
 		return err
 	}
+	// A bake that got this far produced a credential, so whatever the last
+	// refusal was, it is not the current state. Cleared BEFORE the audit line so
+	// a Status racing this call cannot read "baked" and a stale refusal together.
+	g.setLastRefusal("")
 	g.audit(ctx, slog.LevelInfo, c.kind+" macaroon baked", logging.EventMacaroonBake,
 		map[string]string{
 			"permissions": strconv.Itoa(len(c.permissions)),
@@ -430,10 +455,33 @@ func (g *Guard) wouldRepeatItself(ctx context.Context, c credential, state State
 	if !slices.Contains(ids, c.rootKeyOf(state)) {
 		return nil
 	}
-	return fmt.Errorf("the %s credential on disk already meets the policy, was baked %s ago, and "+
-		"the node still honours its root key; re-baking would produce the same caveats. If the "+
-		"node is rejecting it, the address it observes is not %s",
-		c.kind, now.Sub(bakedAt).Round(time.Second), g.ipCaveatValue())
+	// A KIND, and note what it does NOT claim. The three facts established above
+	// are local — the credential meets the policy, it is young, and the node
+	// still lists its key. None of them is "the node is rejecting us", which
+	// this guard never observes; the SERVER does. The sentence says "if the node
+	// is rejecting it" for that reason, and the kind is read the same way: it
+	// means "a re-bake would change nothing", and the page that renders it must
+	// bring the other half (`20i.3`).
+	return &Refusal{
+		Kind: KindAddressMismatch,
+		Err: fmt.Errorf("the %s credential on disk already meets the policy, was baked %s ago, and "+
+			"the node still honours its root key; re-baking would produce the same caveats. If the "+
+			"node is rejecting it, the address it observes is not %s",
+			c.kind, now.Sub(bakedAt).Round(time.Second), g.ipCaveatValue()),
+	}
+}
+
+// setLastRefusal records, or clears, the kind of the last bake refusal.
+//
+// atomic.Value panics on inconsistent concrete types, so every store goes
+// through here and every one stores an ErrorKind — including the empty one,
+// which is why this takes the type rather than a string.
+func (g *Guard) setLastRefusal(kind ErrorKind) { g.lastRefusal.Store(kind) }
+
+// lastRefusalKind is the recorded kind, or "" before anything has been stored.
+func (g *Guard) lastRefusalKind() ErrorKind {
+	kind, _ := g.lastRefusal.Load().(ErrorKind)
+	return kind
 }
 
 // ipCaveatValue is the address this build locks credentials to.
@@ -670,6 +718,12 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 		// total against a limit from a different version of the state.
 		SpendUsedMsat:  spendUsedIn(state, g.rotation.clock()),
 		SpendLimitMsat: state.MaxSpendMsat,
+		// The last bake refusal as a TOKEN, and the address the credentials are
+		// locked to as a VALUE. Neither is the guard's sentence: that reaches
+		// the operator through the audit row this same refusal writes, which is
+		// where prose belongs (`20i.3`).
+		RefusalKind:       g.lastRefusalKind(),
+		CredentialAddress: g.ipCaveatValue(),
 	}
 	// The pending grant, WITHOUT its code. The server is told that one exists,
 	// what it is for and when it dies, so the page can ask for it — and is told

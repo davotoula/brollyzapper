@@ -404,6 +404,18 @@ The list is what the certificate *does* name. If the address you chose is not in
 `tlsextraip=`/`tlsextradomain=` missing — or added without deleting `tls.cert` and `tls.key`,
 so the old certificate is still on disk.
 
+**From `0.1.21` the guard says this itself, and names the edit.** It checks the certificate
+against the address before it dials, so the line you actually get is:
+
+```
+lnd: the node's certificate does not name 10.61.7.2; it names localhost, lnd, 127.0.0.1,
+10.30.0.3. Add tlsextraip=10.61.7.2 to lnd.conf, delete tls.cert and tls.key so LND
+regenerates them, restart LND, then restart the guard
+```
+
+The handshake text above is what an earlier image shows — and what any *other* client dialling
+the same address will still show you, since the check is this app's and not the node's.
+
 *`rpclisten` is still on loopback* — the same node, dialled this time by a name its certificate
 *does* carry, with LND's gRPC bound to `127.0.0.1`:
 

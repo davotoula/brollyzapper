@@ -536,6 +536,19 @@ type NodeView struct {
 	ReceiveExpiry          time.Time
 	GuardReachable         bool
 	GuardError             string
+	// MismatchedAddress is the address the credentials are locked to, set ONLY
+	// when the node is refusing them for the address it observes (`20i.3`).
+	// Empty means no such refusal, so the section does not render.
+	//
+	// ONE FIELD, not a bool beside an address. Two would let the page reach a
+	// state where it explains a mismatch and cannot name the address — and the
+	// sentence it would fall back to ("the address this deployment configured")
+	// is only reachable when NO ipaddr caveat is baked at all, where it is
+	// false. An address that is not there means there is nothing to explain.
+	//
+	// A VALUE, not a sentence. The copy lives in the template where it can be
+	// read and reviewed; what crosses from the guard is a token and an address.
+	MismatchedAddress string
 }
 
 // SecurityView drives the security page.
