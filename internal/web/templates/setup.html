@@ -1,16 +1,5 @@
 <h1>Setup</h1>
 
-{{if not .Setup.GeneratedPassword.IsZero}}
-<section class="explain">
-  <h2>Your admin password</h2>
-  <p>
-    BrollyZapper generated a password for you because none was supplied. <strong>It is
-    shown here once.</strong> Save it now — it is not written to the logs.
-  </p>
-  <p class="password">{{.Setup.GeneratedPassword.Reveal}}</p>
-</section>
-{{end}}
-
 {{if .Setup.PasswordManaged}}
 <p>The admin password is managed by Umbrel. Change it in the Umbrel dashboard, not here.</p>
 {{end}}

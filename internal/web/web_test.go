@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/web"
 )
 
@@ -137,28 +136,37 @@ func TestTemplatesEscapeUserSuppliedValues(t *testing.T) {
 	}
 }
 
-// §9 criterion 7: first run generates a password and shows it IN THE BROWSER.
-// The value is a secret.String, so the template has to reveal it deliberately —
-// which is exactly the property that stops it reaching a log by accident.
-func TestTheGeneratedPasswordIsRenderedOnceOnTheSetupPage(t *testing.T) {
+// The setup page rendered a one-time generated password until `20i.5`, and
+// TestTheGeneratedPasswordIsRenderedOnceOnTheSetupPage asserted it appeared. The
+// app no longer invents a password, so what matters now is the opposite: the
+// page must carry no password at all, and must still say who owns the one the
+// operator has.
+func TestTheSetupPageShowsNoPasswordAndSaysWhoOwnsIt(t *testing.T) {
 	renderer := newRenderer(t)
+
 	var buf bytes.Buffer
 	data := web.PageData{Title: "Setup"}
-	data.Setup.GeneratedPassword = secret.New("the-generated-password")
+	data.Setup.PasswordManaged = true
 	if err := renderer.Render(&buf, "setup", data); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !strings.Contains(buf.String(), "the-generated-password") {
-		t.Errorf("the setup page does not show the generated password: %s", buf.String())
+	if !strings.Contains(buf.String(), "managed by Umbrel") {
+		t.Errorf("the setup page does not say the password is managed: %s", buf.String())
 	}
 
-	// With none generated — every start after the first — the block is absent.
+	// Unmanaged: no such sentence, and — the half worth pinning — no redaction
+	// placeholder either. A template still reaching for a secret.String that no
+	// longer exists renders "[redacted]", which is how a removed field shows up
+	// in a page rather than in a compiler error.
 	buf.Reset()
 	if err := renderer.Render(&buf, "setup", web.PageData{Title: "Setup"}); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
+	if strings.Contains(buf.String(), "managed by Umbrel") {
+		t.Errorf("the setup page claims the password is managed on a plain deployment: %s", buf.String())
+	}
 	if strings.Contains(buf.String(), "[redacted]") {
-		t.Error("the setup page rendered a redaction placeholder where no password exists")
+		t.Errorf("the setup page rendered a redaction placeholder: %s", buf.String())
 	}
 }
 

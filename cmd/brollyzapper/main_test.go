@@ -131,6 +131,11 @@ func validEnv(t *testing.T) map[string]string {
 		"CREDENTIALS_DIR": filepath.Join(t.TempDir(), "credentials"),
 		"DATA_DIR":        filepath.Join(t.TempDir(), "data"),
 		"LISTEN_ADDR":     freeAddr(t),
+		// REQUIRED SINCE `20i.5`, and this fixture is where that shows up
+		// first: the app used to invent a password when none was supplied and
+		// render it on a page behind the login it would have opened, so it now
+		// refuses to start instead. Long enough for config.MinAdminPasswordLen.
+		"ADMIN_PASSWORD": "a-valid-test-password",
 	}
 }
 

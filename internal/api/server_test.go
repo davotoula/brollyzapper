@@ -56,10 +56,15 @@ func (h *harness) clientIPFor(t *testing.T, remote, forwarded string) string {
 func newHarness(t *testing.T, overrides ...func(*api.ServerOptions, *store.Store)) *harness {
 	t.Helper()
 	db := newTestStore(t)
+	// THE MANAGED FIXTURE, which is what the default harness has always been —
+	// it used to be managed because a password was supplied, and since `20i.5`
+	// it says so. A test that needs the plain-Docker side replaces Auth through
+	// an override; internal/api/password_test.go does exactly that.
 	auth, err := api.NewAuth(t.Context(), db, api.AuthOptions{
-		AppPassword:   secret.New("umbrel-derived-password"),
-		SessionSecret: secret.New("0123456789abcdef0123456789abcdef"),
-		Now:           func() time.Time { return authTime },
+		AppPassword:     secret.New(umbrelPassword),
+		PasswordManaged: true,
+		SessionSecret:   secret.New(testSessionSecret),
+		Now:             func() time.Time { return authTime },
 	})
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)

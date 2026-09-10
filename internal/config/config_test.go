@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -214,10 +215,14 @@ func TestGuardRejectsAPerPaymentCapAboveThe24HourLimit(t *testing.T) {
 
 func TestServerDefaults(t *testing.T) {
 	t.Parallel()
+	// Deliberately NOT validServerEnv(): this asserts what is defaulted, so it
+	// must set only what LoadServer refuses to start without. ADMIN_PASSWORD is
+	// one of those since `20i.5`.
 	env := map[string]string{
 		"LND_ADDRESS":     "10.21.21.9:10009",
 		"CREDENTIALS_DIR": "/credentials",
 		"DATA_DIR":        "/data",
+		"ADMIN_PASSWORD":  "a-valid-test-password",
 	}
 	got, err := config.LoadServer(lookup(env))
 	if err != nil {
@@ -232,8 +237,100 @@ func TestServerDefaults(t *testing.T) {
 	if got.LogLevel != slog.LevelInfo {
 		t.Errorf("LogLevel = %v, want info", got.LogLevel)
 	}
-	if !got.AdminPassword.IsZero() || !got.SessionSecret.IsZero() {
-		t.Error("unset secrets should be zero, not defaulted")
+	if !got.SessionSecret.IsZero() {
+		t.Error("an unset SESSION_SECRET should be zero, not defaulted")
+	}
+	// UNMANAGED BY DEFAULT, and this is the direction that matters: a
+	// deployment that says nothing about who owns the password gets an operator
+	// who can change it. The other way round locks them out of their own
+	// credential with no route back (`20i.5`).
+	if got.AdminPasswordManaged {
+		t.Error("AdminPasswordManaged = true with ADMIN_PASSWORD_MANAGED unset; a plain " +
+			"deployment would hide the Settings password field from the operator who chose it")
+	}
+}
+
+// `20i.5`. The app used to invent a password when none was supplied and render
+// it on /setup — a page behind the login it would have opened, so off Umbrel
+// the install had no way in. Refusing at load is what replaced that, and the
+// message is the only thing the operator gets.
+func TestTheServerRefusesToStartWithNoAdminPassword(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	delete(env, "ADMIN_PASSWORD")
+
+	_, err := config.LoadServer(lookup(env))
+	if err == nil {
+		t.Fatal("LoadServer accepted an empty ADMIN_PASSWORD; the app would invent one, or " +
+			"start with no way to sign in")
+	}
+	for _, want := range []string{
+		"ADMIN_PASSWORD",
+		strconv.Itoa(config.MinAdminPasswordLen),
+		"Settings",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not mention %q — the operator needs the variable, "+
+				"the minimum, and that they can change it later", err, want)
+		}
+	}
+}
+
+// The managed case fails differently, and saying so is the point: an operator
+// whose platform is supposed to be supplying the password has a different
+// problem from one who forgot to type it in.
+func TestTheServerRefusesAManagedPasswordThatIsAbsent(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	delete(env, "ADMIN_PASSWORD")
+	env["ADMIN_PASSWORD_MANAGED"] = "true"
+
+	_, err := config.LoadServer(lookup(env))
+	if err == nil {
+		t.Fatal("LoadServer accepted ADMIN_PASSWORD_MANAGED=true with no password")
+	}
+	for _, want := range []string{"ADMIN_PASSWORD", "ADMIN_PASSWORD_MANAGED"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not name %q; both variables are involved and the "+
+				"operator cannot tell which one is wrong from one of them", err, want)
+		}
+	}
+}
+
+// The flag is a bool and a deployment that misspells its value must not be
+// quietly read as false — that would silently hand an Umbrel operator a
+// password form that fights the platform.
+func TestTheManagedFlagRefusesAValueItCannotParse(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	env["ADMIN_PASSWORD_MANAGED"] = "yes"
+
+	_, err := config.LoadServer(lookup(env))
+	if err == nil {
+		t.Fatal("LoadServer accepted ADMIN_PASSWORD_MANAGED=yes")
+	}
+	if !strings.Contains(err.Error(), "ADMIN_PASSWORD_MANAGED") {
+		t.Errorf("the refusal %q does not name the variable", err)
+	}
+}
+
+// A password shorter than the minimum is refused ONCE, naming the length —
+// not twice, with a second complaint that it is missing. Two errors about one
+// value is how an operator concludes they have two problems.
+func TestAShortAdminPasswordIsRefusedExactlyOnce(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	env["ADMIN_PASSWORD"] = strings.Repeat("a", config.MinAdminPasswordLen-1)
+
+	_, err := config.LoadServer(lookup(env))
+	if err == nil {
+		t.Fatalf("LoadServer accepted a %d-character password", config.MinAdminPasswordLen-1)
+	}
+	if got := strings.Count(err.Error(), "ADMIN_PASSWORD:"); got != 1 {
+		t.Errorf("the refusal names ADMIN_PASSWORD %d times, want 1:\n%v", got, err)
+	}
+	if !strings.Contains(err.Error(), "the minimum is") {
+		t.Errorf("the refusal %q does not say what the minimum is", err)
 	}
 }
 

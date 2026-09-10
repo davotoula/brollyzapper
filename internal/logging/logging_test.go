@@ -24,7 +24,6 @@ import (
 	"github.com/davotoula/brollyzapper/internal/nwc"
 	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
-	"github.com/davotoula/brollyzapper/internal/web"
 	gonostr "github.com/nbd-wtf/go-nostr"
 )
 
@@ -108,7 +107,6 @@ func redactionSubjects(t *testing.T) map[string]subject {
 	plain := secret.New(sentinel)
 	conn := store.NWCConnection{Name: "app", ServicePrivkey: secret.New(sentinel + "-privkey"), ClientSecret: secret.New(sentinel + "-client"), ServicePubkey: strings.Repeat("a", 64), Relays: []string{"wss://relay.example"}}
 	zap := store.SettledZap{PaymentHash: strings.Repeat("b", 64), Preimage: secret.New(sentinel + "-preimage")}
-	setup := web.SetupView{GeneratedPassword: secret.New(sentinel + "-generated")}
 	auth := api.AuthOptions{AppPassword: secret.New(sentinel + "-app"), SessionSecret: secret.New(sentinel + "-session")}
 	pay := nwc.PayResult{Settled: true, FeeMsat: 21, Preimage: secret.New(sentinel + "-pay-preimage")}
 
@@ -141,9 +139,10 @@ func redactionSubjects(t *testing.T) map[string]subject {
 		}},
 		"store.SettledZap": {zap, map[string]func() string{"Preimage": zap.Preimage.Reveal}},
 		"nostr.Identity":   {identity, map[string]func() string{"private": func() string { return privateKey }}},
-		"web.SetupView": {setup, map[string]func() string{
-			"GeneratedPassword": setup.GeneratedPassword.Reveal,
-		}},
+		// web.SetupView was here until `20i.5`. It carried a GeneratedPassword —
+		// the one-time password the app invented on a first run — and the app
+		// no longer invents one, so the type holds no secret and the
+		// completeness rule no longer asks for it.
 		"api.AuthOptions": {auth, map[string]func() string{
 			"AppPassword":   auth.AppPassword.Reveal,
 			"SessionSecret": auth.SessionSecret.Reveal,
