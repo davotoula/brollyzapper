@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -617,17 +618,15 @@ func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 				composePath, name, envPath, name)
 		}
 	}
+	// THE INTERPOLATION SIDE IS THE ONLY VACUITY RISK LEFT, and that is the gain
+	// over the old shape rather than an accident. A substring match always found
+	// something, so a broken half passed silently; an assignment parser that
+	// stopped matching makes the loop above fail once per variable instead. A
+	// floor on the assignments would be dead code — reaching this line with
+	// len(seen) >= 4 means four names were found in the map.
 	if len(seen) < 4 {
 		t.Errorf("found %d interpolated variables in %s; the template takes at least the four "+
 			"an operator must fill, so this check is reading the wrong thing", len(seen), composePath)
-	}
-	// ANTI-VACUITY, on the new half. The old shape could only go vacuous by
-	// failing to find interpolations; this one can also go vacuous by parsing no
-	// assignments at all — a regexp that stopped matching would make every check
-	// above pass by reporting nothing to compare against.
-	if len(assigned) < 4 {
-		t.Errorf("found %d assignments in %s; it sets at least the four an operator must "+
-			"fill, so the assignment parser is reading the wrong thing", len(assigned), envPath)
 	}
 }
 
@@ -658,4 +657,93 @@ func TestComposeValidatesTheTemplate(t *testing.T) {
 	if err != nil {
 		t.Errorf("`docker compose config` rejected the template with the example env:\n%s", out)
 	}
+}
+
+// interimRE is the marker a note carries when it describes behaviour that will
+// stop being true at a named version pin.
+//
+// THE TRIGGER IS DATA, not a convention someone remembers: the marker names the
+// version, so the check below can compare it against what the template actually
+// pins. `20i.8` and `20i.9` added two such notes about the 0.1.20 images, and
+// two comments plus "remember at release" is the depth this repository has
+// already been burned by — umbrel/lint_test.go's manifest check exists because
+// "the 0.1.1 release shipped with the manifest still saying 0.1.0, caught by a
+// human reading the file rather than by anything mechanical".
+var interimRE = regexp.MustCompile(`INTERIM — remove at the ([0-9]+\.[0-9]+\.[0-9]+) pin`)
+
+// interimFiles are the three an INTERIM note may live in. DEPLOYING.md is
+// outside this directory and named by path for that reason.
+var interimFiles = []string{envPath, composePath, "../DEPLOYING.md"}
+
+// TestAnInterimNoteIsRemovedByThePinItNames fails the moment the template pins a
+// version at or past the one an INTERIM note said it would go at.
+//
+// ZERO MARKERS IS THE CORRECT STEADY STATE, so there is no floor on how many are
+// found — a floor would go red every time the notes are correctly removed. What
+// IS guarded is the marker's spelling: any line carrying the bare word INTERIM in
+// these files must match the full pattern, because an ASCII hyphen where the em
+// dash belongs would disarm this check silently and leave the note in the
+// release it was meant to be removed from.
+func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
+	compose, _ := loadCompose(t)
+	pinned := imageTag(t, compose.Services["server"].Image)
+
+	for _, path := range interimFiles {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if !strings.Contains(line, "INTERIM") {
+				continue
+			}
+			m := interimRE.FindStringSubmatch(line)
+			if m == nil {
+				t.Errorf("%s:%d says INTERIM but does not carry the marker this check reads "+
+					"(`INTERIM — remove at the <version> pin`, with an em dash): %q. A note "+
+					"whose marker does not parse is a note nothing will remind anyone to "+
+					"remove.", path, i+1, strings.TrimSpace(line))
+				continue
+			}
+			if !olderThan(pinned, m[1]) {
+				t.Errorf("%s:%d is an interim note for the %s pin, and %s now pins %s. The "+
+					"note describes behaviour that is no longer current; remove it in the "+
+					"same commit that moved the image lines.", path, i+1, m[1], composePath, pinned)
+			}
+		}
+	}
+}
+
+// imageTag is the tag out of a pinned reference, without the digest.
+func imageTag(t *testing.T, image string) string {
+	t.Helper()
+	if !imageRE.MatchString(image) {
+		t.Fatalf("the server image %q is not a digest-pinned reference, so no version can be "+
+			"read out of it and the interim check above would compare against nothing", image)
+	}
+	_, rest, _ := strings.Cut(image, ":")
+	tag, _, _ := strings.Cut(rest, "@")
+	return tag
+}
+
+// olderThan reports whether the pinned version is strictly below want.
+//
+// FIELD BY FIELD, not string comparison, because "0.1.9" sorts above "0.1.21"
+// as text and this check would then never fire on the release it exists for.
+func olderThan(pinned, want string) bool {
+	p, w := strings.Split(pinned, "."), strings.Split(want, ".")
+	for i := 0; i < len(w); i++ {
+		if i >= len(p) {
+			return true
+		}
+		a, errA := strconv.Atoi(p[i])
+		b, errB := strconv.Atoi(w[i])
+		if errA != nil || errB != nil {
+			return false // unparseable: say nothing rather than the wrong thing
+		}
+		if a != b {
+			return a < b
+		}
+	}
+	return false
 }

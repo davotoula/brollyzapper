@@ -305,7 +305,7 @@ never going ready. Getting the uid right now is cheaper than reading that back l
 # ADMIN_PASSWORD is in it.
 LND_DIR=/home/lnd/.lnd
 LND_NETWORK=mainnet
-DATA_DIR=/srv/brollyzapper/data
+DATA_DIR=$HOME/brollyzapper/data
 
 ls -l "$LND_DIR/tls.cert" "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
 ```
@@ -316,32 +316,34 @@ refuses to start on that and names the path to remove, but not finding out is qu
 
 Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
 `RUN_AS_UID`'s comment in `.env.example` has the other way out, a group both can read through.
-Read the number rather than assuming it:
+Read both numbers off the file, create the directories, and **`chown` only if they are not
+already right** — in the same shell as the block above, which set `$LND_DIR` and `$DATA_DIR`:
 
 ```bash
-stat -c %u "$LND_DIR/tls.cert"
-```
+read -r RUN_AS_UID RUN_AS_GID <<<"$(stat -c '%u %g' "$LND_DIR/tls.cert")"
 
-Then create the data directories, and **`chown` them only if that number is not your own**:
-
-```bash
 mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+[ "$(stat -c %u "$DATA_DIR")" = "$RUN_AS_UID" ] ||
+  sudo chown -R "$RUN_AS_UID:$RUN_AS_GID" "$DATA_DIR"
 
-RUN_AS_UID=$(stat -c %u "$LND_DIR/tls.cert")
-[ "$RUN_AS_UID" = "$(id -u)" ] || sudo chown -R "$RUN_AS_UID:$RUN_AS_UID" "$DATA_DIR"
+echo "RUN_AS_UID=$RUN_AS_UID"    # put both of these
+echo "RUN_AS_GID=$RUN_AS_GID"    # into .env
 ```
 
-**The `sudo` is conditional because on many hosts it is both unnecessary and unavailable.** If
-LND's files belong to the uid you are logged in as — which is the case on umbrelOS, where they
-are `1000:1000` and so are you — `mkdir` has already produced the right ownership and there is
-nothing to change. And `sudo` may not be reachable at all: on a box where it prompts for a
-password, a non-interactive SSH session cannot answer, so an unconditional `sudo` is a step that
-stalls rather than one that fails. Measured on the September 2026 field trip, where the
-unconditional form would have blocked a trip that needed no `chown`.
+**The `chown` is conditional because on many hosts it is both unnecessary and impossible.** If
+LND's files belong to the uid you are logged in as — the case on umbrelOS, where they are
+`1000:1000` and so are you — `mkdir` has already produced the right ownership and there is
+nothing to change. And `sudo` may not be reachable at all: where it prompts for a password, a
+non-interactive SSH session cannot answer, so an unconditional `sudo` is a step that **stalls**
+rather than one that fails. Measured on the September 2026 field trip, where the unconditional
+form would have blocked a trip that needed no `chown` at all.
 
-If `$DATA_DIR` is somewhere you cannot create as yourself — under `/srv`, say — the `mkdir`
-needs `sudo` too, and then the `chown` is not optional: `sudo mkdir -p` leaves the directories
-owned by root. Putting `DATA_DIR` somewhere you own avoids both.
+**It tests the directories, not you**, which is what makes it right in the other direction too:
+if `$DATA_DIR` is somewhere you needed `sudo mkdir` for, those directories belong to root, the
+comparison fails, and the `chown` runs. `$HOME` avoids the question entirely, which is why the
+example uses it.
+
+`stat -c` is GNU coreutils — this section already assumes a Linux host, which step 1 says.
 
 ### 4. The two `lnd.conf` edits a host LND needs
 
@@ -510,9 +512,11 @@ Three signs, in the order they arrive:
    template's default is 8080.
 
 3. **You can sign in** at `http://<host>:${HTTP_PORT}/` with the password you set at step 3.
-   If you left `ADMIN_PASSWORD` empty the server will not have started at all, and its log says
-   so in one line naming the variable and the minimum — fix `.env` and `docker compose up -d`
-   again. Nothing has been written yet, so there is nothing to undo.
+   If you left `ADMIN_PASSWORD` empty **on `0.1.21` or later** the server will not have started
+   at all, and its log says so in one line naming the variable and the minimum — fix `.env` and
+   `docker compose up -d` again. Nothing has been written yet, so there is nothing to undo.
+   **On the `0.1.20` images this template still pins it comes up and locks you out instead**,
+   and the way back is destructive: see the interim note at step 3.
 
    Once in, **Settings** offers a password change. It does not on umbrelOS, where the platform
    supplies the password and displays it itself; here it is yours.
@@ -619,13 +623,22 @@ against this list, and it cannot be taken afterwards:
 lncli listmacaroonids > ~/macaroonids.before
 ```
 
+`lncli` is not on umbrelOS's PATH — it lives in the Lightning Node app's container, so every
+`lncli` in this section is really
+`docker exec <the lightning app's container> lncli --network=mainnet …`.
+
 Then stop **only** the BrollyZapper Umbrel app; leave the Lightning Node app running, since it
 is the node under test. Choose a fixed address in Umbrel's app network that nothing has
 allocated —
 
 ```bash
-docker network inspect <umbrel's app network> --format '{{range .Containers}}{{.IPv4Address}} {{end}}'
+docker network inspect <umbrel's app network> \
+  --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' | sort -t. -k4 -n
 ```
+
+Pick something well above the highest. **The list is running containers only**, so the
+BrollyZapper app you just stopped is not in it and its address will look free — leave a gap
+rather than taking the first number that appears unused.
 
 — and join that network from a local override file, which you write yourself and which is not
 shipped:
@@ -652,11 +665,10 @@ networks:
 ```
 
 `NETWORK_CIDR` matches umbrelOS's own app network, which is a `/16` — the platform's package
-sets `${NETWORK_IP}/16` for the same reason. **The value is cosmetic here and you can stop
-worrying about it**: the guard bakes `ipaddr <SERVER_IP>` whenever a server address is set and
-falls back to `iprange <NETWORK_CIDR>` only when there is none, so with `SERVER_IP` above this
-is never read. It matches the real subnet so a reader comparing the two documents does not have
-to work out which is wrong.
+sets `${NETWORK_IP}/16` for the same reason. **It is not read while `SERVER_IP` is set** —
+`docker-compose.yml`'s comment on it says why — so getting it right buys nothing here beyond
+not contradicting the network you just joined, which is why it is worth thirty seconds and no
+more.
 
 `LND_ADDRESS` stays in `.env` as usual — the base template already feeds it to both services —
 and it names the Lightning app. The certificate still has to name whatever it says, exactly as
@@ -666,37 +678,54 @@ at step 4.
 node, and the server dials it too. Only the server takes a fixed address there, and `SERVER_IP`
 must equal it, for the reason at §Not supported above.
 
-**This override leaves the server dual-homed, and that is the first thing to look at if the
-guard bakes and calls then fail.** The container keeps the template's own `brolly` network *and*
-gains Umbrel's, so it has two addresses — and LND sees whichever one the route to the node came
-out of, while the `ipaddr` caveat names only the one in `SERVER_IP`. Set `SERVER_IP` to the
-address on the network the node is reached over, which here is Umbrel's. A bake that succeeds
-followed by every call failing for the address is this, and nothing else looks like it.
+**This override leaves the server dual-homed.** The container keeps the template's own `brolly`
+network *and* gains Umbrel's, so it has two addresses — and LND sees whichever one the route to
+the node came out of, while the `ipaddr` caveat names only the one in `SERVER_IP`. Set
+`SERVER_IP` to the address on the network the node is reached over, which here is Umbrel's. A
+bake that succeeds followed by every call failing for the address is this, and nothing else
+looks like it.
 
-**If you repointed a public hostname at the test stack, point it back FIRST.** A Cloudflare
-tunnel moved from the app's port to this stack's is the one put-back step that has to happen
-*before* the teardown: the moment `docker compose down` runs, the public address answers 502
-from a connector pointing at nothing. Move the tunnel's service back to the app's port, confirm
-the address answers, and only then continue.
+#### Putting it back
+
+In this order, and the first two are the ones that are irreversible if you get them wrong.
+
+**1. Point any repointed hostname back, and confirm it answers.** A Cloudflare tunnel moved from
+the app's port to this stack's has to go back *before* the teardown: the moment
+`docker compose down` runs, the public address answers 502 from a connector pointing at nothing.
 
 > **Never leave a public lightning address pointing at a stack you are about to destroy.** While
-> it does, anything received lands on disposable infrastructure — the teardown below deletes the
+> it does, anything received lands on disposable infrastructure — step 3 below deletes the
 > database and with it the receipt-signing key — and clients that fetched the pay document may
 > have cached that instance's `nostrPubkey`, so receipts signed by the real install afterwards no
 > longer match what they were told to expect. The September 2026 field trip opened exactly this
 > window; nothing arrived in it, which is luck rather than design.
 
-**The put-back matters more than the test.** Stop the stack and delete the directories under
-its `DATA_DIR` — they are bind mounts, so `down -v` alone does not reach them. Then **revoke
-the root keys this guard minted at the node.** The Umbrel app's guard cannot see them, because a
-guard only ever revokes keys it recorded itself, so anything left behind stays live and
-revocable by nobody:
+**2. Read the root key ids while they still exist.** The guard's own record is the reliable
+source, and step 3 deletes it:
+
+```bash
+cat "$DATA_DIR"/guard/guard-state.json
+# receive_root_key_id, spend_root_key_id, pending_root_key_ids
+```
+
+**3. Stop the stack and delete its data.** The directories are bind mounts, so `down -v` alone
+does not reach them:
+
+```bash
+docker compose down
+rm -rf "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+```
+
+**4. Revoke the root keys this guard minted at the node.** The Umbrel app's guard cannot see
+them — a guard only ever revokes keys it recorded itself — so anything left behind stays live
+and revocable by nobody:
 
 ```bash
 diff ~/macaroonids.before <(lncli listmacaroonids)
 lncli deletemacaroonid <id>    # every id that appeared in between
 ```
 
-The ids are also in `${DATA_DIR}/guard/guard-state.json`, as `receive_root_key_id`,
-`spend_root_key_id` and `pending_root_key_ids` — the more reliable of the two, since it is what
-the guard itself recorded. Then start the BrollyZapper app again.
+The ids from step 2 are the better list: the `diff` also shows anything else that baked while
+you were testing, and cannot show a key whose file you have already deleted.
+
+**5. Start the BrollyZapper app again.**

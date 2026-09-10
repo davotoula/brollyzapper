@@ -85,12 +85,14 @@ services:
       # the `ipaddr` caveat on both credentials, and LND rejects a connection
       # whose source address does not match. The lint asserts the two agree.
       SERVER_IP: 10.61.7.20
-      # INERT WHILE SERVER_IP IS SET, so do not tune it. internal/guard/caveats.go
-      # bakes `ipaddr <SERVER_IP>` when there is a server address and falls back
-      # to `iprange <NETWORK_CIDR>` only when there is not — one lock, not two.
-      # It is here because a deployment that cannot pin a single address still
-      # needs the narrower-than-nothing option, and because a reader who finds
-      # only the address wonders what bounds a network.
+      # NOT READ WHILE SERVER_IP IS SET — but still keep it equal to the subnet
+      # below, and the lint requires that. internal/guard/caveats.go bakes
+      # `ipaddr <SERVER_IP>` when there is a server address and falls back to
+      # `iprange <NETWORK_CIDR>` only when there is not, so with the line above
+      # set this one is never the lock. It is here because a deployment that
+      # cannot pin a single address still needs the narrower-than-nothing
+      # option — and it tracks the subnet so that a deployment which drops
+      # SERVER_IP does not silently fall back to a range that means nothing.
       NETWORK_CIDR: 10.61.7.0/24
       # INITIAL VALUES, not ceilings: they seed the guard's stored caps on first
       # start. The operator may lower either freely afterwards and raise either
@@ -121,10 +123,10 @@ services:
     # The images run as uid 65532 (distroless/static:nonroot) by default; this
     # overrides that. THE DIRECTORIES UNDER ${DATA_DIR} MUST BE OWNED BY THIS
     # UID on the host — umbrelOS creates them as 1000:1000, a plain host does
-    # not, so create them yourself:
-    #
-    #     mkdir -p data/guard data/credentials data/server
-    #     sudo chown -R 1000:1000 data
+    # not, so create them yourself. DEPLOYING.md §Running outside Umbrel step 3
+    # has the block: it reads the uid off LND's own files rather than assuming
+    # 1000, and chowns only when they are not already yours, because on a host
+    # where they are, `sudo` is both unnecessary and sometimes unavailable.
     #
     # Get this wrong and the symptom is the guard failing to write recv.macaroon
     # on first run, which reads like a bake failure and is not. If you change
@@ -186,14 +188,10 @@ networks:
   # NETWORK_CIDR and the ipv4_address together — the lint asserts SERVER_IP and
   # ipv4_address agree, so it will catch three of the four.
   #
-  # AN OVERRIDE THAT JOINS ANOTHER NETWORK LEAVES THE SERVER DUAL-HOMED, and
-  # that is worth knowing before it matters: the container keeps this network
-  # AND gains the other, so it has two addresses and LND sees whichever one the
-  # route to the node came out of. The `ipaddr` caveat names one. If a bake
-  # succeeds and calls then fail for the address, this is the first thing to
-  # look at — SERVER_IP has to be the address on the network the node is
-  # reached over, not this one. Observed on the September 2026 field trip,
-  # where it was harmless because the node was on the joined network.
+  # AN OVERRIDE THAT JOINS ANOTHER NETWORK LEAVES THE SERVER DUAL-HOMED: it
+  # keeps this network and gains the other, so SERVER_IP has to name its address
+  # on whichever one the NODE is reached over. DEPLOYING.md §Testing beside an
+  # existing Umbrel install has the worked case and the symptom to look for.
   brolly:
     ipam:
       config:
