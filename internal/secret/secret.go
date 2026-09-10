@@ -2,8 +2,10 @@ package secret
 
 import (
 	"crypto/rand"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 )
 
@@ -46,7 +48,67 @@ func (s String) LogValue() slog.Value { return slog.StringValue(Redacted) }
 
 // MarshalJSON covers encoding/json, including slog's JSON handler rendering a
 // struct that holds a secret.
+//
+// IT STAYS REDACTING, and the Valuer below is why that is worth saying out loud.
+// Both are "serialisation" if you squint, and they are not the same thing: JSON
+// is what this app hands to a client and to a log handler, and a database is
+// where the value has to be legible to come back at all. A Valuer that also
+// leaked through here would be the worst of both, so a test asserts this form is
+// still Redacted after the Valuer landed (twt).
 func (s String) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted) }
+
+// Value implements driver.Valuer, so a secret can be bound to SQL directly.
+//
+// THIS IS THE EXPORT SEAM, and it is the one place a secret is revealed without
+// a Reveal() call site to point at. internal/arch bans naming Reveal inside the
+// five RENDERING seams — String, GoString, Format, LogValue, Error — on the
+// argument that rendering a secret is never legitimate, and it deliberately does
+// not extend that to marshalling, because persistence is also how a value is
+// exported, stored and backed up. A database column is the case that argument was
+// written for: a preimage that reaches sqlite as [redacted] is a row that can
+// never answer the question it was written to answer.
+//
+// What it buys is that internal/store no longer calls Reveal to bind a parameter.
+// Before twt, balance.go and nwc.go revealed the preimage and the connection
+// secrets purely to hand them to the driver — reveals that existed for the type
+// system and not for anything a reader could point at. Now the only Reveal call
+// sites left on a preimage are the three the protocols require.
+//
+// NIL FOR THE ZERO VALUE, not the empty string, matching the nullString helper it
+// replaces. Every column this type binds to was already NULL-when-absent, and a
+// Valuer that wrote "" instead would silently change the shape of stored data on
+// the day it landed — an unset preimage would start matching `WHERE preimage IS
+// NOT NULL`.
+func (s String) Value() (driver.Value, error) {
+	if s.v == "" {
+		return nil, nil
+	}
+	return s.v, nil
+}
+
+// Scan implements sql.Scanner, the other half of the export seam.
+//
+// It takes the three things a driver can hand back for a TEXT column: a string, a
+// []byte (which some drivers return for TEXT and every driver returns for a
+// BLOB), and nil for SQL NULL.
+//
+// NIL CLEARS THE DESTINATION rather than leaving it alone. database/sql reuses
+// the destination across rows in a Rows loop, so a Scanner that ignored NULL
+// would give an absent preimage the PREVIOUS row's value — which on this type
+// means one payment's proof reported against another's. Planted.
+func (s *String) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		s.v = ""
+	case string:
+		s.v = v
+	case []byte:
+		s.v = string(v)
+	default:
+		return fmt.Errorf("cannot scan %T into a secret.String", src)
+	}
+	return nil
+}
 
 // RandomToken returns n bytes of cryptographic randomness, URL-safe base64.
 //

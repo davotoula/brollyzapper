@@ -259,7 +259,7 @@ func TestTheSettleTimeRecordedIsTheNodesNotTheHandlersClock(t *testing.T) {
 
 	// The node settled it an hour before this process even looked.
 	settled := testTime.Add(-time.Hour)
-	credited, err := w.CreditInvoice(ctx, "hash-late", "preimage", 21_000, settled)
+	credited, err := w.CreditInvoice(ctx, "hash-late", secret.New("preimage"), 21_000, settled)
 	if err != nil || !credited {
 		t.Fatalf("CreditInvoice = %v, %v; want true, nil", credited, err)
 	}
@@ -289,7 +289,7 @@ func TestAMissingSettleTimeFallsBackToTheClockRatherThanNineteenSeventy(t *testi
 	ctx := t.Context()
 	mintInvoice(t, db, "hash-zero", 21_000)
 
-	if _, err := w.CreditInvoice(ctx, "hash-zero", "preimage", 21_000, time.Time{}); err != nil {
+	if _, err := w.CreditInvoice(ctx, "hash-zero", secret.New("preimage"), 21_000, time.Time{}); err != nil {
 		t.Fatalf("CreditInvoice: %v", err)
 	}
 	txns, err := db.RecentTxns(ctx, 10)
@@ -313,7 +313,7 @@ func TestCreditReceivedControlsWhetherAZapRaisesTheCeiling(t *testing.T) {
 	if on, err := w.CreditReceived(ctx); err != nil || !on {
 		t.Fatalf("credit_received defaults to %v, %v; want true, nil", on, err)
 	}
-	credited, err := w.CreditInvoice(ctx, "hash-on", "preimage", 21_000, testTime)
+	credited, err := w.CreditInvoice(ctx, "hash-on", secret.New("preimage"), 21_000, testTime)
 	if err != nil || !credited {
 		t.Fatalf("CreditInvoice = %v, %v; want true, nil", credited, err)
 	}
@@ -324,7 +324,7 @@ func TestCreditReceivedControlsWhetherAZapRaisesTheCeiling(t *testing.T) {
 	if err := w.SetCreditReceived(ctx, false); err != nil {
 		t.Fatalf("SetCreditReceived: %v", err)
 	}
-	if _, err := w.CreditInvoice(ctx, "hash-off", "preimage", 21_000, testTime); err != nil {
+	if _, err := w.CreditInvoice(ctx, "hash-off", secret.New("preimage"), 21_000, testTime); err != nil {
 		t.Fatalf("CreditInvoice with crediting off: %v", err)
 	}
 	if balance, _ := w.Balance(ctx); balance != 21_000 {

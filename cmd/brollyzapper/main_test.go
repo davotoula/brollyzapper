@@ -18,6 +18,7 @@ import (
 
 	"github.com/davotoula/brollyzapper/internal/lnd/lnrpc"
 	"github.com/davotoula/brollyzapper/internal/logging"
+	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 )
 
@@ -369,7 +370,7 @@ type fakeCrediter struct {
 	calls    int
 }
 
-func (f *fakeCrediter) CreditInvoice(_ context.Context, _, _ string, _ int64,
+func (f *fakeCrediter) CreditInvoice(_ context.Context, _ string, _ secret.String, _ int64,
 	_ time.Time) (bool, error) {
 	f.calls++
 	return f.credited, f.err

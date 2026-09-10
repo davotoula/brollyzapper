@@ -142,7 +142,7 @@ func TestASettlementStillCreditsOnlyOnceUnderTheScopedConstraint(t *testing.T) {
 	if err := s.CreateInvoice(t.Context(), openInvoice(hash, 5_000, at.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
-	credited, err := s.CreditSettledInvoice(t.Context(), hash, "00", 5_000, at, true)
+	credited, err := s.CreditSettledInvoice(t.Context(), hash, secret.New("00"), 5_000, at, true)
 	if err != nil || !credited {
 		t.Fatalf("the first settlement: credited=%v err=%v", credited, err)
 	}
@@ -152,7 +152,7 @@ func TestASettlementStillCreditsOnlyOnceUnderTheScopedConstraint(t *testing.T) {
 	}
 
 	// The redelivery.
-	credited, err = s.CreditSettledInvoice(t.Context(), hash, "00", 5_000, at, true)
+	credited, err = s.CreditSettledInvoice(t.Context(), hash, secret.New("00"), 5_000, at, true)
 	if err != nil {
 		t.Fatalf("the replayed settlement: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestReservingAgainstOurOwnInvoiceHashNowInsertsAndReversesNormally(t *testi
 	if err := s.CreateInvoice(t.Context(), openInvoice(hash, 5_000, at.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreditSettledInvoice(t.Context(), hash, "00", 5_000, at, true); err != nil {
+	if _, err := s.CreditSettledInvoice(t.Context(), hash, secret.New("00"), 5_000, at, true); err != nil {
 		t.Fatal(err)
 	}
 	before, err := s.BalanceMsat(t.Context())

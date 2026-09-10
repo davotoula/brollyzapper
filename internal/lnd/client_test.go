@@ -14,6 +14,7 @@ import (
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
 	"github.com/davotoula/brollyzapper/internal/lnd/lnrpc"
+	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 )
 
@@ -277,7 +278,8 @@ func TestReplayedSettlementFromTheStreamDoesNotCreditTwice(t *testing.T) {
 	credits := make(chan bool, 4)
 	go func() {
 		_ = client.RunInvoiceStream(ctx, &memoryResume{}, func(ctx context.Context, inv *lnrpc.Invoice) error {
-			credited, err := db.CreditSettledInvoice(ctx, string(inv.RHash), hex.EncodeToString(inv.RPreimage), inv.AmtPaidMsat, now, true)
+			credited, err := db.CreditSettledInvoice(ctx, string(inv.RHash),
+				secret.New(hex.EncodeToString(inv.RPreimage)), inv.AmtPaidMsat, now, true)
 			if err != nil {
 				return err
 			}

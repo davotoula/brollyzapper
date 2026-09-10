@@ -684,8 +684,10 @@ func (s *Store) CreateNWCConnection(ctx context.Context, conn NWCConnection,
 		    permissions, budget_msat, budget_period, budget_renews_at, max_payment_msat,
 		    created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		conn.Name, conn.ServicePrivkey.Reveal(), conn.ServicePubkey, conn.ClientPubkey,
-		conn.ClientSecret.Reveal(), relays, permissions,
+		// Bound directly since twt, for the reason on secret.String.Value: these
+		// two Reveals existed only to satisfy the driver.
+		conn.Name, conn.ServicePrivkey, conn.ServicePubkey, conn.ClientPubkey,
+		conn.ClientSecret, relays, permissions,
 		nullInt64Ptr(conn.BudgetMsat), nullString(conn.BudgetPeriod),
 		nullUnix(conn.BudgetRenewsAt), nullInt64Ptr(conn.MaxPaymentMsat),
 		conn.CreatedAt.Unix())

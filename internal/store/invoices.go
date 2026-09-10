@@ -100,7 +100,9 @@ func (s *Store) Invoice(ctx context.Context, paymentHash string) (Invoice, bool,
 // txns.payment_hash and becomes a no-op,
 // which is the difference between recovering from a restart and paying the
 // wallet twice for one zap.
-func (s *Store) CreditSettledInvoice(ctx context.Context, paymentHash, preimage string, amountPaidMsat int64, settledAt time.Time, creditBalance bool) (bool, error) {
+func (s *Store) CreditSettledInvoice(ctx context.Context, paymentHash string,
+	preimage secret.String, amountPaidMsat int64, settledAt time.Time, creditBalance bool,
+) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("settling invoice: %w", err)
@@ -131,7 +133,9 @@ func (s *Store) CreditSettledInvoice(ctx context.Context, paymentHash, preimage 
 		    created_at, settled_at)
 		 VALUES ('invoice_in', 'settled', ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(payment_hash) WHERE kind = 'invoice_in' DO NOTHING`,
-		amountPaidMsat, paymentHash, bolt11, nullString(preimage), zapRequest, comment,
+		// Bound directly: secret.String is a driver.Valuer since twt, and its
+		// zero value is NULL, which is what nullString did here before.
+		amountPaidMsat, paymentHash, bolt11, preimage, zapRequest, comment,
 		settledAt.Unix(), settledAt.Unix())
 	if err != nil {
 		return false, fmt.Errorf("recording settlement of %s: %w", paymentHash, err)
@@ -352,9 +356,12 @@ func (s *Store) SettledZapFor(ctx context.Context, paymentHash string) (SettledZ
 	  WHERE t.payment_hash = ? AND t.kind = ? AND i.zap_request IS NOT NULL`
 	var z SettledZap
 	var settledAt sql.NullInt64
-	var preimage string
+	// STRAIGHT INTO THE FIELD (twt): secret.String is a sql.Scanner, so the
+	// preimage is never a local string on its way there. The COALESCE above still
+	// earns its place — it turns a NULL into "", which Scan reads as the zero
+	// value, the same answer it would give for the NULL itself.
 	err := s.db.QueryRowContext(ctx, q, paymentHash, KindInvoiceIn).
-		Scan(&z.PaymentHash, &z.MintedMsat, &z.PaidMsat, &z.Bolt11, &preimage,
+		Scan(&z.PaymentHash, &z.MintedMsat, &z.PaidMsat, &z.Bolt11, &z.Preimage,
 			&z.ZapRequest, &settledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SettledZap{}, ErrNotFound
@@ -366,7 +373,6 @@ func (s *Store) SettledZapFor(ctx context.Context, paymentHash string) (SettledZ
 		return SettledZap{}, fmt.Errorf("the zap %s has no settle time", paymentHash)
 	}
 	z.SettledAt = time.Unix(settledAt.Int64, 0).UTC()
-	z.Preimage = secret.New(preimage)
 	return z, nil
 }
 
@@ -828,18 +834,18 @@ func scanTxns(rows *sql.Rows, limit int) ([]Txn, error) {
 		var t Txn
 		var created int64
 		var settled sql.NullInt64
-		var preimage string
 		if err := rows.Scan(&t.Kind, &t.State, &t.AmountMsat, &t.FeeMsat, &t.Note,
 			&t.Comment, &t.PaymentHash, &t.ZapRequest, &t.OutMetadata,
 			&t.OutDescriptionHash, &t.Bolt11, &t.ZapReceiptID,
 			&t.ReceiptPending,
-			&t.Description, &preimage, &t.NWCConnectionID,
+			&t.Description, &t.Preimage, &t.NWCConnectionID,
 			&created, &settled); err != nil {
 			return nil, fmt.Errorf("scanning a transaction: %w", err)
 		}
-		// Wrapped at the scan, so the plain string exists for the length of this
-		// statement and nowhere else (§12).
-		// DERIVED rather than selected, so the two cannot disagree: a row has a
+		// SCANNED STRAIGHT INTO THE FIELD since twt — secret.String is a
+		// sql.Scanner, so the plain string this used to hold does not exist at all.
+		//
+		// IsZap is DERIVED rather than selected, so the two cannot disagree: a row has a
 		// zap request or it does not, and there is one place that decides.
 		//
 		// OutMetadata IS DELIBERATELY NOT PART OF THIS. IsZap gates the admin
@@ -849,7 +855,6 @@ func scanTxns(rows *sql.Rows, limit int) ([]Txn, error) {
 		// acknowledge (doy.2). That is the whole reason out_metadata is its
 		// own column.
 		t.IsZap = t.ZapRequest != ""
-		t.Preimage = secret.New(preimage)
 		t.CreatedAt = time.Unix(created, 0).UTC()
 		if settled.Valid {
 			t.SettledAt = time.Unix(settled.Int64, 0).UTC()

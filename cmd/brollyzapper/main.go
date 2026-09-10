@@ -92,7 +92,8 @@ const shutdownGrace = 10 * time.Second
 // they use — and what this one uses is the ability to credit an inbound
 // payment, not the ability to spend.
 type crediter interface {
-	CreditInvoice(ctx context.Context, paymentHash, preimage string, amountPaidMsat int64,
+	CreditInvoice(ctx context.Context, paymentHash string, preimage secret.String,
+		amountPaidMsat int64,
 		settledAt time.Time) (bool, error)
 }
 
@@ -571,7 +572,14 @@ func runInvoiceStream(ctx context.Context, node *lnd.Client, db *store.Store, pu
 func handleSettlement(ctx context.Context, invoice *lnrpc.Invoice, purse crediter,
 	onCredited func(context.Context, string), log *slog.Logger) error {
 	hash := hex.EncodeToString(invoice.RHash)
-	credited, err := purse.CreditInvoice(ctx, hash, hex.EncodeToString(invoice.RPreimage),
+	// SECRET FROM THE SEAM THAT OWNS THE ENCODING (twt). RPreimage arrives as
+	// raw bytes and this is the line that turns it into the hex the rest of the
+	// app stores, so it is also the line that decides what TYPE it travels as.
+	// Before twt it left here a plain string and stayed one through wallet and
+	// store, where a log line or an error anywhere on that path would have
+	// carried it.
+	credited, err := purse.CreditInvoice(ctx, hash,
+		secret.New(hex.EncodeToString(invoice.RPreimage)),
 		invoice.AmtPaidMsat, settleTimeOf(invoice, hash, log))
 	switch {
 	case errors.Is(err, store.ErrUnknownInvoice):

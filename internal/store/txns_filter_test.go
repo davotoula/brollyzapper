@@ -131,7 +131,7 @@ func seedHistory(t *testing.T, s *store.Store, base time.Time) {
 
 	// in-settled, oldest.
 	mustCreateInvoice(t, s, "in-settled", 5_000, base)
-	if _, err := s.CreditSettledInvoice(t.Context(), "in-settled", "preimage", 5_000,
+	if _, err := s.CreditSettledInvoice(t.Context(), "in-settled", secret.New("preimage"), 5_000,
 		base.Add(time.Minute), false); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestTheHistoryCarriesTheZapRequestItself(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateInvoice: %v", err)
 	}
-	if _, err := s.CreditSettledInvoice(ctx, "zap-hash", "preimage", 21_000, at, false); err != nil {
+	if _, err := s.CreditSettledInvoice(ctx, "zap-hash", secret.New("preimage"), 21_000, at, false); err != nil {
 		t.Fatalf("CreditSettledInvoice: %v", err)
 	}
 
@@ -261,7 +261,7 @@ func TestTheHistoryCarriesTheZapRequestItself(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreditSettledInvoice(ctx, "plain-hash", "preimage2", 1_000, at, false); err != nil {
+	if _, err := s.CreditSettledInvoice(ctx, "plain-hash", secret.New("preimage2"), 1_000, at, false); err != nil {
 		t.Fatal(err)
 	}
 	rows, err = s.Txns(ctx, store.TxnFilter{})

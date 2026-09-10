@@ -11,6 +11,7 @@ import (
 
 	"github.com/davotoula/brollyzapper/internal/api"
 	"github.com/davotoula/brollyzapper/internal/lnurl/lnurltest"
+	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 )
 
@@ -31,7 +32,7 @@ func settleWith(t *testing.T, db *store.Store, hash string, amountMsat int64,
 	}); err != nil {
 		t.Fatalf("CreateInvoice: %v", err)
 	}
-	if _, err := db.CreditSettledInvoice(t.Context(), hash, "preimage-"+hash,
+	if _, err := db.CreditSettledInvoice(t.Context(), hash, secret.New("preimage-"+hash),
 		amountMsat, authTime, true); err != nil {
 		t.Fatalf("CreditSettledInvoice: %v", err)
 	}

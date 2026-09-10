@@ -18,6 +18,7 @@ import (
 
 	"github.com/davotoula/brollyzapper/internal/logging"
 	"github.com/davotoula/brollyzapper/internal/nostr"
+	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 	"github.com/davotoula/brollyzapper/internal/zap"
 )
@@ -146,7 +147,7 @@ func (h *harness) settleAs(t *testing.T, hash string, raw []byte) string {
 	}); err != nil {
 		t.Fatalf("CreateInvoice: %v", err)
 	}
-	if _, err := h.db.CreditSettledInvoice(t.Context(), hash, strings.Repeat("9", 64),
+	if _, err := h.db.CreditSettledInvoice(t.Context(), hash, secret.New(strings.Repeat("9", 64)),
 		21_000, settleTime, true); err != nil {
 		t.Fatalf("CreditSettledInvoice: %v", err)
 	}

@@ -706,7 +706,10 @@ func (s *Store) SettleSpend(ctx context.Context, txnID, actualFeeMsat int64,
 			`UPDATE txns SET state = ?, fee_msat = ?, settled_at = ?,
 			                 preimage = COALESCE(?, preimage)
 			  WHERE id = ?`,
-			TxnSettled, bookedFeeMsat, at.Unix(), nullString(preimage.Reveal()),
+			// Bound directly since twt. This Reveal existed only because the
+			// driver could not take a secret.String, which is a reveal for the
+			// type system rather than for anything a reader could point at.
+			TxnSettled, bookedFeeMsat, at.Unix(), preimage,
 			txnID); err != nil {
 			return fmt.Errorf("settling txn %d: %w", txnID, err)
 		}

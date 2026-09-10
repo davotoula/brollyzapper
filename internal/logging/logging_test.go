@@ -436,7 +436,8 @@ func TestPaymentHashAndRequestIDCorrelateAcrossTheTracedPath(t *testing.T) {
 	logging.FromContext(ctx).Info("invoice minted", logging.PaymentHash(hash))
 
 	// Minutes later, on the invoice stream, with no request context at all.
-	if _, err := s.CreditSettledInvoice(context.Background(), hash, "preimage", 21_000, now.Add(time.Minute), true); err != nil {
+	if _, err := s.CreditSettledInvoice(context.Background(), hash, secret.New("preimage"), 21_000,
+		now.Add(time.Minute), true); err != nil {
 		t.Fatalf("SettleInvoice: %v", err)
 	}
 	base.Info("invoice settled", logging.PaymentHash(hash))

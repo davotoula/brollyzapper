@@ -19,6 +19,7 @@ import (
 	"github.com/davotoula/brollyzapper/internal/logging"
 	"github.com/davotoula/brollyzapper/internal/preflight"
 	"github.com/davotoula/brollyzapper/internal/recon"
+	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 	"github.com/davotoula/brollyzapper/internal/wallet"
 )
@@ -32,7 +33,7 @@ type seamWallet interface {
 	recon.Wallet
 	Reserve(ctx context.Context, req wallet.Reservation) (wallet.ReservationID, error)
 	Reverse(ctx context.Context, id wallet.ReservationID) error
-	CreditInvoice(ctx context.Context, paymentHash, preimage string, amountPaidMsat int64,
+	CreditInvoice(ctx context.Context, paymentHash string, preimage secret.String, amountPaidMsat int64,
 		settledAt time.Time) (bool, error)
 }
 
@@ -97,7 +98,7 @@ func TestARealShortfallReachesTheSecurityPanelAndFreezesSpending(t *testing.T) {
 
 	// 4. Receiving is untouched.
 	mintInvoiceFor(t, h.store, "hash-during-freeze", 21_000)
-	credited, err := purse.CreditInvoice(ctx, "hash-during-freeze", "preimage", 21_000, time.Now().UTC())
+	credited, err := purse.CreditInvoice(ctx, "hash-during-freeze", secret.New("preimage"), 21_000, time.Now().UTC())
 	if err != nil || !credited {
 		t.Errorf("CreditInvoice during the freeze = %v, %v; receiving must stay enabled", credited, err)
 	}
