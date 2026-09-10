@@ -8,13 +8,10 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/davotoula/brollyzapper/internal/secret"
 )
 
 // The static patterns are named by extension, not `static/*`: internal/web/static
@@ -398,23 +395,15 @@ type PairingView struct {
 }
 
 // SetupView drives the first-run page.
+//
+// It carried a GeneratedPassword until `20i.5`, and a LogValue whose only job
+// was to keep that secret out of a log line. The app no longer invents a
+// password — internal/config refuses to start without one — so the view holds
+// nothing that must not be logged.
 type SetupView struct {
-	// GeneratedPassword is shown once, in the browser. §9: a password that
-	// exists only in the logs is a failure — and §12 means it must be unable to
-	// reach a log at all, so the template reveals it explicitly.
-	GeneratedPassword secret.String
 	PasswordManaged   bool
 	AddressConfigured bool
 	LightningAddress  string
-}
-
-// LogValue keeps the one-time password out of a log line (§12). The template
-// reveals it deliberately; nothing else should be able to.
-func (v SetupView) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.Bool("password_managed", v.PasswordManaged),
-		slog.Bool("address_configured", v.AddressConfigured),
-	)
 }
 
 // WalletView drives the wallet page.
@@ -632,9 +621,15 @@ type SettingsView struct {
 	NostrPubkey        string
 	CreditReceived     bool
 	PasswordChangeable bool
-	ProbeOK            bool
-	ProbeReason        string
-	ProbeAt            string
+	// PasswordMinLen drives the form's `minlength`, from the same constant the
+	// server enforces. It is a value rather than a literal in the template
+	// because the browser's guard and the server's refusal disagreeing is the
+	// exact shape config.MinAdminPasswordLen exists to prevent — the template
+	// said 12 while the loader said 8 until `20i.5`.
+	PasswordMinLen int
+	ProbeOK        bool
+	ProbeReason    string
+	ProbeAt        string
 }
 
 // Renderer renders the embedded templates.

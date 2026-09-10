@@ -1114,6 +1114,77 @@ func checkNoMandatoryMiddleware(t *testing.T, files []sourceFile) []problem {
 	return found
 }
 
+// managedPasswordVar says the PLATFORM supplies the admin password and displays
+// it, so the app must not offer to change it (§9).
+const managedPasswordVar = "ADMIN_PASSWORD_MANAGED"
+
+// checkOnlyThePackageDeclaresAManagedPassword: exactly one file in the tree may
+// set it, and it is the Umbrel package's compose.
+//
+// WHY IT IS HERE AND NOT IN A DIRECTORY'S OWN LINT. deploy/lint_test.go refuses
+// the variable inside deploy/ and umbrel/lint_test.go requires it inside
+// umbrel/, and between them they cover two directories out of the tree —
+// regtest/, a future deploy/k8s/, or a compose snippet in a doc could all set it
+// with both lints green. The invariant is about the WHOLE repository, so it
+// belongs where the whole repository is read.
+//
+// WHAT SETTING IT WRONGLY COSTS is the reason it is worth a rule rather than a
+// convention: it is the one deployment variable whose wrong value is INVISIBLE.
+// A wrong LND_ADDRESS fails loudly at the first dial; this one starts cleanly,
+// works, and silently removes the operator's only route to their own password
+// — the Settings form disappears and ChangePassword refuses. That is `20i.5`
+// in one sentence, and it had been shipping.
+//
+// DEPLOYMENT FILES ONLY, not the Go tree. internal/config names the variable
+// because it READS it, which is the opposite of the thing being forbidden, and
+// a rule that could not tell the reader from the setters would have to exempt
+// the one package that must name it — an exemption list that grows.
+func checkOnlyThePackageDeclaresAManagedPassword(t *testing.T, files []sourceFile) []problem {
+	const allowed = "umbrel/brollyzapper/docker-compose.yml"
+	var found []problem
+	for _, f := range files {
+		// CODE, NOT PROSE. Every other file that mentions this variable does so
+		// in a comment explaining why it must not set it, and a rule matching
+		// those would fire on the very writing that keeps it true.
+		if !strings.Contains(withoutComments(t, f), managedPasswordVar) {
+			continue
+		}
+		if f.rel == allowed {
+			continue
+		}
+		found = append(found, problem{f.rel, 0,
+			"sets " + managedPasswordVar + ", which only " + allowed + " may. It tells the " +
+				"app the PLATFORM supplies and displays the admin password; anywhere else " +
+				"that is false, and the cost is silent — the install comes up working, with " +
+				"the Settings password form gone and no other way to change it (`20i.5`)."})
+	}
+	return found
+}
+
+func TestOnlyTheUmbrelPackageDeclaresAManagedPassword(t *testing.T) {
+	files := deploymentFiles(t)
+	clean(t, checkOnlyThePackageDeclaresAManagedPassword(t, files))
+	// And the allowed file really is in scope, or "clean" means "found nothing
+	// to look at". This is the half that stops the rule going vacuous if the
+	// package's path ever moves.
+	var sawAllowed bool
+	for _, f := range files {
+		if f.rel == "umbrel/brollyzapper/docker-compose.yml" &&
+			strings.Contains(withoutComments(t, f), managedPasswordVar) {
+			sawAllowed = true
+		}
+	}
+	if !sawAllowed {
+		t.Fatal("the Umbrel package does not set " + managedPasswordVar + " — either the " +
+			"package stopped declaring it, in which case umbrel/lint_test.go should have " +
+			"gone red first, or this rule is scanning a path that no longer exists")
+	}
+	catches(t, checkOnlyThePackageDeclaresAManagedPassword(t, []sourceFile{{
+		rel: "regtest/docker-compose.yml",
+		src: []byte("      " + managedPasswordVar + ": \"true\"\n"),
+	}}), "which only umbrel/brollyzapper/docker-compose.yml may")
+}
+
 func TestTheMandatoryMiddlewareFlagIsNeverUsed(t *testing.T) {
 	clean(t, checkNoMandatoryMiddleware(t, append(sourceFiles(t), deploymentFiles(t)...)))
 	catches(t, checkNoMandatoryMiddleware(t, []sourceFile{{
@@ -1150,6 +1221,10 @@ func deploymentFiles(t *testing.T) []sourceFile {
 		"regtest/docker-compose.yml",
 		"regtest/docker-compose.build.yml",
 		"umbrel/brollyzapper/docker-compose.yml",
+		// The plain-Docker template. Absent until `20i.5`, which is how a rule
+		// over "every deployment file" could have missed the one deployment an
+		// operator actually edits.
+		"deploy/docker-compose.yml",
 	} {
 		src, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {

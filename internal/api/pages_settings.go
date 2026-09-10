@@ -208,6 +208,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 		MaxFeeFloorMsat:          values.int(SettingMaxFeeFloorMsat, wallet.DefaultMaxFeeFloorMsat),
 		CreditReceived:           credit,
 		PasswordChangeable:       s.Auth.PasswordChangeable(),
+		PasswordMinLen:           config.MinAdminPasswordLen,
 		ProbeOK:                  values.get(SettingProbeOK) == "true",
 		ProbeReason:              values.get(SettingProbeReason),
 		ProbeAt:                  values.get(SettingProbeAt),

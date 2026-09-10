@@ -277,8 +277,9 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// pass through (hdu).
 	purse := wallet.New(db, wallet.Options{StartedAt: startedAt, Auditor: auditor, Log: log})
 	auth, err := api.NewAuth(ctx, db, api.AuthOptions{
-		AppPassword:   cfg.AdminPassword,
-		SessionSecret: cfg.SessionSecret,
+		AdminPassword:   cfg.AdminPassword,
+		PasswordManaged: cfg.AdminPasswordManaged,
+		SessionSecret:   cfg.SessionSecret,
 	})
 	if err != nil {
 		return fmt.Errorf("preparing admin auth: %w", err)
@@ -287,12 +288,6 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	if err != nil {
 		return err
 	}
-	if generated := auth.GeneratedPassword(); !generated.IsZero() {
-		// §9: shown in the browser, never only in the logs — so the log says
-		// only that there is one to collect.
-		log.Info("an admin password was generated for first run; open the Setup page to read it")
-	}
-
 	demand := make(chan struct{}, 1)
 	reconDemand := make(chan struct{}, 1)
 	// The NWC service reloads its connections on this (uhg): the Connections and

@@ -272,12 +272,11 @@ list does:
   reach LND from a shell on the host. Its comment gives the two shapes; step 4 is what a host
   LND needs before either of them answers.
 - **`LND_NETWORK`** — the chain directory from step 1, so the macaroon path resolves.
-- **`ADMIN_PASSWORD`** — the one of the four where empty is *wrong* here. **Set it before the
-  first start:** left empty the server invents a password and shows it only on `/setup`, which
-  is behind the login it would open. Its comment says why that is right on umbrelOS and not
-  here, and what a later start will not undo for you. **At least 8 characters** — the config
-  refuses to load a shorter one and the container exits at boot. Recovering from an empty first
-  start is at step 5, and it is not cheap.
+- **`ADMIN_PASSWORD`** — **set one before the first start; the server refuses to start
+  without it.** At least **12 characters**. Nothing invents a password for you and nothing
+  displays one, so this is the only copy until you sign in — and **editing this value after
+  the first start does not change the password**, because the stored hash wins once it exists.
+  Change it from **Settings** instead, once you are in.
 
 Two below the line are worth setting now rather than after the first start:
 
@@ -432,7 +431,8 @@ docker compose config -q && echo ok
 ```
 
 `ok` means those two are set and the file parses. It says nothing about `LND_ADDRESS` or
-`ADMIN_PASSWORD`, which have no such guard — an empty either passes this and fails later. Then:
+`ADMIN_PASSWORD`, which have no such guard — an empty either passes this, and the container
+then refuses to start and says which one. Then:
 
 ```bash
 docker compose up -d
@@ -473,13 +473,13 @@ Three signs, in the order they arrive:
    `200`. Substitute the port by hand: nothing has put `HTTP_PORT` in this shell, and the
    template's default is 8080.
 
-3. **You can sign in** at `http://<host>:${HTTP_PORT}/` with the password you set at step 3. If
-   you left `ADMIN_PASSWORD` empty, this is where you find out: the login form appears and the
-   password that would open it is on a page behind it. The way out is destructive — stop the
-   stack, set `ADMIN_PASSWORD`, delete `${DATA_DIR}/server`, start again — because a later
-   start does not re-seed the password once a hash exists. Deleting that directory discards the
-   nostr identity the first start generated, which is survivable now and not once the address
-   is published.
+3. **You can sign in** at `http://<host>:${HTTP_PORT}/` with the password you set at step 3.
+   If you left `ADMIN_PASSWORD` empty the server will not have started at all, and its log says
+   so in one line naming the variable and the minimum — fix `.env` and `docker compose up -d`
+   again. Nothing has been written yet, so there is nothing to undo.
+
+   Once in, **Settings** offers a password change. It does not on umbrelOS, where the platform
+   supplies the password and displays it itself; here it is yours.
 
 **While it settles.** `depends_on` orders **startup**, not readiness, so the server can come up
 before the guard has baked anything. While that lasts the server logs

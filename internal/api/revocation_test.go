@@ -48,7 +48,7 @@ func TestTheRevocationSurvivesARestart(t *testing.T) {
 	db := newTestStore(t)
 	clock := func() time.Time { return authTime }
 	build := func() *api.Auth {
-		return newAuthOver(t, db, "umbrel-derived-password", testSessionSecret, clock)
+		return newAuthOver(t, db, umbrelPassword, true, testSessionSecret, clock)
 	}
 
 	before := build()
@@ -74,19 +74,18 @@ func TestTheRevocationSurvivesARestart(t *testing.T) {
 // somebody else has a session. A new password that left the old sessions
 // running answers that with a no.
 func TestChangingThePasswordEndsEverySession(t *testing.T) {
-	// No APP_PASSWORD: on Umbrel the password is managed there and cannot be
-	// changed here at all (§9), so this is the off-Umbrel case.
-	// No APP_PASSWORD is the variation this test turns on, so it is the one
-	// argument spelled out rather than shared.
-	auth := newAuthOver(t, newTestStore(t), "", testSessionSecret,
-		func() time.Time { return authTime })
-	current := auth.GeneratedPassword()
+	// UNMANAGED: on Umbrel the password is managed by the platform and cannot be
+	// changed here at all (§9), so this is the off-Umbrel case. That flag is the
+	// variation this test turns on, so it is spelled out rather than shared —
+	// and since `20i.5` a password is supplied either way, so the flag is the
+	// only thing that separates the two.
+	auth, _ := newPlainAuth(t, plainPassword)
 
 	rec := httptest.NewRecorder()
 	auth.StartSession(rec, httptest.NewRequest(http.MethodPost, "/login", nil))
 	cookie := rec.Result().Cookies()[0]
 
-	if err := auth.ChangePassword(t.Context(), current, secret.New("a-much-longer-password")); err != nil {
+	if err := auth.ChangePassword(t.Context(), secret.New(plainPassword), secret.New("a-much-longer-password")); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -105,7 +104,7 @@ func TestChangingThePasswordEndsEverySession(t *testing.T) {
 // people turn timeouts off.
 func TestASessionIdlePastTheWindowIsRejectedAndAnActiveOneIsNot(t *testing.T) {
 	now := authTime
-	auth := newAuthOver(t, newTestStore(t), "umbrel-derived-password", testSessionSecret,
+	auth := newAuthOver(t, newTestStore(t), umbrelPassword, true, testSessionSecret,
 		func() time.Time { return now })
 	authenticated := auth.RequireSession(marker("served"))
 
@@ -150,7 +149,7 @@ func TestASessionIdlePastTheWindowIsRejectedAndAnActiveOneIsNot(t *testing.T) {
 // somebody keeps using it", which is exactly the property a stolen session has.
 func TestNoAmountOfUseExtendsASessionPastItsAbsoluteLifetime(t *testing.T) {
 	now := authTime
-	auth := newAuthOver(t, newTestStore(t), "umbrel-derived-password", testSessionSecret,
+	auth := newAuthOver(t, newTestStore(t), umbrelPassword, true, testSessionSecret,
 		func() time.Time { return now })
 	authenticated := auth.RequireSession(marker("served"))
 
@@ -226,7 +225,7 @@ func TestTheSessionGenerationIsNotASettingsFormField(t *testing.T) {
 // second GET. The renewal carries the nonce across; this is what says so.
 func TestARenewalKeepsTheCSRFTokenStable(t *testing.T) {
 	now := authTime
-	auth := newAuthOver(t, newTestStore(t), "umbrel-derived-password", testSessionSecret,
+	auth := newAuthOver(t, newTestStore(t), umbrelPassword, true, testSessionSecret,
 		func() time.Time { return now })
 
 	start := httptest.NewRecorder()

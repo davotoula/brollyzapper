@@ -15,27 +15,54 @@ import (
 
 var authTime = time.Unix(1_700_000_000, 0).UTC()
 
-func newAuth(t *testing.T, appPassword string) (*api.Auth, *store.Store) {
+// THE TWO FIXTURES ARE NAMED, because since `20i.5` the difference between them
+// is a flag and not the presence of a password. Both deployments supply one;
+// what differs is whether the PLATFORM owns it. A helper taking only a password
+// could no longer express that, and the old one silently meant "managed" purely
+// because a value was passed — which is the bug this bead removes.
+const (
+	umbrelPassword = "umbrel-derived-password"
+	// plainPassword is the other half of the pair: a password the OPERATOR
+	// chose, on a deployment nothing else is displaying it from. The two are
+	// spelled together because since `20i.5` the difference between the
+	// fixtures is the flag and not the password, and a reader comparing them
+	// should see that.
+	plainPassword = "the-operator-chose-this"
+)
+
+// newManagedAuth is the umbrelOS fixture: the platform supplied the password and
+// displays it, so Settings must not offer a change.
+func newManagedAuth(t *testing.T) (*api.Auth, *store.Store) {
 	t.Helper()
-	return newAuthWithSecret(t, appPassword, "0123456789abcdef0123456789abcdef")
+	return newAuthWithSecret(t, umbrelPassword, true, testSessionSecret)
 }
 
-func newAuthWithSecret(t *testing.T, appPassword, sessionSecret string) (*api.Auth, *store.Store) {
+// newPlainAuth is the plain-Docker fixture: the operator put the password in
+// .env themselves, nobody else is displaying it, and they may change it.
+func newPlainAuth(t *testing.T, adminPassword string) (*api.Auth, *store.Store) {
+	t.Helper()
+	return newAuthWithSecret(t, adminPassword, false, testSessionSecret)
+}
+
+func newAuthWithSecret(t *testing.T, adminPassword string, managed bool,
+	sessionSecret string) (*api.Auth, *store.Store) {
 	t.Helper()
 	db := newTestStore(t)
-	return newAuthOver(t, db, appPassword, sessionSecret, func() time.Time { return authTime }), db
+	return newAuthOver(t, db, adminPassword, managed, sessionSecret,
+		func() time.Time { return authTime }), db
 }
 
 // newAuthOver builds an Auth over a store the caller already has, on a clock
 // the caller controls. The session tests need both: one rebuilds Auth over the
 // same database to stand in for a restart, and the idle-window tests move time.
-func newAuthOver(t *testing.T, db *store.Store, appPassword, sessionSecret string,
-	now func() time.Time) *api.Auth {
+func newAuthOver(t *testing.T, db *store.Store, adminPassword string, managed bool,
+	sessionSecret string, now func() time.Time) *api.Auth {
 	t.Helper()
 	auth, err := api.NewAuth(t.Context(), db, api.AuthOptions{
-		AppPassword:   secret.New(appPassword),
-		SessionSecret: secret.New(sessionSecret),
-		Now:           now,
+		AdminPassword:   secret.New(adminPassword),
+		PasswordManaged: managed,
+		SessionSecret:   secret.New(sessionSecret),
+		Now:             now,
 	})
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
@@ -49,7 +76,7 @@ const testSessionSecret = "0123456789abcdef0123456789abcdef"
 
 // Spec §9: argon2id, and the hash must not be the password.
 func TestPasswordsAreStoredAsArgon2idHashes(t *testing.T) {
-	auth, db := newAuth(t, "umbrel-derived-password")
+	auth, db := newManagedAuth(t)
 	stored, ok, err := db.Setting(t.Context(), api.SettingAdminPasswordHash)
 	if err != nil || !ok {
 		t.Fatalf("the password hash was not stored: ok=%v err=%v", ok, err)
@@ -57,10 +84,10 @@ func TestPasswordsAreStoredAsArgon2idHashes(t *testing.T) {
 	if !strings.HasPrefix(stored, "$argon2id$") {
 		t.Errorf("stored hash %q is not an argon2id PHC string", stored)
 	}
-	if strings.Contains(stored, "umbrel-derived-password") {
+	if strings.Contains(stored, umbrelPassword) {
 		t.Error("the stored hash contains the password")
 	}
-	if !auth.Verify(t.Context(), secret.New("umbrel-derived-password")) {
+	if !auth.Verify(t.Context(), secret.New(umbrelPassword)) {
 		t.Error("the correct password did not verify")
 	}
 	if auth.Verify(t.Context(), secret.New("wrong")) {
@@ -69,11 +96,11 @@ func TestPasswordsAreStoredAsArgon2idHashes(t *testing.T) {
 }
 
 // Spec §9: APP_PASSWORD seeds the stored hash ONLY when no hash exists yet.
-func TestAppPasswordSeedsOnlyWhenNoHashExists(t *testing.T) {
+func TestAdminPasswordSeedsOnlyWhenNoHashExists(t *testing.T) {
 	db := newTestStore(t)
 	opts := api.AuthOptions{
-		AppPassword:   secret.New("first-password-value"),
-		SessionSecret: secret.New("0123456789abcdef0123456789abcdef"),
+		AdminPassword: secret.New("first-password-value"),
+		SessionSecret: secret.New(testSessionSecret),
 		Now:           func() time.Time { return authTime },
 	}
 	first, err := api.NewAuth(t.Context(), db, opts)
@@ -84,7 +111,7 @@ func TestAppPasswordSeedsOnlyWhenNoHashExists(t *testing.T) {
 
 	// A restart with a DIFFERENT APP_PASSWORD must not silently reseed: the
 	// stored hash is the truth once it exists.
-	opts.AppPassword = secret.New("second-password-value")
+	opts.AdminPassword = secret.New("second-password-value")
 	second, err := api.NewAuth(t.Context(), db, opts)
 	if err != nil {
 		t.Fatalf("NewAuth on an existing install: %v", err)
@@ -99,65 +126,65 @@ func TestAppPasswordSeedsOnlyWhenNoHashExists(t *testing.T) {
 	_ = first
 }
 
-// Spec §9: when APP_PASSWORD is set, Settings offers no password change —
+// Spec §9: when the PLATFORM manages the password, Settings offers no change —
 // otherwise umbrelOS would display a value that is silently wrong.
-func TestPasswordIsUmbrelManagedWhenAppPasswordIsSet(t *testing.T) {
-	auth, _ := newAuth(t, "umbrel-derived-password")
+func TestPasswordIsManagedWhenTheDeploymentSaysSo(t *testing.T) {
+	auth, _ := newManagedAuth(t)
 	if auth.PasswordChangeable() {
-		t.Error("PasswordChangeable() = true with APP_PASSWORD set; umbrelOS would show a stale value")
+		t.Error("PasswordChangeable() = true on the managed fixture; umbrelOS would show a stale value")
 	}
-	err := auth.ChangePassword(t.Context(), secret.New("umbrel-derived-password"), secret.New("something-else"))
+	err := auth.ChangePassword(t.Context(), secret.New(umbrelPassword), secret.New("something-else"))
 	if err == nil {
-		t.Fatal("ChangePassword succeeded with APP_PASSWORD set")
+		t.Fatal("ChangePassword succeeded on the managed fixture")
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "umbrel") {
 		t.Errorf("error %q does not explain that the password is Umbrel-managed", err)
 	}
 }
 
-// ...and off Umbrel, where the variable is absent, it IS changeable.
-func TestPasswordIsChangeableOffUmbrel(t *testing.T) {
-	auth, _ := newAuth(t, "")
+// ...and off Umbrel it IS changeable — WITH A PASSWORD SET, which is the whole
+// point of `20i.5`. This fixture is the one that used to be indistinguishable
+// from the one above: both supply a password, and until the flag existed that
+// was the only thing the app looked at, so this operator was refused a change
+// on a credential nobody else was showing them.
+func TestPasswordIsChangeableOffUmbrelEvenThoughOneWasSupplied(t *testing.T) {
+	auth, _ := newPlainAuth(t, plainPassword)
 	if !auth.PasswordChangeable() {
-		t.Fatal("PasswordChangeable() = false with no APP_PASSWORD; off Umbrel this is the only layer")
+		t.Fatal("PasswordChangeable() = false on the plain fixture, which supplies a password " +
+			"exactly as the managed one does; the flag is what must separate them")
 	}
-	generated := auth.GeneratedPassword()
-	if generated.IsZero() {
-		t.Fatal("no password was generated on first run")
-	}
-	if err := auth.ChangePassword(t.Context(), generated, secret.New("a-new-long-password")); err != nil {
+	if err := auth.ChangePassword(t.Context(), secret.New(plainPassword), secret.New("a-new-long-password")); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
-	if auth.Verify(t.Context(), generated) {
+	if auth.Verify(t.Context(), secret.New(plainPassword)) {
 		t.Error("the old password still verifies after a change")
 	}
 	if !auth.Verify(t.Context(), secret.New("a-new-long-password")) {
 		t.Error("the new password does not verify")
 	}
-	if err := auth.ChangePassword(t.Context(), secret.New("wrong-old"), secret.New("another-password")); err == nil {
+	if err := auth.ChangePassword(t.Context(), secret.New("wrong-old-password"), secret.New("another-password")); err == nil {
 		t.Error("ChangePassword accepted a wrong current password")
 	}
 }
 
-// Spec §9: first run generates a password and shows it IN THE BROWSER. A
-// password that exists only in the logs fails this.
-func TestGeneratedPasswordIsAvailableToRenderAndIsLongEnough(t *testing.T) {
-	auth, _ := newAuth(t, "")
-	generated := auth.GeneratedPassword()
-	if generated.IsZero() {
-		t.Fatal("first run generated no password")
+// The password is no longer optional, and NewAuth is the second line of that
+// defence: internal/config refuses first, but a caller that got past it must
+// not end up with a random credential nobody can read (`20i.5`).
+func TestNewAuthRefusesToSeedWithNoPassword(t *testing.T) {
+	_, err := api.NewAuth(t.Context(), newTestStore(t), api.AuthOptions{
+		SessionSecret: secret.New(testSessionSecret),
+	})
+	if err == nil {
+		t.Fatal("NewAuth accepted an empty password on an empty store; it used to invent one " +
+			"and render it on a page behind the login it would have opened")
 	}
-	if len(generated.Reveal()) < 16 {
-		t.Errorf("generated password is %d characters, want at least 16", len(generated.Reveal()))
-	}
-	// It must not be rendered by a log line: the type refuses to serialise.
-	if got := generated.String(); strings.Contains(got, generated.Reveal()) {
-		t.Error("the generated password renders itself in string form")
+	if !strings.Contains(err.Error(), "ADMIN_PASSWORD") {
+		t.Errorf("error %q does not name the variable the operator has to set", err)
 	}
 }
 
 func TestSessionCookieRoundTrips(t *testing.T) {
-	auth, _ := newAuth(t, "umbrel-derived-password")
+	auth, _ := newManagedAuth(t)
 	rec := httptest.NewRecorder()
 	auth.StartSession(rec, httptest.NewRequest(http.MethodPost, "/login", nil))
 
@@ -185,7 +212,7 @@ func TestSessionCookieRoundTrips(t *testing.T) {
 }
 
 func TestATamperedOrExpiredSessionIsRejected(t *testing.T) {
-	auth, _ := newAuth(t, "umbrel-derived-password")
+	auth, _ := newManagedAuth(t)
 	rec := httptest.NewRecorder()
 	auth.StartSession(rec, httptest.NewRequest(http.MethodPost, "/login", nil))
 	cookie := rec.Result().Cookies()[0]
@@ -202,7 +229,7 @@ func TestATamperedOrExpiredSessionIsRejected(t *testing.T) {
 	// derives SESSION_SECRET deterministically per install, so the same secret
 	// deliberately DOES survive a restart — it is a different secret, not a
 	// different process, that must invalidate a session.
-	other, _ := newAuthWithSecret(t, "other-password-value", "ffffffffffffffffffffffffffffffff")
+	other, _ := newAuthWithSecret(t, "other-password-value", true, "ffffffffffffffffffffffffffffffff")
 	r = httptest.NewRequest(http.MethodGet, "/wallet", nil)
 	r.AddCookie(cookie)
 	if _, ok := other.Session(r); ok {
@@ -212,17 +239,14 @@ func TestATamperedOrExpiredSessionIsRejected(t *testing.T) {
 
 // A session must not outlive its expiry.
 func TestAnExpiredSessionIsRejected(t *testing.T) {
-	auth, _ := newAuth(t, "umbrel-derived-password")
+	auth, _ := newManagedAuth(t)
 	rec := httptest.NewRecorder()
 	auth.StartSession(rec, httptest.NewRequest(http.MethodPost, "/login", nil))
 	cookie := rec.Result().Cookies()[0]
 
 	// Same signing secret, a clock past the expiry stamped into the cookie.
-	later, _ := api.NewAuth(t.Context(), newTestStore(t), api.AuthOptions{
-		AppPassword:   secret.New("umbrel-derived-password"),
-		SessionSecret: secret.New("0123456789abcdef0123456789abcdef"),
-		Now:           func() time.Time { return authTime.Add(api.SessionLifetime + time.Minute) },
-	})
+	later := newAuthOver(t, newTestStore(t), umbrelPassword, true, testSessionSecret,
+		func() time.Time { return authTime.Add(api.SessionLifetime + time.Minute) })
 	r := httptest.NewRequest(http.MethodGet, "/wallet", nil)
 	r.AddCookie(cookie)
 	if _, ok := later.Session(r); ok {
@@ -245,7 +269,7 @@ func newTestStore(t *testing.T) *store.Store {
 // Spec §9: CSRF token on every mutating form. A mutating POST without a valid
 // token is rejected.
 func TestMutatingRequestsRequireACSRFToken(t *testing.T) {
-	auth, _ := newAuth(t, "umbrel-derived-password")
+	auth, _ := newManagedAuth(t)
 	rec := httptest.NewRecorder()
 	auth.StartSession(rec, httptest.NewRequest(http.MethodPost, "/login", nil))
 	cookie := rec.Result().Cookies()[0]
@@ -278,7 +302,7 @@ func TestMutatingRequestsRequireACSRFToken(t *testing.T) {
 }
 
 func TestUnauthenticatedAdminRequestsAreRefused(t *testing.T) {
-	auth, _ := newAuth(t, "umbrel-derived-password")
+	auth, _ := newManagedAuth(t)
 	authenticated := auth.RequireSession(marker("served"))
 
 	rec := httptest.NewRecorder()

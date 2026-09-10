@@ -122,6 +122,15 @@ services:
       # (spec §7).
       TRUSTED_PROXIES: ${NETWORK_IP}/16
       ADMIN_PASSWORD: $APP_PASSWORD
+      # THE PLATFORM OWNS THAT PASSWORD, and this is the app being told so
+      # rather than guessing (`20i.5`). umbrelOS derives $APP_PASSWORD per
+      # install and displays it in its own UI, so Settings must not offer to
+      # change it — a change here would make umbrelOS's display silently wrong
+      # (§9). The app used to infer this from ADMIN_PASSWORD being set, which is
+      # also true of a plain-Docker operator who typed their own password into
+      # .env, and it denied them a password change for ever. Only this file
+      # sets it; deploy/lint_test.go refuses it in the plain-Docker template.
+      ADMIN_PASSWORD_MANAGED: "true"
       SESSION_SECRET: $APP_BROLLYZAPPER_SESSION_SECRET
     restart: on-failure
     stop_grace_period: 1m

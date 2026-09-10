@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/api"
+	"github.com/davotoula/brollyzapper/internal/config"
 	"github.com/davotoula/brollyzapper/internal/secret"
 	"github.com/davotoula/brollyzapper/internal/store"
 )
@@ -98,8 +100,13 @@ func TestTheNewPasswordMinimumIsTwelveCharacters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestStore(t)
-			auth := newAuthOver(t, db, "", testSessionSecret, func() time.Time { return authTime })
-			err := auth.ChangePassword(t.Context(), auth.GeneratedPassword(),
+			// The plain fixture: a supplied password, unmanaged, so the change
+			// is allowed and the LENGTH is the only thing under test. It used
+			// to read the current password out of Auth.GeneratedPassword(),
+			// which no longer exists (`20i.5`).
+			auth := newAuthOver(t, db, plainPassword, false, testSessionSecret,
+				func() time.Time { return authTime })
+			err := auth.ChangePassword(t.Context(), secret.New(plainPassword),
 				secret.New(tc.password))
 			if tc.accepted && err != nil {
 				t.Errorf("a %d-character password was refused: %v", len(tc.password), err)
@@ -125,17 +132,20 @@ func TestTheNewPasswordMinimumIsTwelveCharacters(t *testing.T) {
 func TestChangingThePasswordThroughTheFormEndsTheOtherSessions(t *testing.T) {
 	var auth *api.Auth
 	h := newHarness(t, func(opts *api.ServerOptions, db *store.Store) {
-		// No APP_PASSWORD: on Umbrel the password is managed there and the form
-		// refuses outright, which is the case below.
-		auth = newAuthOver(t, db, "", testSessionSecret, func() time.Time { return authTime })
+		// UNMANAGED, which is what makes the form work at all: on Umbrel the
+		// platform owns the password and the form refuses outright. The
+		// password itself is supplied either way since `20i.5`, so the flag is
+		// the only thing separating this case from that one.
+		auth = newAuthOver(t, db, umbrelPassword, false, testSessionSecret,
+			func() time.Time { return authTime })
 		opts.Auth = auth
 	})
 	const replacement = "a-much-longer-password"
 	// The hash the harness seeded is already in the store, and NewAuth only
 	// bootstraps when there is none — so the replacement Auth above inherits
-	// that credential and simply stops treating it as Umbrel-managed, which is
+	// that credential and simply stops treating it as platform-managed, which is
 	// exactly the off-Umbrel case this needs.
-	const old = "umbrel-derived-password"
+	const old = umbrelPassword
 
 	operator := signIn(t, h, old)
 	// A second signed-in session — the one the operator is worried about.
@@ -181,23 +191,23 @@ func signIn(t *testing.T, h *harness, password string) *http.Cookie {
 // must refuse rather than write a hash the platform will overwrite — and it must
 // say WHY, or the operator retypes it and wonders.
 func TestTheFormRefusesWhenUmbrelOwnsThePassword(t *testing.T) {
-	h := newHarness(t) // the default harness sets APP_PASSWORD
+	h := newHarness(t) // the default harness is the MANAGED fixture
 	cookie := h.login(t)
 
 	rec := h.postForm(t, "/settings/password", cookie, url.Values{
-		"current": {"umbrel-derived-password"}, "new": {"a-much-longer-password"},
+		"current": {umbrelPassword}, "new": {"a-much-longer-password"},
 	})
 	if !strings.Contains(rec.Header().Get("Location"), "refused") {
 		t.Errorf("the form did not refuse: %d %q", rec.Code, rec.Header().Get("Location"))
 	}
-	if err := h.auth.ChangePassword(t.Context(), secret.New("umbrel-derived-password"),
+	if err := h.auth.ChangePassword(t.Context(), secret.New(umbrelPassword),
 		secret.New("a-much-longer-password")); err == nil {
 		t.Error("the password was changeable after all")
 	} else if !strings.Contains(err.Error(), "managed by Umbrel") {
 		t.Errorf("the reason does not name Umbrel: %v", err)
 	}
 	// And the platform's password still works, which is the point of refusing.
-	if !h.auth.Verify(t.Context(), secret.New("umbrel-derived-password")) {
+	if !h.auth.Verify(t.Context(), secret.New(umbrelPassword)) {
 		t.Error("the refused change altered the stored hash anyway")
 	}
 }
@@ -220,5 +230,42 @@ func TestTheProbeNowButtonAsksForAProbe(t *testing.T) {
 	default:
 		t.Error("the button redirected but asked for no probe; the operator is told " +
 			"'saved' and nothing happens")
+	}
+}
+
+// The browser's guard and the server's refusal must be the same number.
+//
+// `20i.5` unified two that had drifted — the loader accepted 8 while
+// ChangePassword demanded 12, so a password an operator set in .env was one the
+// app then refused to let them re-enter. The form's `minlength` was a THIRD
+// statement of it, a literal in the template, and this is what stops it
+// becoming a fourth: it reads the rendered attribute back and compares it to
+// the constant both other layers use.
+func TestTheFormsMinimumIsTheOneTheServerEnforces(t *testing.T) {
+	var auth *api.Auth
+	h := newHarness(t, func(opts *api.ServerOptions, db *store.Store) {
+		// Unmanaged, or the form is not rendered at all and this would pass
+		// while asserting over an absent element.
+		auth = newAuthOver(t, db, umbrelPassword, false, testSessionSecret,
+			func() time.Time { return authTime })
+		opts.Auth = auth
+	})
+	// The harness seeded the store before the override ran, and
+	// bootstrapPassword never re-seeds — so the credential in the database is
+	// still the harness's, and the override changed only who owns it. Same
+	// reasoning as TestChangingThePasswordThroughTheFormEndsTheOtherSessions.
+	page := h.get(t, "/settings", signIn(t, h, umbrelPassword)).Body.String()
+
+	want := fmt.Sprintf(`minlength="%d"`, config.MinAdminPasswordLen)
+	if !strings.Contains(page, want) {
+		t.Errorf("the settings form does not carry %s; the browser would accept a password "+
+			"the server refuses, and the form's own guard would be a lie:\n%s", want, page)
+	}
+	// And the server really does refuse one character short, which is what
+	// makes the attribute above worth agreeing with.
+	short := strings.Repeat("a", config.MinAdminPasswordLen-1)
+	if err := auth.ChangePassword(t.Context(), secret.New(umbrelPassword), secret.New(short)); err == nil {
+		t.Errorf("the server accepted a %d-character password while the form says the "+
+			"minimum is %d", len(short), config.MinAdminPasswordLen)
 	}
 }

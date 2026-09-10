@@ -39,7 +39,14 @@ const (
 	// on a fresh install and turns on only through the operator's ceremony.
 	DefaultAllowSending = true
 
-	minAdminPasswordLen = 8
+	// MinAdminPasswordLen is the floor at BOOT and on a change from Settings.
+	//
+	// Exported because internal/api enforces the same floor on
+	// Auth.ChangePassword, and two numbers that must agree and live in two
+	// packages are two numbers that will not. It was 8 here and 12 there until
+	// `20i.5` — so a password the operator set in .env could be one the app
+	// then refused to let them re-enter.
+	MinAdminPasswordLen = 12
 	minSessionSecretLen = 16
 )
 
@@ -82,8 +89,20 @@ type Server struct {
 	ListenAddr     string
 	TrustedProxies []netip.Prefix
 	AdminPassword  secret.String
-	SessionSecret  secret.String
-	LogLevel       slog.Level
+	// AdminPasswordManaged says the PLATFORM owns this password: it supplies
+	// the value and displays it to the operator itself, so the app must not
+	// offer to change it (§9).
+	//
+	// It is an explicit signal rather than an inference from AdminPassword
+	// being set, and that distinction is the whole of `20i.5`. umbrelOS derives
+	// a per-install password and shows it in its own UI, so a change made here
+	// would make that display silently wrong; a plain-Docker operator types the
+	// password into .env themselves and has every right to change it. Both
+	// arrive as a non-empty ADMIN_PASSWORD, which is why the value cannot say
+	// which case it is.
+	AdminPasswordManaged bool
+	SessionSecret        secret.String
+	LogLevel             slog.Level
 }
 
 // LogValue is §12's "the settings struct": the configuration is logged at
@@ -101,6 +120,7 @@ func (s Server) LogValue() slog.Value {
 		slog.String("listen_addr", s.ListenAddr),
 		slog.Int("trusted_proxies", len(s.TrustedProxies)),
 		slog.Bool("admin_password_set", !s.AdminPassword.IsZero()),
+		slog.Bool("admin_password_managed", s.AdminPasswordManaged),
 		slog.Bool("session_secret_set", !s.SessionSecret.IsZero()),
 		slog.String("log_level", s.LogLevel.String()),
 	)
@@ -174,13 +194,42 @@ func LoadServer(env Lookup) (*Server, error) {
 		DataDir:        p.requiredAbsPath("DATA_DIR"),
 		ListenAddr:     p.optionalHostPort("LISTEN_ADDR", DefaultListenAddr),
 		TrustedProxies: p.optionalPrefixList("TRUSTED_PROXIES"),
-		AdminPassword:  p.optionalSecret("ADMIN_PASSWORD", minAdminPasswordLen),
-		SessionSecret:  p.optionalSecret("SESSION_SECRET", minSessionSecretLen),
-		LogLevel:       p.optionalLevel("LOG_LEVEL"),
+		AdminPassword:  p.optionalSecret("ADMIN_PASSWORD", MinAdminPasswordLen),
+		// Default FALSE, so a deployment that says nothing is unmanaged. That is
+		// the safe default in the direction that matters: an unmanaged install
+		// lets the operator change the password, while a wrongly-managed one
+		// locks them out of their own credential with no route back.
+		AdminPasswordManaged: p.optionalBool("ADMIN_PASSWORD_MANAGED", false),
+		SessionSecret:        p.optionalSecret("SESSION_SECRET", minSessionSecretLen),
+		LogLevel:             p.optionalLevel("LOG_LEVEL"),
 	}
 	// The socket lives in the credential volume both containers share, so it
 	// has a sensible default whenever CREDENTIALS_DIR is known.
 	cfg.GuardSocket = p.optionalAbsPath("GUARD_SOCKET", path.Join(cfg.CredentialsDir, GuardSocketName))
+	// THE PASSWORD IS REQUIRED, and refusing here is what replaces inventing one.
+	//
+	// The app used to generate a password on a first run with none supplied and
+	// render it on /setup — which lives behind the very login it would open, so
+	// off Umbrel it could not be read and the install had no way in
+	// (measured, `20i.5`). Refusing to start says the same thing a minute
+	// earlier, in a place the operator is already looking, and leaves no secret
+	// anywhere.
+	//
+	// ASKED OF THE ENVIRONMENT, not of the parsed value. A zero AdminPassword
+	// means one of two things — unset, or set but below the minimum — and
+	// optionalSecret has already complained about the second. p.value reports
+	// set-ness directly, so a short password cannot collect a second error
+	// telling it that it is missing.
+	if _, set := p.value("ADMIN_PASSWORD"); !set {
+		if cfg.AdminPasswordManaged {
+			p.fail("ADMIN_PASSWORD", "is empty while ADMIN_PASSWORD_MANAGED is true; "+
+				"the platform is supposed to be supplying it, so either it did not or "+
+				"ADMIN_PASSWORD_MANAGED is set on a deployment that has no platform")
+		} else {
+			p.fail("ADMIN_PASSWORD", "is required; set it in .env (at least %d characters) "+
+				"— it can be changed from Settings once you are in", MinAdminPasswordLen)
+		}
+	}
 	if err := p.err(); err != nil {
 		return nil, err
 	}

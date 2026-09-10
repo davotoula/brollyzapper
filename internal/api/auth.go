@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
+	"github.com/davotoula/brollyzapper/internal/config"
 	"github.com/davotoula/brollyzapper/internal/secret"
 )
 
@@ -69,20 +70,40 @@ type SettingsStore interface {
 
 // AuthOptions configure Auth.
 type AuthOptions struct {
-	// AppPassword is Umbrel's derived per-install credential. When it is set,
-	// the password is Umbrel-managed and not changeable here (§9).
-	AppPassword secret.String
+	// AdminPassword is the password the deployment supplied. It seeds the stored
+	// hash on a first run and nothing else; it is required, and internal/config
+	// refuses to start without one.
+	//
+	// NAMED FOR THE VARIABLE IT COMES FROM, ADMIN_PASSWORD. It was AdminPassword
+	// until `20i.5`, after umbrelOS's $APP_PASSWORD — a name that quietly
+	// claimed the platform was the source, which is the inference this bead
+	// removed. PasswordManaged is what says who owns it.
+	AdminPassword secret.String
+	// PasswordManaged says the platform owns the password and displays it
+	// itself, so Settings must not offer to change it (§9).
+	//
+	// SEPARATE FROM AdminPassword BEING SET, which is what this used to be
+	// inferred from. Off Umbrel the operator types the password into .env, so
+	// both cases arrive as a non-empty AdminPassword and the value cannot tell
+	// them apart — the inference made every plain-Docker install look
+	// Umbrel-managed and denied its operator a password change for ever
+	// (`20i.5`).
+	PasswordManaged bool
 	// SessionSecret signs session cookies. Empty means one is generated and
 	// persisted, which is what an off-Umbrel deployment needs.
 	SessionSecret secret.String
 	Now           func() time.Time
 }
 
-// LogValue keeps the whole options struct out of a log line (§12). Both fields
+// LogValue keeps the whole options struct out of a log line (§12). Two fields
 // are secret.String and would redact themselves; this is about the struct, which
 // otherwise prints as a Go value with two Redacted holes and invites the habit.
+//
+// The KEY stays `umbrel_managed` though the field no longer names Umbrel: the
+// only platform that manages a password is umbrelOS, and an operator grepping
+// their logs across an upgrade should not have to know this changed.
 func (o AuthOptions) LogValue() slog.Value {
-	return slog.GroupValue(slog.Bool("umbrel_managed", !o.AppPassword.IsZero()))
+	return slog.GroupValue(slog.Bool("umbrel_managed", o.PasswordManaged))
 }
 
 // Auth owns the admin credential and the session cookie.
@@ -95,11 +116,9 @@ type Auth struct {
 	sessionSecret secret.String
 	now           func() time.Time
 
-	// umbrelManaged records that APP_PASSWORD was set at startup.
-	umbrelManaged bool
-	// generatedPassword is shown in the browser on first run and nowhere else.
-	// §9: a password that exists only in the logs is a failure.
-	generatedPassword secret.String
+	// passwordManaged records that the DEPLOYMENT said the platform owns this
+	// password — not that one was supplied. See AuthOptions.PasswordManaged.
+	passwordManaged bool
 
 	// generation mirrors SettingSessionGeneration. It is read on every session
 	// check, which is every authenticated request, and the database here runs
@@ -115,7 +134,7 @@ type Auth struct {
 // current.
 func (a *Auth) LogValue() slog.Value {
 	return slog.GroupValue(
-		slog.Bool("umbrel_managed", a.umbrelManaged),
+		slog.Bool("umbrel_managed", a.passwordManaged),
 		slog.Int64("session_generation", a.generation.Load()),
 	)
 }
@@ -127,10 +146,10 @@ func NewAuth(ctx context.Context, store SettingsStore, opts AuthOptions) (*Auth,
 		now = time.Now
 	}
 	a := &Auth{
-		store:         store,
-		sessionSecret: opts.SessionSecret,
-		now:           now,
-		umbrelManaged: !opts.AppPassword.IsZero(),
+		store:           store,
+		sessionSecret:   opts.SessionSecret,
+		now:             now,
+		passwordManaged: opts.PasswordManaged,
 	}
 	if a.sessionSecret.IsZero() {
 		persisted, err := a.persistedSessionSecret(ctx)
@@ -139,7 +158,7 @@ func NewAuth(ctx context.Context, store SettingsStore, opts AuthOptions) (*Auth,
 		}
 		a.sessionSecret = persisted
 	}
-	if err := a.bootstrapPassword(ctx, opts.AppPassword); err != nil {
+	if err := a.bootstrapPassword(ctx, opts.AdminPassword); err != nil {
 		return nil, err
 	}
 	stored, _, err := a.store.Setting(ctx, SettingSessionGeneration)
@@ -204,11 +223,11 @@ func (a *Auth) persistedSessionSecret(ctx context.Context) (secret.String, error
 
 // bootstrapPassword seeds the stored hash if there is none.
 //
-// §9: APP_PASSWORD seeds it ONLY when no hash exists yet. A later start with a
-// different APP_PASSWORD must not reseed — the stored hash is the truth once it
-// exists, and reseeding would silently lock the operator out of their own
-// changed password.
-func (a *Auth) bootstrapPassword(ctx context.Context, appPassword secret.String) error {
+// §9: ADMIN_PASSWORD seeds it ONLY when no hash exists yet. A later start with a
+// different ADMIN_PASSWORD must not reseed — the stored hash is the truth once
+// it exists, and reseeding would silently lock the operator out of a password
+// they changed from Settings.
+func (a *Auth) bootstrapPassword(ctx context.Context, adminPassword secret.String) error {
 	stored, ok, err := a.store.Setting(ctx, SettingAdminPasswordHash)
 	if err != nil {
 		return err
@@ -216,28 +235,30 @@ func (a *Auth) bootstrapPassword(ctx context.Context, appPassword secret.String)
 	if ok && stored != "" {
 		return nil
 	}
-	password := appPassword
-	if password.IsZero() {
-		// First run with no Umbrel-derived credential: invent one and keep it
-		// in memory so Setup can show it in the browser.
-		password = secret.New(secret.RandomToken(16))
-		a.generatedPassword = password
+	// NOTHING IS INVENTED HERE ANY MORE. A first run with no password used to
+	// generate one and keep it in memory for /setup to render — a page behind
+	// the login it would have opened, so off Umbrel the install had no way in
+	// (`20i.5`). internal/config now refuses to start without a password, and
+	// this is the assertion that the two stay in step: a caller that reaches
+	// here with nothing gets an error rather than a random credential nobody
+	// can read.
+	if adminPassword.IsZero() {
+		return errors.New("no admin password to seed the stored hash with; " +
+			"ADMIN_PASSWORD is required and the configuration should have refused first")
 	}
-	hash, err := HashPassword(password)
+	hash, err := HashPassword(adminPassword)
 	if err != nil {
 		return err
 	}
 	return a.store.SetSetting(ctx, SettingAdminPasswordHash, hash)
 }
 
-// GeneratedPassword is the password invented on first run, for Setup to render.
-// It is zero on every subsequent start and whenever APP_PASSWORD is set.
-func (a *Auth) GeneratedPassword() secret.String { return a.generatedPassword }
-
 // PasswordChangeable reports whether Settings may offer a password change.
-// False on Umbrel: umbrelOS shows the derived password to the user, so a
-// changed one would make that display silently wrong (§9).
-func (a *Auth) PasswordChangeable() bool { return !a.umbrelManaged }
+// False when the platform manages it: umbrelOS shows the derived password to
+// the user, so a changed one would make that display silently wrong (§9). True
+// everywhere else, including a plain-Docker install whose operator set
+// ADMIN_PASSWORD themselves — nobody else is displaying that value.
+func (a *Auth) PasswordChangeable() bool { return !a.passwordManaged }
 
 // Verify checks a password against the stored hash.
 func (a *Auth) Verify(ctx context.Context, password secret.String) bool {
@@ -257,8 +278,9 @@ func (a *Auth) ChangePassword(ctx context.Context, current, replacement secret.S
 	if !a.Verify(ctx, current) {
 		return errors.New("the current password is not correct")
 	}
-	if len(replacement.Reveal()) < 12 {
-		return fmt.Errorf("the new password is %d characters; the minimum is 12", len(replacement.Reveal()))
+	if len(replacement.Reveal()) < config.MinAdminPasswordLen {
+		return fmt.Errorf("the new password is %d characters; the minimum is %d",
+			len(replacement.Reveal()), config.MinAdminPasswordLen)
 	}
 	hash, err := HashPassword(replacement)
 	if err != nil {
@@ -267,7 +289,6 @@ func (a *Auth) ChangePassword(ctx context.Context, current, replacement secret.S
 	if err := a.store.SetSetting(ctx, SettingAdminPasswordHash, hash); err != nil {
 		return err
 	}
-	a.generatedPassword = secret.String{}
 	// Changing the password is one of the two things an operator does when they
 	// believe someone else has a session. A new password that left the old
 	// sessions running would answer the question they were asking with a no.

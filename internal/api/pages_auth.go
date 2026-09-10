@@ -88,7 +88,6 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	data, values, _ := s.page(r.Context(), "Setup")
 	domain, name := values.get(SettingDomain), values.get(SettingAddressName)
 	data.Setup = web.SetupView{
-		GeneratedPassword: s.Auth.GeneratedPassword(),
 		PasswordManaged:   !s.Auth.PasswordChangeable(),
 		AddressConfigured: domain != "" && name != "",
 		LightningAddress:  lnurl.Identifier(name, domain),

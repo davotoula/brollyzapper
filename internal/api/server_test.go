@@ -56,10 +56,15 @@ func (h *harness) clientIPFor(t *testing.T, remote, forwarded string) string {
 func newHarness(t *testing.T, overrides ...func(*api.ServerOptions, *store.Store)) *harness {
 	t.Helper()
 	db := newTestStore(t)
+	// THE MANAGED FIXTURE, which is what the default harness has always been —
+	// it used to be managed because a password was supplied, and since `20i.5`
+	// it says so. A test that needs the plain-Docker side replaces Auth through
+	// an override; internal/api/password_test.go does exactly that.
 	auth, err := api.NewAuth(t.Context(), db, api.AuthOptions{
-		AppPassword:   secret.New("umbrel-derived-password"),
-		SessionSecret: secret.New("0123456789abcdef0123456789abcdef"),
-		Now:           func() time.Time { return authTime },
+		AdminPassword:   secret.New(umbrelPassword),
+		PasswordManaged: true,
+		SessionSecret:   secret.New(testSessionSecret),
+		Now:             func() time.Time { return authTime },
 	})
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
@@ -110,7 +115,7 @@ func newHarness(t *testing.T, overrides ...func(*api.ServerOptions, *store.Store
 func (h *harness) login(t *testing.T) *http.Cookie {
 	t.Helper()
 	b := h.browser()
-	rec := b.submitLogin(t, csrfFrom(t, b.get(t, "/login").Body.String()), "umbrel-derived-password")
+	rec := b.submitLogin(t, csrfFrom(t, b.get(t, "/login").Body.String()), umbrelPassword)
 	if cookie, ok := b.cookies[api.SessionCookieName]; ok && cookie.Value != "" {
 		return cookie
 	}
@@ -265,7 +270,7 @@ func TestFetchingTheLoginPageDoesNotAuthenticate(t *testing.T) {
 // a third-party page can log the operator into an account of its choosing.
 func TestLoginItselfRequiresACSRFToken(t *testing.T) {
 	h := newHarness(t)
-	form := url.Values{"password": {"umbrel-derived-password"}}
+	form := url.Values{"password": {umbrelPassword}}
 	post := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -728,7 +733,7 @@ func TestARetryAfterAWrongPasswordCanStillLogIn(t *testing.T) {
 		t.Fatalf("a wrong password answered %d, want 200 with the form re-rendered", failed.Code)
 	}
 
-	retry := b.submitLogin(t, csrfFrom(t, failed.Body.String()), "umbrel-derived-password")
+	retry := b.submitLogin(t, csrfFrom(t, failed.Body.String()), umbrelPassword)
 	if retry.Code != http.StatusSeeOther {
 		t.Fatalf("the correct password on the retry form answered %d %q, want 303 — "+
 			"the retry form's token must be one the cookie accepts",
@@ -756,7 +761,7 @@ func TestASecondLoginPageDoesNotInvalidateTheFirst(t *testing.T) {
 			"the second invalidates the form already on screen", first, second)
 	}
 
-	rec := b.submitLogin(t, first, "umbrel-derived-password")
+	rec := b.submitLogin(t, first, umbrelPassword)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("the FIRST page's token answered %d %q after a second GET /login, want 303",
 			rec.Code, rec.Body.String())

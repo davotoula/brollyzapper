@@ -154,9 +154,11 @@ Replacing the key means receipts already published stay signed by the old one.
 
 ### Admin password
 
-Changeable in the app only when the deployment has not set one. On Umbrel the password is
-derived per-install and managed by umbrelOS, so the field is absent; off Umbrel, set
-`ADMIN_PASSWORD` (minimum 8 characters) or change it here.
+Changeable in the app unless the **platform** manages it. On Umbrel the password is derived
+per-install and displayed by umbrelOS, so the field is absent and the app refuses the change
+rather than making that display wrong. Everywhere else it is yours: set `ADMIN_PASSWORD`
+(minimum 12 characters) to start at all, then change it here whenever you like — editing the
+variable again does nothing, because the stored hash wins once it exists.
 
 Changing it bumps a session counter that is part of every cookie's signature, so **every
 existing session is invalidated** — including a copy taken from a browser no longer under your
@@ -220,7 +222,8 @@ change them, and **changing one needs a restart that recreates the container** �
 | `LISTEN_ADDR` | `0.0.0.0:8080` | The admin and public HTTP listener. |
 | `TRUSTED_PROXIES` | empty | Fallback for the setting of the same name. The stored setting wins when set. |
 | `LOG_LEVEL` | `info` | Fallback for the stored log level, which wins when set. |
-| `ADMIN_PASSWORD` | empty | Minimum 8 characters. Set means the deployment manages it and the in-app change form disappears. |
+| `ADMIN_PASSWORD` | — | **Required.** Minimum 12 characters; the server refuses to start without one. Seeds the stored hash on a first run and is ignored afterwards. |
+| `ADMIN_PASSWORD_MANAGED` | `false` | Set `true` only by a platform that supplies AND displays the password — the Umbrel package does. It removes the in-app change form, so setting it anywhere else strands the operator. |
 | `SESSION_SECRET` | empty | Minimum 16 characters. Empty means one is generated and persisted, which is what an off-Umbrel deployment wants. |
 
 ---

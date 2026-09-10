@@ -38,14 +38,27 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	// is the identity function and "absent from the bytes" is the whole question.
 	const sessionSecret = "session-secret-sentinel-0vk36"
 
-	// No AppPassword and an empty store, which is what makes Auth invent a
-	// password and keep it: generatedPassword is populated on exactly this path
-	// (auth.go bootstrapPassword), and it is the second secret under test.
+	// A supplied password and an UNMANAGED deployment — the plain-Docker case,
+	// and the one that pins umbrel_managed against a hardcoded true below.
+	//
+	// It carried a second secret until `20i.5`: an Auth built with no password
+	// invented one and kept it in generatedPassword, and this test watched that
+	// field too. There is no such field now — the app refuses to start rather
+	// than invent a credential nobody can read — so sessionSecret is the only
+	// secret Auth holds, and it is the whole of what must not reach a log.
+	const adminPassword = "app-password-sentinel-20i5-unmanaged"
 	auth, err := NewAuth(t.Context(), &fakeSettings{}, AuthOptions{
+		AdminPassword: secret.New(adminPassword),
 		SessionSecret: secret.New(sessionSecret),
 	})
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
+	}
+	// The fact under test is decided by NewAuth, so it is worth knowing it was
+	// decided rather than defaulted — the mirror of the managed test below.
+	if auth.passwordManaged {
+		t.Fatal("NewAuth recorded an unmanaged deployment as managed; this test would be " +
+			"asserting over the wrong state")
 	}
 
 	// The fixture must actually carry both secrets, or everything below is a test
@@ -54,12 +67,6 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 		t.Fatalf("the Auth under test does not hold the session secret this test looks for; "+
 			"everything below would pass vacuously (got %q)", got)
 	}
-	generated := auth.generatedPassword.Reveal()
-	if generated == "" {
-		t.Fatal("the Auth under test invented no password, so the generatedPassword half of " +
-			"this test would pass vacuously; NewAuth's bootstrap path has moved")
-	}
-
 	// Distinctive, and deliberately not 0 or 1: a generation left at its zero
 	// value cannot tell a working LogValue from one returning a constant.
 	const generation = 37
@@ -77,8 +84,8 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	record := buf.String()
 
 	assertNoSecretInRecord(t, record, map[string]string{
-		"sessionSecret":     sessionSecret,
-		"generatedPassword": generated,
+		"sessionSecret": sessionSecret,
+		"adminPassword": adminPassword,
 	})
 
 	// THE VALUES, not the key names. Asserting that "umbrel_managed" and
@@ -88,16 +95,21 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	// weakness BrollyZap-0vk.47 fixed one type over, and leaving its neighbour
 	// holding it would have made this file teach the weaker shape.
 	//
-	// This Auth has NO AppPassword and a generation moved off its zero value.
+	// This Auth is UNMANAGED and its generation is moved off its zero value.
 	// That pins session_generation away from any constant, but it pins
 	// umbrel_managed only against a constant TRUE — a LogValue hardcoding FALSE
 	// passes everything here. TestAnUmbrelManagedAuthReportsItself below is the
 	// other half, and the PAIR is what makes the field's input matter; neither
 	// test is sufficient alone.
 	//
+	// SINCE `20i.5` THE PAIR IS SHARPER THAN IT WAS. Both fixtures now supply a
+	// password and differ only in the flag, so a LogValue — or a NewAuth — that
+	// went back to inferring the fact from the password being set would fail
+	// here rather than pass both halves.
+	//
 	// AuthOptions' own test does not cover this. It pins the fact on the options
 	// struct, a different type with a different LogValue — Auth reads its own
-	// umbrelManaged field, set once in NewAuth.
+	// passwordManaged field, set once in NewAuth.
 	for _, want := range []string{
 		`"umbrel_managed":false`,
 		`"session_generation":` + strconv.FormatInt(generation, 10),
@@ -110,41 +122,42 @@ func TestAuthLogValueRedactsBothSecretsAndKeepsTheState(t *testing.T) {
 	}
 }
 
-// The managed half of the pair above: an Auth built WITH an app password says
-// so (BrollyZap-0vk.47).
+// The managed half of the pair above: an Auth built with the deployment's
+// managed flag says so (BrollyZap-0vk.47, and `20i.5` for what decides it).
 //
-// WHY A SECOND FIXTURE AND NOT A SECOND ASSERTION. umbrelManaged is set once,
-// in NewAuth, from whether AuthOptions carried an AppPassword — so the only way
-// to exercise the true direction is to build a second Auth. Without it a
-// LogValue hardcoding `slog.Bool("umbrel_managed", false)` passes the whole
-// package: the neighbouring test asserts exactly false, and no other test looks
-// at the value at all. Verified by planting that constant.
+// WHY A SECOND FIXTURE AND NOT A SECOND ASSERTION. passwordManaged is set once,
+// in NewAuth, from AuthOptions.PasswordManaged — so the only way to exercise the
+// true direction is to build a second Auth. Without it a LogValue hardcoding
+// `slog.Bool("umbrel_managed", false)` passes the whole package: the
+// neighbouring test asserts exactly false, and no other test looks at the value
+// at all. Verified by planting that constant.
 //
-// THE SECRETS DIFFER FROM THE NEIGHBOUR'S, and that is the fixture, not
-// decoration. With an app password supplied NewAuth does not bootstrap one, so
-// there is no generatedPassword here; the credential at risk is the app
-// password itself, and it is the one asserted absent.
+// THE ONLY DIFFERENCE FROM THE NEIGHBOUR IS THE FLAG, and that is the fixture
+// rather than decoration. Both supply the same kind of credential, so a NewAuth
+// that went back to inferring the fact from a password being present — which is
+// what `20i.5` removed — reports true for both and fails the neighbour.
 func TestAnUmbrelManagedAuthReportsItself(t *testing.T) {
 	t.Parallel()
 
 	const (
-		appPassword   = "app-password-sentinel-0vk47-auth"
+		adminPassword = "app-password-sentinel-0vk47-auth"
 		sessionSecret = "session-secret-sentinel-0vk47-auth"
 	)
 
 	auth, err := NewAuth(t.Context(), &fakeSettings{}, AuthOptions{
-		AppPassword:   secret.New(appPassword),
-		SessionSecret: secret.New(sessionSecret),
+		AdminPassword:   secret.New(adminPassword),
+		PasswordManaged: true,
+		SessionSecret:   secret.New(sessionSecret),
 	})
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
 	}
 	// NewAuth is what decides the fact under test, so it is worth knowing it
-	// decided rather than defaulted: a bootstrap path that ignored AppPassword
+	// decided rather than defaulted: a constructor that dropped PasswordManaged
 	// would leave this false and the assertion below would read as a LogValue
 	// bug when it was a constructor one.
-	if !auth.umbrelManaged {
-		t.Fatal("NewAuth did not record an app password as Umbrel-managed; this test would " +
+	if !auth.passwordManaged {
+		t.Fatal("NewAuth did not record the deployment's managed flag; this test would " +
 			"be asserting over the wrong state")
 	}
 
@@ -154,7 +167,7 @@ func TestAnUmbrelManagedAuthReportsItself(t *testing.T) {
 	record := buf.String()
 
 	assertNoSecretInRecord(t, record, map[string]string{
-		"appPassword":   appPassword,
+		"adminPassword": adminPassword,
 		"sessionSecret": sessionSecret,
 	})
 
@@ -212,7 +225,7 @@ func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 	// so JSON encoding is the identity function and "absent from the bytes" is
 	// the whole question rather than half of it.
 	const (
-		appPassword   = "app-password-sentinel-0vk47"
+		adminPassword = "app-password-sentinel-0vk47"
 		sessionSecret = "session-secret-sentinel-0vk47"
 	)
 
@@ -220,33 +233,44 @@ func TestAuthOptionsLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 		name        string
 		options     AuthOptions
 		wantManaged bool
-		// The secrets this case's fixture carries. The not-managed case carries
-		// one, which is that case's point: there is no app password to leak
-		// because there is none at all.
+		// The secrets this case's fixture carries. BOTH CASES CARRY BOTH since
+		// `20i.5`, and that is the whole strength of the pair now: the two
+		// fixtures are identical except for PasswordManaged, so a LogValue that
+		// went back to inferring the fact from AdminPassword being set — which is
+		// what this field used to do, and what denied every plain-Docker
+		// operator a password change — reports `true` for both and fails the
+		// second case.
 		//
 		// NO FIXTURE-CARRIES GUARD beside this, where config.Server and api.Auth
 		// both have one. Theirs read the secret back out of a value some
 		// CONSTRUCTOR produced — LoadServer, NewAuth — which can stop carrying
 		// it. This literal is the fixture, so a read-back would only prove
 		// secret.New and Reveal round-trip, which is the secret package's own
-		// test. What guards this pair against going vacuous is wantManaged:
-		// delete AppPassword from the managed case and that assertion fails.
+		// test. What guards this pair against going vacuous is wantManaged
+		// differing across two otherwise identical fixtures.
 		secrets map[string]string
 	}{
 		{
-			name: "an app password from Umbrel is reported as managed",
+			name: "a platform-managed password is reported as managed",
 			options: AuthOptions{
-				AppPassword:   secret.New(appPassword),
-				SessionSecret: secret.New(sessionSecret),
+				AdminPassword:   secret.New(adminPassword),
+				PasswordManaged: true,
+				SessionSecret:   secret.New(sessionSecret),
 			},
 			wantManaged: true,
-			secrets:     map[string]string{"AppPassword": appPassword, "SessionSecret": sessionSecret},
+			secrets:     map[string]string{"AdminPassword": adminPassword, "SessionSecret": sessionSecret},
 		},
 		{
-			name:        "no app password is reported as not managed",
-			options:     AuthOptions{SessionSecret: secret.New(sessionSecret)},
+			// The SAME password, unmanaged. This is a plain-Docker install whose
+			// operator typed it into .env: nobody else displays that value, so
+			// they may change it.
+			name: "the same password without the flag is reported as not managed",
+			options: AuthOptions{
+				AdminPassword: secret.New(adminPassword),
+				SessionSecret: secret.New(sessionSecret),
+			},
 			wantManaged: false,
-			secrets:     map[string]string{"SessionSecret": sessionSecret},
+			secrets:     map[string]string{"AdminPassword": adminPassword, "SessionSecret": sessionSecret},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

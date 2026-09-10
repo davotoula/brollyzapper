@@ -82,6 +82,89 @@ func TestTheServerServiceHasNoAdminMacaroonMount(t *testing.T) {
 	}
 }
 
+// TestThePackageDeclaresThePasswordManaged holds the one line `20i.5` added,
+// and it is worth a test of its own because losing it is silent in the
+// direction that matters.
+//
+// umbrelOS derives $APP_PASSWORD per install and DISPLAYS it to the user. The
+// app must therefore refuse to change it — otherwise the dashboard shows a
+// password that no longer works, with nothing anywhere saying why. Until
+// `20i.5` the app inferred that from ADMIN_PASSWORD being set, which is equally
+// true of a plain-Docker operator who typed their own password into .env, so
+// the inference denied every off-Umbrel install a password change for ever.
+//
+// The signal is now explicit, and this file is the only place that sets it.
+// DELETE THE LINE AND NOTHING ELSE GOES RED: the app would come up, work, and
+// quietly offer Umbrel operators a change form that fights the platform on the
+// next recreate. That is what this asserts.
+//
+// BESIDE THE PASSWORD, not merely present. The two are one decision — the
+// value and who owns it — and a reader who finds them apart has to go looking
+// for whether the separation meant something.
+func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
+	compose, raw := loadCompose(t)
+	server, ok := compose.Services["server"]
+	if !ok {
+		t.Fatal("no server service in the package compose")
+	}
+	const managed = "ADMIN_PASSWORD_MANAGED"
+	got, ok := server.Environment[managed]
+	if !ok {
+		t.Fatalf("the server service does not set %s. umbrelOS displays the password it "+
+			"derives, so the app must not offer to change it — and since `20i.5` the app "+
+			"learns that from this line and from nowhere else (spec §9)", managed)
+	}
+	if got != "true" {
+		t.Errorf("%s = %q, want \"true\"; internal/config parses it as a bool and anything "+
+			"it cannot parse refuses to start", managed, got)
+	}
+	// The password itself must still be the platform's, or the flag is a claim
+	// about a value the package no longer supplies.
+	if want := "$APP_PASSWORD"; server.Environment["ADMIN_PASSWORD"] != want {
+		t.Errorf("ADMIN_PASSWORD = %q, want %q — the managed flag says the platform owns "+
+			"this password, so the platform has to be the one supplying it",
+			server.Environment["ADMIN_PASSWORD"], want)
+	}
+	// Adjacency, read off the raw file because the parsed map has no order.
+	//
+	// NOTHING BUT COMMENT AND BLANK BETWEEN THEM, rather than "within N lines".
+	// A line budget would have to grow every time the comment above the flag
+	// does, and a number that has to be maintained to keep meaning the same
+	// thing is a number that will be widened until it means nothing.
+	lines := strings.Split(raw, "\n")
+	pwLine, managedLine := lineOf(t, lines, "ADMIN_PASSWORD:"), lineOf(t, lines, managed+":")
+	if managedLine < pwLine {
+		t.Fatalf("%s is at line %d, ABOVE ADMIN_PASSWORD at line %d; the flag describes the "+
+			"password, so it reads after it", managed, managedLine, pwLine)
+	}
+	for i, line := range lines[pwLine : managedLine-1] {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			t.Errorf("line %d, %q, sits between ADMIN_PASSWORD and %s. They are one decision "+
+				"— the value and who owns it — and a reader who finds another setting "+
+				"between them has to work out whether the separation meant something",
+				pwLine+i+1, trimmed, managed)
+		}
+	}
+}
+
+// lineOf is the 1-based line whose SETTING is needle, for the adjacency check
+// above.
+//
+// It matches a trimmed PREFIX rather than a substring, so a comment mentioning
+// the variable — and this file has several — cannot be mistaken for the line
+// that sets it. It fails the test rather than returning a sentinel, so a needle
+// that stopped matching cannot quietly satisfy a comparison.
+func lineOf(t *testing.T, lines []string, needle string) int {
+	t.Helper()
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), needle) {
+			return i + 1
+		}
+	}
+	t.Fatalf("no line sets %q in the package compose", needle)
+	return 0
+}
+
 // Box-verified 2026-08-21: PROXY_TRUST_UPSTREAM=true makes app_proxy forward a
 // client-supplied X-Forwarded-For verbatim, which hands any caller a spoofed
 // source address past the §7 rate limiter. It is undocumented in app-proxy's

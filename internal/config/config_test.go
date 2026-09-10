@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,7 +109,7 @@ func TestLoadGuardAcceptsAFullyPopulatedEnvironment(t *testing.T) {
 // message naming it.
 func TestLoadServerRequiresVariables(t *testing.T) {
 	t.Parallel()
-	for _, v := range []string{"LND_ADDRESS", "CREDENTIALS_DIR", "DATA_DIR"} {
+	for _, v := range []string{"LND_ADDRESS", "CREDENTIALS_DIR", "DATA_DIR", "ADMIN_PASSWORD"} {
 		t.Run(v, func(t *testing.T) {
 			env := validServerEnv()
 			delete(env, v)
@@ -146,6 +147,7 @@ func TestLoadServerRejectsMalformedValues(t *testing.T) {
 		{"TRUSTED_PROXIES", "not-an-address"},
 		{"TRUSTED_PROXIES", "10.21.0.0/16, "}, // trailing empty entry
 		{"ADMIN_PASSWORD", "short"},           // below the minimum length
+		{"ADMIN_PASSWORD_MANAGED", "yes"},     // a bool this cannot parse; NOT read as false
 		{"SESSION_SECRET", "tooshort"},        // below the minimum length
 		{"LOG_LEVEL", "verbose"},
 	}
@@ -214,10 +216,14 @@ func TestGuardRejectsAPerPaymentCapAboveThe24HourLimit(t *testing.T) {
 
 func TestServerDefaults(t *testing.T) {
 	t.Parallel()
+	// Deliberately NOT validServerEnv(): this asserts what is defaulted, so it
+	// must set only what LoadServer refuses to start without. ADMIN_PASSWORD is
+	// one of those since `20i.5`.
 	env := map[string]string{
 		"LND_ADDRESS":     "10.21.21.9:10009",
 		"CREDENTIALS_DIR": "/credentials",
 		"DATA_DIR":        "/data",
+		"ADMIN_PASSWORD":  "a-valid-test-password",
 	}
 	got, err := config.LoadServer(lookup(env))
 	if err != nil {
@@ -232,8 +238,75 @@ func TestServerDefaults(t *testing.T) {
 	if got.LogLevel != slog.LevelInfo {
 		t.Errorf("LogLevel = %v, want info", got.LogLevel)
 	}
-	if !got.AdminPassword.IsZero() || !got.SessionSecret.IsZero() {
-		t.Error("unset secrets should be zero, not defaulted")
+	if !got.SessionSecret.IsZero() {
+		t.Error("an unset SESSION_SECRET should be zero, not defaulted")
+	}
+	// UNMANAGED BY DEFAULT, and this is the direction that matters: a
+	// deployment that says nothing about who owns the password gets an operator
+	// who can change it. The other way round locks them out of their own
+	// credential with no route back (`20i.5`).
+	if got.AdminPasswordManaged {
+		t.Error("AdminPasswordManaged = true with ADMIN_PASSWORD_MANAGED unset; a plain " +
+			"deployment would hide the Settings password field from the operator who chose it")
+	}
+}
+
+// `20i.5`. The app used to invent a password when none was supplied and render
+// it on /setup — a page behind the login it would have opened, so off Umbrel
+// the install had no way in. Refusing at load is what replaced that, and the
+// message is the only thing the operator gets.
+func TestTheServerRefusesToStartWithNoAdminPassword(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	delete(env, "ADMIN_PASSWORD")
+
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	assertNamesVariable(t, err, "ADMIN_PASSWORD")
+	for _, want := range []string{
+		"ADMIN_PASSWORD",
+		strconv.Itoa(config.MinAdminPasswordLen),
+		"Settings",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not mention %q — the operator needs the variable, "+
+				"the minimum, and that they can change it later", err, want)
+		}
+	}
+}
+
+// The managed case fails differently, and saying so is the point: an operator
+// whose platform is supposed to be supplying the password has a different
+// problem from one who forgot to type it in.
+func TestTheServerRefusesAManagedPasswordThatIsAbsent(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	delete(env, "ADMIN_PASSWORD")
+	env["ADMIN_PASSWORD_MANAGED"] = "true"
+
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	assertNamesVariable(t, err, "ADMIN_PASSWORD")
+	for _, want := range []string{"ADMIN_PASSWORD", "ADMIN_PASSWORD_MANAGED"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not name %q; both variables are involved and the "+
+				"operator cannot tell which one is wrong from one of them", err, want)
+		}
+	}
+}
+
+// A password shorter than the minimum is refused ONCE, naming the length —
+// not twice, with a second complaint that it is missing. Two errors about one
+// value is how an operator concludes they have two problems.
+func TestAShortAdminPasswordIsRefusedExactlyOnce(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	env["ADMIN_PASSWORD"] = strings.Repeat("a", config.MinAdminPasswordLen-1)
+
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	if got := strings.Count(err.Error(), "ADMIN_PASSWORD:"); got != 1 {
+		t.Errorf("the refusal names ADMIN_PASSWORD %d times, want 1:\n%v", got, err)
+	}
+	if !strings.Contains(err.Error(), "the minimum is") {
+		t.Errorf("the refusal %q does not say what the minimum is", err)
 	}
 }
 
@@ -536,6 +609,35 @@ func TestServerLogValueRedactsBothSecretsAndKeepsTheFacts(t *testing.T) {
 		if f.got != f.want {
 			t.Errorf("the startup summary reports %s = %q, want %q; these are the parts an "+
 				"operator debugging a start-up problem actually reads", f.key, f.got, f.want)
+		}
+	}
+}
+
+// Both problems are reported when both exist, and neither is swallowed by the
+// other.
+//
+// The combination raised by `20i.5`'s review: an unparseable
+// ADMIN_PASSWORD_MANAGED makes optionalBool fall back to false, so the missing
+// password is then described by the UNMANAGED message even though the
+// deployment was trying to say it is managed. That is the right way round — a
+// flag the loader could not read is not a claim the loader can act on — but it
+// is only harmless because BOTH errors come back. LoadServer's contract is
+// "every problem, not just the first", and this is the case where relying on it
+// changes what the operator reads.
+func TestAnUnparseableManagedFlagAndAMissingPasswordAreBothReported(t *testing.T) {
+	t.Parallel()
+	env := validServerEnv()
+	delete(env, "ADMIN_PASSWORD")
+	env["ADMIN_PASSWORD_MANAGED"] = "yes"
+
+	err := mustFail(t, func() (any, error) { return config.LoadServer(lookup(env)) })
+	for _, want := range []string{
+		`ADMIN_PASSWORD_MANAGED: "yes" is not true or false`,
+		"ADMIN_PASSWORD: is required",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not carry %q, so fixing one problem would reveal the "+
+				"other on the next restart instead of now:\n%v", want, err)
 		}
 	}
 }

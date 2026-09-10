@@ -147,9 +147,11 @@ services:
       # .env.example, commented — or the rate limiter counts every request
       # against one address.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
-      # SET THIS. Empty makes the server invent a password and show it only on
-      # /setup, which is behind the login — off Umbrel that is a locked door.
-      # DEPLOYING.md §Running outside Umbrel step 3 has the whole of it.
+      # SET THIS: the server refuses to start without it, naming the variable
+      # and the 12-character minimum. It used to invent one and render it on
+      # /setup, a page behind the login it would have opened — which off Umbrel
+      # was a locked door with a secret on disk behind it (`20i.5`). Nothing is
+      # invented now. DEPLOYING.md §Running outside Umbrel step 3 has the rest.
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # May be left empty: the server generates one and persists it in DATA_DIR.
       SESSION_SECRET: ${SESSION_SECRET:-}
