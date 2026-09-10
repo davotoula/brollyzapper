@@ -370,18 +370,29 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// write its file — and therefore superseded nothing, the closure having
 	// returned false — says nothing about a grant that is still live.
 	//
-	// TWO ROWS FOR ONE OPERATOR ACTION, which is affordable HERE and would not
-	// be on a polled path: this call is operator-driven, authenticated and paced
-	// by a human deciding to ask again. The arithmetic against the bound is at
-	// auditAuthorisationBound.
+	// TWO ROWS FOR ONE OPERATOR ACTION, and NOT because a human is pacing it.
+	// The first version of this comment said "operator-driven, authenticated and
+	// paced by a human", which is what the HTTP path looks like and is not this
+	// package's threat model: auditAuthorisation's own BOUNDED note, fifteen
+	// lines below, says every one of these is server-drivable at will, because a
+	// compromised server calls this as a socket operation with no session and no
+	// human. So the doubling halves what such a server needs to flush the
+	// ceremony trail — eight calls to four.
 	//
-	// THE PAIR CAN BE SPLIT BY THAT BOUND, and it is worth knowing before
-	// reading a trail: each row draws its own slot, so an eighth slot spent on
-	// this one leaves the `issued` row that caused it in the log only, and §12
-	// then shows a grant ended by a request it has no record of. Carrying the
-	// fact as an attribute of the issued row instead would be one slot and
-	// unsplittable — and would make "how did this grant end" two questions
-	// rather than one. Filed rather than folded in.
+	// IT IS ACCEPTED ON THE BOUND'S OWN TERMS: the rows this evicts are other
+	// ceremony rows and never `guard.reject`, which has its own budget, so the
+	// row an operator most needs after the incident that produced the flood is
+	// not the one at risk. That is the same trade auditReject makes.
+	//
+	// THE PAIR CAN BE SPLIT, two ways, and both are worth knowing before reading
+	// a trail. By the bound: an eighth slot spent here leaves the `issued` row
+	// that caused it in the log only. And by a CRASH between these two calls —
+	// each is its own durable write, so a container recreate in the window
+	// leaves a discard row with no request behind it, where before this change
+	// one audit call after the state write meant a ceremony was recorded whole
+	// or not at all. Carrying the fact as an attribute of the issued row would
+	// be one slot, unsplittable and crash-atomic — and would make "how did this
+	// grant end" two questions rather than one. Filed rather than folded in.
 	if superseded != nil {
 		g.auditDiscardedGrant(ctx, *superseded, "superseded by a new request")
 	}

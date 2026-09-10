@@ -114,6 +114,14 @@ func TestASweepOnAStaleSnapshotLeavesTheCurrentGrantAlone(t *testing.T) {
 // sweepExpired's own expiry check, the first thing RequestAuthorisation does
 // after loading state and well before it takes the lock. Using a clock read this
 // way is a test seam, not a claim about production ordering.
+//
+// IF THIS EVER HANGS INSTEAD OF FAILING, that is the diagnosis: read #1 is now
+// happening under stateStore.mu. The injected update takes that lock, it is a
+// plain non-reentrant sync.Mutex, and the same goroutine would deadlock rather
+// than report anything. sweepExpired already reads the clock inside its own
+// closure, so the ordering this depends on is real but unenforced — a clock read
+// added earlier in RequestAuthorisation, or a lock taken sooner, would move it.
+// The reads counter below catches "never called", not "called too late".
 func TestASupersedeOnAStaleSnapshotClaimsNothing(t *testing.T) {
 	dir := t.TempDir()
 	data := filepath.Join(dir, "guard-data")
