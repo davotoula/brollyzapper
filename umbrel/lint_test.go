@@ -8,8 +8,10 @@
 package umbrel
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -475,8 +477,20 @@ func TestTheProxyPointsAtTheServerServiceByItsInjectedName(t *testing.T) {
 	}
 }
 
-// exports.sh is sourced, not executed, and umbrelOS runs it under set -euo
-// pipefail.
+// exports.sh is SOURCED, not executed, and umbrelOS runs it under set -euo
+// pipefail. The unit is therefore an ASSIGNMENT, and this test parses one.
+//
+// It used to be strings.Contains over the whole file, and exports.sh is a file
+// that explains itself in comments: the comment above the session-secret export
+// contains the word derive_entropy, so deleting the export line left this test
+// GREEN. Confirmed by plant (BrollyZap-20i.12). What would have shipped is not
+// an install with no cookie key — internal/api/auth.go's persistedSessionSecret
+// generates one and writes it to the settings table, so the app comes up and
+// sessions survive a restart. What is lost is §10's "out of the database", with
+// nothing to show for it. That is the shape a lint is the sole control for.
+//
+// The fix is BrollyZap-20i.6's, one directory over: the name comes from the
+// assignment, the requirement from its value, and prose counts for neither.
 func TestExportsIsSourcedNotExecuted(t *testing.T) {
 	path := filepath.Join(packageDir, "exports.sh")
 	raw, err := os.ReadFile(path)
@@ -487,20 +501,267 @@ func TestExportsIsSourcedNotExecuted(t *testing.T) {
 	if strings.HasPrefix(body, "#!") {
 		t.Error("exports.sh has a shebang; it is sourced, not executed")
 	}
-	for _, forbidden := range []string{"\nexit ", "\ncd ", "docker "} {
-		if strings.Contains(body, forbidden) {
-			t.Errorf("exports.sh contains %q; it must not exit, change directory or run docker",
-				strings.TrimSpace(forbidden))
+
+	for _, code := range codeLines(body) {
+		// `exit` and `cd` are matched as WORDS, at the head of every command on
+		// the line rather than only the line's first: the trailing space the old
+		// check required was an artifact of substring-matching a whole file, and
+		// a bare `exit` at the end of a sourced file ends umbrelOS's own shell,
+		// which is the thing being forbidden.
+		for _, head := range commandHeads(code) {
+			switch head {
+			case "exit", "cd":
+				t.Errorf("exports.sh runs %q; it is sourced into umbrelOS's shell under set "+
+					"-euo pipefail, so it must not exit or change directory", code)
+			}
+		}
+		if strings.Contains(code, "docker") {
+			t.Errorf("exports.sh line %q invokes docker; this file prepares the environment and "+
+				"must not touch the daemon", code)
 		}
 	}
-	if !strings.Contains(body, "derive_entropy") {
-		t.Error("exports.sh does not derive the session secret; §10 wants it stable across " +
-			"restarts and out of the database")
+
+	// NO FLOOR ON THE NUMBER OF EXPORTS, and that is deliberate rather than an
+	// oversight — the same call 20i.6 made in deploy/lint_test.go. Both
+	// assertions below fail when the map is empty, once each and by name, so a
+	// pattern that stopped matching is already red. A floor would replace two
+	// accurate errors with one guess about which of the two causes it was.
+	// WHAT WOULD REOPEN IT: an assertion here that only fires when the name is
+	// present — an `if ok &&` shape — since that one WOULD pass on an empty map.
+	exported := exportsIn(body)
+
+	const secret = "APP_BROLLYZAPPER_SESSION_SECRET"
+	if value, ok := exported[secret]; !ok {
+		t.Errorf("exports.sh exports no %s; §10 wants the cookie key derived, stable across "+
+			"restarts and updates, and out of the database. A comment naming derive_entropy is "+
+			"not an export — that is exactly how this check passed with the line deleted", secret)
+	} else if !strings.HasPrefix(strings.TrimPrefix(value, `"`), "$(derive_entropy") {
+		// THE CALL, AT THE HEAD OF THE VALUE, AND ONLY THE DOUBLE QUOTE IS
+		// STRIPPED. Three ways this check has been wrong, each found by a plant:
+		//
+		//   - matching the WORD anywhere: the comment above the export line
+		//     satisfies it, which is the bug this bead was filed on;
+		//   - matching the CALL anywhere in the value: `SESSION_SECRET="" # was
+		//     $(derive_entropy …)` satisfies it, and a trailing comment saying
+		//     what the line used to do is the likeliest way the call is ever
+		//     lost;
+		//   - stripping `'` as well as `"` before the prefix test: inside SINGLE
+		//     quotes `$(…)` is literal text, never a substitution, so
+		//     `SESSION_SECRET='$(derive_entropy "…")'` passed while every
+		//     install got the same hardcoded key. Measured in bash, not
+		//     reasoned: the single-quoted form prints the text.
+		t.Errorf("%s = %s, which does not begin with a double-quoted $(derive_entropy …). "+
+			"Single quotes do not substitute, so '$(derive_entropy …)' is a hardcoded key "+
+			"shared by every install; anything else is either unstable across restarts or "+
+			"stored where §10 says it must not be", secret, value)
 	}
-	if !strings.Contains(body, "APP_BROLLYZAPPER_IP") {
-		t.Error("exports.sh declares no static IP; without one the server's address changes " +
-			"whenever the container is recreated, and the spend macaroon's ipaddr caveat breaks")
+
+	const address = "APP_BROLLYZAPPER_IP"
+	if value, ok := exported[address]; !ok {
+		t.Errorf("exports.sh exports no %s; without one the server's address changes whenever "+
+			"the container is recreated, and the spend macaroon's ipaddr caveat breaks", address)
+	} else if addr, err := netip.ParseAddr(literalValue(value)); err != nil || !addr.Is4() {
+		t.Errorf("%s = %s, which is not a literal IPv4 address; the guard bakes it into an "+
+			"ipaddr caveat that LND compares against the connection's source address, so a "+
+			"variable or a hostname here cannot be checked by anything before the node "+
+			"refuses the credential", address, value)
 	}
+}
+
+// TestTheExportsParserReadsWhatItClaimsTo tests the two helpers above against
+// inputs exports.sh does not currently contain.
+//
+// Every claim codeLines and exportsIn make is otherwise measured once, by hand,
+// against a file that passes — which is the state this whole bead exists to get
+// out of. The CRLF case is the sharpest: it is the entire content of this
+// branch's second commit, and without this table you can revert that fix and
+// nothing goes red.
+func TestTheExportsParserReadsWhatItClaimsTo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want map[string]string
+	}{{
+		name: "a commented export is not an export",
+		raw:  "# export APP_X=1\n#export APP_Y=2\n",
+		want: map[string]string{},
+	}, {
+		name: "an indented export is a real export",
+		raw:  "  export APP_X=1\n\texport APP_Y=2\n",
+		want: map[string]string{"APP_X": "1", "APP_Y": "2"},
+	}, {
+		name: "a CRLF file parses rather than panicking",
+		raw:  "export APP_X=1\r\n\r\n# a comment\r\n",
+		want: map[string]string{"APP_X": "1"},
+	}, {
+		name: "a trailing comment stays in the value, for the caller to strip",
+		raw:  "export APP_X=\"1.2.3.4\" # why this address\n",
+		want: map[string]string{"APP_X": `"1.2.3.4" # why this address`},
+	}, {
+		name: "the last assignment wins, as it does in the shell",
+		raw:  "export APP_X=1\nexport APP_X=2\n",
+		want: map[string]string{"APP_X": "2"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := exportsIn(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("exportsIn(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+			for name, want := range tc.want {
+				if got[name] != want {
+					t.Errorf("exportsIn(%q)[%q] = %q, want %q", tc.raw, name, got[name], want)
+				}
+			}
+		})
+	}
+}
+
+// TestCodeLinesDropsCommentsAndKeepsCode asserts the skip DIRECTLY, and it took
+// a plant to learn that it had to: removing the comment skip from codeLines left
+// the parser table above green, because `^export` rejects a comment line anyway.
+// The skip is load-bearing for the OTHER caller — the forbidden-token scan, where
+// reading a comment as code is what would fail the package over a comment saying
+// why docker is forbidden. Nothing asserted that until this test.
+func TestCodeLinesDropsCommentsAndKeepsCode(t *testing.T) {
+	const raw = "# never run docker here\r\n\r\n" +
+		"export APP_X=1\n" +
+		"   # an indented comment, and it must not exit\n" +
+		"\texport APP_Y=2\n"
+	// The CRLF blank line is the panic path in particular: a lone \r is not
+	// empty to a narrower trim, and strings.Fields of it has no [0] for the
+	// callers above to take. The parser table catches the same revert through a
+	// corrupted VALUE; this catches it where the comment says it happens.
+	want := []string{"export APP_X=1", "export APP_Y=2"}
+	got := codeLines(raw)
+	if !slices.Equal(got, want) {
+		t.Errorf("codeLines(%q) = %q, want %q — a comment read as code fails the package for "+
+			"the words in its own explanation", raw, got, want)
+	}
+}
+
+func TestCommandHeadsFindsEveryCommandOnTheLine(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want []string
+	}{
+		{"export APP_X=1", []string{"export"}},
+		{"cd;rm -rf /", []string{"cd", "rm"}},
+		{"true && exit", []string{"true", "exit"}},
+		{"cat x | grep y", []string{"cat", "grep"}},
+		{";;;", nil},
+		{"exit", []string{"exit"}},
+	} {
+		if got := commandHeads(tc.code); !slices.Equal(got, tc.want) {
+			t.Errorf("commandHeads(%q) = %q, want %q", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestLiteralValueTakesTheAssignedLiteralAndNotTheComment(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{`"10.21.21.14"`, "10.21.21.14"},
+		{`'10.21.21.14'`, "10.21.21.14"},
+		{`10.21.21.14`, "10.21.21.14"},
+		{`"10.21.21.14" # .14 is unallocated`, "10.21.21.14"},
+		{`"${SOME_VAR}"`, "${SOME_VAR}"},
+		{``, ""},
+	} {
+		if got := literalValue(tc.value); got != tc.want {
+			t.Errorf("literalValue(%q) = %q, want %q", tc.value, got, tc.want)
+		}
+	}
+}
+
+// codeLines returns the lines of a sourced shell file that are CODE: comments
+// and blanks dropped, indentation trimmed. Reading comments as code is what made
+// the exports check vacuous, and it is also why a comment explaining WHY docker
+// is forbidden used to fail the package — the same mistake in both directions.
+// So the split happens once, here, and every check works from the result.
+//
+// TrimSpace, not TrimLeft of " \t": a file saved with CRLF leaves a lone \r as
+// the whole line, which the narrower trim keeps — and strings.Fields of that is
+// empty, so a caller taking the first word panics instead of reporting.
+// Measured. A trimmed line that is not empty has at least one field, which is
+// what makes strings.Fields(code)[0] safe above.
+func codeLines(raw string) []string {
+	var out []string
+	for _, line := range strings.Split(raw, "\n") {
+		code := strings.TrimSpace(line)
+		if code == "" || strings.HasPrefix(code, "#") {
+			continue
+		}
+		out = append(out, code)
+	}
+	return out
+}
+
+// commandHeads returns the first word of every command on a shell line: the
+// line split on `;`, `&` and `|`, each segment's head word. Taking only the
+// line's first word — strings.Fields(code)[0] — misses `cd;rm -rf /`, whose
+// first field is "cd;rm" and matches nothing. Found by review, and the same gap
+// was in the substring check this file replaced, which wanted "cd " with a
+// space after it.
+//
+// It is not a shell parser and does not claim to be: a separator inside quotes
+// splits a segment that the shell would not. That direction only ever adds a
+// candidate head, so it can fail this file loudly, never pass it quietly.
+func commandHeads(code string) []string {
+	var out []string
+	for _, segment := range strings.FieldsFunc(code, func(r rune) bool {
+		return r == ';' || r == '&' || r == '|'
+	}) {
+		if fields := strings.Fields(segment); len(fields) > 0 {
+			out = append(out, fields[0])
+		}
+	}
+	return out
+}
+
+// exportsIn maps each exported name to the text after its `=`, last assignment
+// winning as it does in the shell.
+//
+// LEADING WHITESPACE IS ALLOWED AND 20i.6's PATTERN COULD NOT AFFORD IT: there
+// the optional `#` meant \s* let an indented example inside a comment count as
+// an assignment. Here comments are gone before the match and nothing optional
+// precedes `export`, so the space costs nothing — and an indented export is a
+// real export.
+//
+// ONE SPELLING IS ACCEPTED, and the others fail loudly rather than passing
+// quietly. `declare -x NAME=`, a bare `NAME=` followed by `export NAME`, a
+// second assignment on the same line (`export A=1 B=2`, where B is swallowed
+// into A's value), a `\`-continued value and a leading byte-order mark are all
+// working shell, or nearly, and none of them parse here — each one leaves a
+// required name absent, which is the `!ok` branch and a red test naming it. A
+// file that umbrelOS sources on every app start is worth keeping in one
+// reviewable shape, and a lint that fails on an unfamiliar spelling is the
+// cheap way to hold it there. What would reopen this: exports.sh needing a
+// value long enough to wrap.
+func exportsIn(raw string) map[string]string {
+	export := regexp.MustCompile(`^export ([A-Z_][A-Z0-9_]*)=(.*)$`)
+	out := map[string]string{}
+	for _, code := range codeLines(raw) {
+		if m := export.FindStringSubmatch(code); m != nil {
+			out[m[1]] = m[2]
+		}
+	}
+	return out
+}
+
+// literalValue is the first word of an assignment's right-hand side with its
+// quotes stripped. It is what keeps a trailing comment — `export X="10.21.21.14"
+// # why this address` — out of the value, and this file's habit of explaining
+// every line is why that case is worth handling rather than a hypothetical.
+//
+// It does NOT parse shell quoting: a literal containing a space or a `#` comes
+// back truncated. Its one caller asks whether the result is an IPv4 address, and
+// no such literal is one, so the truncation can only turn a failure into the
+// same failure. The session secret's value is spanned by quotes and spaces and
+// is deliberately NOT put through here — it is matched at its head instead.
+func literalValue(value string) string {
+	if fields := strings.Fields(value); len(fields) > 0 {
+		return strings.Trim(fields[0], `"'`)
+	}
+	return ""
 }
 
 // The manifest version is what umbrelOS displays and what it uses for update
