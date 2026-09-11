@@ -8,8 +8,10 @@
 package umbrel
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -475,32 +477,114 @@ func TestTheProxyPointsAtTheServerServiceByItsInjectedName(t *testing.T) {
 	}
 }
 
-// exports.sh is sourced, not executed, and umbrelOS runs it under set -euo
-// pipefail.
+// exports.sh is SOURCED, not executed, and umbrelOS runs it under set -euo
+// pipefail. The unit is therefore an ASSIGNMENT, and this test parses one.
+//
+// It used to be strings.Contains over the whole file, and exports.sh is a file
+// that explains itself in comments: the comment above the session-secret export
+// contains the word derive_entropy, so deleting the export line left this test
+// GREEN and the package would have shipped with the cookie key unset. Confirmed
+// by plant (BrollyZap-20i.12). That is BrollyZap-20i.6's defect in
+// deploy/lint_test.go one directory over, and this is the same fix: the name is
+// read from the assignment, the requirement from its value, and prose counts
+// for neither.
 func TestExportsIsSourcedNotExecuted(t *testing.T) {
 	path := filepath.Join(packageDir, "exports.sh")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	body := string(raw)
-	if strings.HasPrefix(body, "#!") {
+	if strings.HasPrefix(string(raw), "#!") {
 		t.Error("exports.sh has a shebang; it is sourced, not executed")
 	}
-	for _, forbidden := range []string{"\nexit ", "\ncd ", "docker "} {
-		if strings.Contains(body, forbidden) {
-			t.Errorf("exports.sh contains %q; it must not exit, change directory or run docker",
-				strings.TrimSpace(forbidden))
+
+	// LEADING WHITESPACE IS ALLOWED HERE AND WAS NOT IN 20i.6's PATTERN, and the
+	// difference is the optional `#`. There, `^#?\s*NAME=` let an indented
+	// example INSIDE a comment count as an assignment, which is what made the
+	// space dangerous. Here nothing optional precedes `export`, so no comment
+	// line can reach it — and an indented export is a real export.
+	export := regexp.MustCompile(`^export ([A-Z_][A-Z0-9_]*)=(.*)$`)
+	exported := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		code := strings.TrimLeft(line, " \t")
+		if code == "" || strings.HasPrefix(code, "#") {
+			// A COMMENT IS NOT CODE. Reading them as code is what made the
+			// session-secret check vacuous, and it is also why a comment
+			// explaining why docker is forbidden used to fail the package.
+			continue
+		}
+		if m := export.FindStringSubmatch(code); m != nil {
+			exported[m[1]] = m[2]
+		}
+		// `exit` and `cd` are matched as WORDS rather than as "exit " with a
+		// trailing space: the space was an artifact of substring-matching the
+		// whole file, and a bare `exit` at the end of a sourced file ends
+		// umbrelOS's own shell, which is the thing being forbidden.
+		switch strings.Fields(code)[0] {
+		case "exit", "cd":
+			t.Errorf("exports.sh runs %q; it is sourced into umbrelOS's shell under set -euo "+
+				"pipefail, so it must not exit or change directory", code)
+		}
+		if strings.Contains(code, "docker") {
+			t.Errorf("exports.sh line %q invokes docker; this file prepares the environment and "+
+				"must not touch the daemon", code)
 		}
 	}
-	if !strings.Contains(body, "derive_entropy") {
-		t.Error("exports.sh does not derive the session secret; §10 wants it stable across " +
-			"restarts and out of the database")
+
+	// NOT A VACUITY GUARD — the two assertions below already fail on an empty
+	// map, once each, because neither name is in it. This is about the MESSAGE:
+	// "no exports at all" points at the pattern above, where two separate "X is
+	// not exported" errors point at the package. Fatal so only one prints.
+	if len(exported) == 0 {
+		t.Fatalf("parsed no `export NAME=` lines out of %s; suspect this test's pattern before "+
+			"the package", path)
 	}
-	if !strings.Contains(body, "APP_BROLLYZAPPER_IP") {
-		t.Error("exports.sh declares no static IP; without one the server's address changes " +
-			"whenever the container is recreated, and the spend macaroon's ipaddr caveat breaks")
+
+	const secret = "APP_BROLLYZAPPER_SESSION_SECRET"
+	switch value, ok := exported[secret]; {
+	case !ok:
+		t.Errorf("exports.sh exports no %s; §10 wants the cookie key derived, stable across "+
+			"restarts and updates, and out of the database. A comment naming derive_entropy is "+
+			"not an export — that is exactly how this check passed with the line deleted", secret)
+	case !strings.Contains(value, "$(derive_entropy"):
+		// THE CALL, NOT THE WORD. Matching `derive_entropy` alone would let a
+		// trailing comment on the export line satisfy it, which is this bug in
+		// miniature.
+		t.Errorf("%s = %s, which does not call $(derive_entropy …); anything else is either "+
+			"unstable across restarts or stored where §10 says it must not be", secret, value)
 	}
+
+	const address = "APP_BROLLYZAPPER_IP"
+	value, ok := exported[address]
+	if !ok {
+		t.Errorf("exports.sh exports no %s; without one the server's address changes whenever "+
+			"the container is recreated, and the spend macaroon's ipaddr caveat breaks", address)
+	} else if addr, err := netip.ParseAddr(shellLiteral(value)); err != nil || !addr.Is4() {
+		t.Errorf("%s = %s, which is not a literal IPv4 address; the guard bakes it into an "+
+			"ipaddr caveat that LND compares against the connection's source address, so a "+
+			"variable or a hostname here cannot be checked by anything before the node "+
+			"refuses the credential", address, value)
+	}
+}
+
+// shellLiteral takes the literal at the head of an assignment's right-hand side:
+// a double- or single-quoted string, else the first word. It is what keeps a
+// trailing comment — `export X="10.21.21.14" # why this address` — out of the
+// value, and this file's habit of explaining every line is why that case is
+// worth handling rather than a hypothetical. A `#` INSIDE the quotes is content
+// and stays; a shell-accurate parse of one is more machinery than a
+// three-export file can pay for.
+func shellLiteral(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 1 && (value[0] == '"' || value[0] == '\'') {
+		if end := strings.IndexByte(value[1:], value[0]); end >= 0 {
+			return value[1 : 1+end]
+		}
+	}
+	if fields := strings.Fields(value); len(fields) > 0 {
+		return fields[0]
+	}
+	return value
 }
 
 // The manifest version is what umbrelOS displays and what it uses for update
