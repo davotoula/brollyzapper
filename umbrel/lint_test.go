@@ -33,7 +33,28 @@ type composeFile struct {
 		Ports         []string          `yaml:"ports"`
 		Restart       string            `yaml:"restart"`
 		DependsOn     []string          `yaml:"depends_on"`
+		// A yaml.Node because the two services spell this differently — the
+		// server needs the mapping form to carry ipv4_address, the guard names
+		// the network and nothing else — and because a missing block must be a
+		// visible decode failure rather than a zero value that reads as "no
+		// address" and passes.
+		Networks yaml.Node `yaml:"networks"`
 	} `yaml:"services"`
+}
+
+// readPackageFile reads one file out of the App Store package, failing the test
+// rather than returning an error nobody checks. Three tests now read exports.sh
+// and two read the compose; the join with packageDir is the part worth having in
+// one place, since it is what a package-directory move would otherwise have to
+// find in five.
+func readPackageFile(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(packageDir, name)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(raw)
 }
 
 func loadCompose(t *testing.T) (composeFile, string) {
@@ -344,10 +365,58 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 				"depends on it (spec §6)", name, service.Restart)
 		}
 	}
-	if !strings.Contains(raw, "65532") {
-		t.Error("the compose file does not explain the uid mismatch; the next person to touch " +
-			"user: will not know why 1000 matters")
+	// THE EXPLANATION HAS TO SIT ON THE LINE IT EXPLAINS, which a whole-file
+	// scan cannot say. `strings.Contains(raw, "65532")` was satisfied by prose
+	// anywhere in the file — and 65532 is valid hex, so one of the two image
+	// digests this file re-pins every release could satisfy it with no comment
+	// present at all. Worse, a live `user: "65532"` line would satisfy the check
+	// that exists to warn about that value. The adjacency idiom 200 lines up is
+	// what this check meant: the comment block immediately above the server's
+	// user: line names the uid the images default to.
+	lines := strings.Split(raw, "\n")
+	userLine := lineOfAfter(t, lines, "user:", lineOf(t, lines, "server:"))
+	explained := false
+	for _, comment := range commentBlockAbove(lines, userLine) {
+		if strings.Contains(comment, "65532") {
+			explained = true
+		}
 	}
+	if !explained {
+		t.Errorf("the comment above the server's user: at line %d does not name 65532; the "+
+			"next person to touch user: will not know why 1000 matters, and an explanation "+
+			"somewhere else in the file is not one they will find", userLine)
+	}
+}
+
+// lineOfAfter is lineOf, restricted to lines below after. The package sets
+// `user:` twice and the uid is explained above the second; searching from the
+// top of the file finds the guard's and asserts against the wrong line.
+func lineOfAfter(t *testing.T, lines []string, needle string, after int) int {
+	t.Helper()
+	for i := after; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), needle) {
+			return i + 1
+		}
+	}
+	t.Fatalf("no line below %d sets %q in the package compose", after, needle)
+	return 0
+}
+
+// commentBlockAbove is the run of comment lines immediately above the 1-based
+// line n, nearest first. It stops at the first line that is not a comment, so a
+// comment attached to some other setting cannot be read as this one's — which
+// is the whole difference between "the file explains it" and "this line is
+// explained".
+func commentBlockAbove(lines []string, n int) []string {
+	var out []string
+	for i := n - 2; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(trimmed, "#") {
+			break
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 // The framework already defaults app_proxy auth on, and setting it explicitly
@@ -492,12 +561,7 @@ func TestTheProxyPointsAtTheServerServiceByItsInjectedName(t *testing.T) {
 // The fix is BrollyZap-20i.6's, one directory over: the name comes from the
 // assignment, the requirement from its value, and prose counts for neither.
 func TestExportsIsSourcedNotExecuted(t *testing.T) {
-	path := filepath.Join(packageDir, "exports.sh")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-	body := string(raw)
+	body := readPackageFile(t, "exports.sh")
 	if strings.HasPrefix(body, "#!") {
 		t.Error("exports.sh has a shebang; it is sourced, not executed")
 	}
@@ -793,4 +857,154 @@ func TestTheManifestVersionMatchesTheImageTags(t *testing.T) {
 				"mismatch means the box reports a version it is not running", name, version, m.Version)
 		}
 	}
+}
+
+// TestTheStaticAddressIsOneVariableAtBothEnds ties the two halves of the
+// `ipaddr` caveat together, which nothing did: the guard bakes SERVER_IP into
+// both credentials and LND refuses a connection whose source address does not
+// match, so the address the server ANSWERS on and the address the guard LOCKS
+// TO are one fact spelled in two places.
+//
+// Off Umbrel both are literals and deploy/lint_test.go compares them directly.
+// Here both are $APP_BROLLYZAPPER_IP, supplied by exports.sh, so the assertion
+// is the level up: the same VARIABLE at both ends, and a variable exports.sh
+// actually sets to a literal address. Today they agree by hand.
+func TestTheStaticAddressIsOneVariableAtBothEnds(t *testing.T) {
+	compose, _ := loadCompose(t)
+
+	var networks map[string]struct {
+		IPv4 string `yaml:"ipv4_address"`
+	}
+	serverNetworks := compose.Services["server"].Networks
+	if err := serverNetworks.Decode(&networks); err != nil {
+		t.Fatalf("the server's networks are not a mapping with an ipv4_address: %v", err)
+	}
+	var fixed string
+	for _, n := range networks {
+		if n.IPv4 != "" {
+			fixed = n.IPv4
+		}
+	}
+	if fixed == "" {
+		t.Fatal("the server has no ipv4_address: umbrelOS would assign whatever is free, and " +
+			"the ipaddr caveat the guard bakes stops matching the next time it changes")
+	}
+
+	baked := compose.Services["guard"].Environment["SERVER_IP"]
+	answered, bakedName := interpolatedName(fixed), interpolatedName(baked)
+	switch {
+	case answered == "":
+		t.Errorf("the server's ipv4_address is %q, not a variable; the package supplies this "+
+			"address through exports.sh, and a literal here is a second place to change it",
+			fixed)
+	case bakedName == "":
+		t.Errorf("the guard bakes SERVER_IP=%q, not a variable; it must name the same "+
+			"$APP_BROLLYZAPPER_* the server is addressed with", baked)
+	case answered != bakedName:
+		t.Errorf("the server answers on $%s and the guard bakes $%s into both credentials; "+
+			"LND checks the caveat against the connection's source address and would refuse "+
+			"every call", answered, bakedName)
+	default:
+		// AND THE VARIABLE HAS TO BE SET TO AN ADDRESS. Agreeing on the name of
+		// a variable nobody exports is agreeing on the empty string, which
+		// compose interpolates silently.
+		value, ok := exportsIn(readPackageFile(t, "exports.sh"))[answered]
+		if !ok {
+			t.Errorf("both ends name $%s and exports.sh does not export it; compose "+
+				"interpolates an unset variable to empty, so the server would take whatever "+
+				"address it was given", answered)
+		} else if addr, err := netip.ParseAddr(literalValue(value)); err != nil || !addr.Is4() {
+			t.Errorf("$%s = %s, which is not a literal IPv4 address", answered, value)
+		}
+	}
+}
+
+// TestTheExportsAreExactlyWhatTheComposeNeeds derives WHICH names exports.sh
+// must set from the compose that reads them, rather than naming them here.
+//
+// Both directions matter and the second is the one with history. `06v` was
+// filed on package content setting a limit the operator could not reach; the
+// fix was to give the caps compose-level defaults and stop exporting them, and
+// docker-compose.yml records that in prose:
+//
+//	"The APP_BROLLYZAPPER_* variables are still defined nowhere, and that is
+//	 now correct rather than the bug 06v was filed on"
+//
+// Nothing asserted it. One `export APP_BROLLYZAPPER_MAX_SPEND_MSAT=` line in
+// exports.sh regresses `06v` in full — the deployment quietly overriding the
+// guard's default cap from a file no operator reads — with that comment now
+// lying and every test green. Measured on 279678d before this test existed.
+// This is that comment, made checkable.
+func TestTheExportsAreExactlyWhatTheComposeNeeds(t *testing.T) {
+	_, raw := loadCompose(t)
+	exported := exportsIn(readPackageFile(t, "exports.sh"))
+	required, defaulted := interpolatedNames(raw)
+
+	for name := range required {
+		if _, ok := exported[name]; !ok {
+			t.Errorf("the compose interpolates $%s with no default and exports.sh does not "+
+				"export it; compose interpolates an unset variable to empty and says nothing",
+				name)
+		}
+	}
+	for name := range exported {
+		switch {
+		case defaulted[name]:
+			t.Errorf("exports.sh exports %s, which the compose reads as an OPTIONAL override "+
+				"with its own default. That is `06v` exactly: package content setting a value "+
+				"the operator cannot reach, from a file nobody reads. The default belongs in "+
+				"the compose and the variable belongs unset", name)
+		case !required[name]:
+			t.Errorf("exports.sh exports %s and the compose never reads it; an export nobody "+
+				"consumes is either a rename half-done or a setting that lost its consumer",
+				name)
+		}
+	}
+	if len(required) == 0 {
+		t.Error("no undefaulted APP_BROLLYZAPPER_* interpolation found in the compose; this " +
+			"check derives its whole list from that, so an empty one asserts nothing")
+	}
+}
+
+// interpolatedNames splits the APP_BROLLYZAPPER_* variables the compose reads
+// into those it needs supplied and those it only accepts as an override.
+//
+// SCOPED TO APP_BROLLYZAPPER_*, because the rest — APP_DATA_DIR, NETWORK_IP,
+// APP_PASSWORD, the APP_LIGHTNING_NODE_* family — are umbrelOS's own, set by
+// the platform, and requiring exports.sh to supply them would be wrong in the
+// opposite direction.
+//
+// A NAME IS DEFAULTED ONLY IF EVERY OCCURRENCE CARRIES ONE. Mixed spellings are
+// required: `${X:-d}` in one place and `$X` in another means somewhere the file
+// reads it bare, and that place gets the empty string when nothing sets it.
+// `${X:?…}` and `${X?…}` are NOT defaults — they are the opposite, an error
+// when unset — so they count as required. What would reopen this: compose
+// gaining a form that supplies a value some other way.
+func interpolatedNames(raw string) (required, defaulted map[string]bool) {
+	interpolation := regexp.MustCompile(`\$\{?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:?[-?][^}]*)?\}?`)
+	required, defaulted = map[string]bool{}, map[string]bool{}
+	for _, m := range interpolation.FindAllStringSubmatch(raw, -1) {
+		name, suffix := m[1], m[2]
+		if strings.HasPrefix(suffix, ":-") || strings.HasPrefix(suffix, "-") {
+			defaulted[name] = true
+			continue
+		}
+		required[name] = true
+	}
+	for name := range required {
+		delete(defaulted, name)
+	}
+	return required, defaulted
+}
+
+// interpolatedName is the variable a compose value is, or "" if the value is
+// anything else — a literal, or a string with a variable inside it. The whole
+// value or nothing: `ipv4_address: 10.21.21.14` and `ipv4_address: ${X}.14` are
+// both things this package must not do, and both must be caught.
+func interpolatedName(value string) string {
+	m := regexp.MustCompile(`^\$\{?([A-Z_][A-Z0-9_]*)\}?$`).FindStringSubmatch(strings.TrimSpace(value))
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }
