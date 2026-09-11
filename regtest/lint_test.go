@@ -149,45 +149,76 @@ func load(t *testing.T) (compose, string) {
 
 // Criterion 2, and the whole point of the directory: no Umbrel anywhere.
 //
-// IT READS THE NAMES, NOT THE SPELLING, and that is a fix rather than a tidy.
-// The list used to be ${APP_LIGHTNING…, ${APP_DATA_DIR…, ${APP_BITCOIN… with the
-// braces in the token — and the package writes these BARE:
+// IT READS THE NAMES OUT OF THE PARSED DOCUMENT, and it took two goes to get
+// there. The list was first ${APP_LIGHTNING…, ${APP_DATA_DIR…, ${APP_BITCOIN…
+// with the braces IN the token — and the package writes these BARE:
 //
 //	umbrel/brollyzapper/docker-compose.yml:39   LND_ADDRESS: $APP_LIGHTNING_NODE_IP:$APP_LIGHTNING_NODE_GRPC_PORT
 //
 // so copying the single most copy-pasteable line in the package into this file
-// matched none of the five tokens and the §19 lint stayed green. Measured on
-// 279678d. Collecting the interpolated NAMES instead means a spelling cannot
-// dodge it, and `app-data` and `UMBREL_` stay textual because they are not
-// variables at all.
+// matched none of the five tokens and the §19 lint stayed green.
+//
+// Collecting NAMES fixed the spelling, and left the reading. A raw LINE scan
+// cannot see a folded scalar: yaml joins
+//
+//	LND_ADDRESS: "$APP_LIGHT\
+//	  NING_NODE_IP:10009"
+//
+// back into one value, and compose then interpolates the real umbrelOS
+// variable, while a per-line regexp sees `$APP_LIGHT` and `NING_NODE_IP` and
+// matches neither. Measured: the whole regtest suite stayed green with that in
+// the guard's environment. Asking the parser is the only reading that is not a
+// spelling, and it is comment-immune for free, which the hand-rolled `#` skip
+// was doing by hand.
 //
 // `APP_` alone is still not the rule: APP_PORT is this stack's own host-port
 // knob. The umbrelOS families are named.
 func TestComposeNamesNothingUmbrelSpecific(t *testing.T) {
 	_, raw := load(t)
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing %s as a document: %v", composePath, err)
+	}
 	umbrelFamilies := []string{"APP_LIGHTNING", "APP_DATA_DIR", "APP_BITCOIN", "APP_PASSWORD", "APP_BROLLYZAPPER"}
 	interpolation := regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
+	// Not variables, so they are matched as text — in a scalar, which is still
+	// not the raw file: a path in a comment explaining what is absent must not
+	// fail the package.
 	textual := []string{"UMBREL_", "app-data"}
-	for i, line := range strings.Split(raw, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
-			continue // the comments explain what is deliberately absent
-		}
-		for _, m := range interpolation.FindAllStringSubmatch(line, -1) {
+	for _, scalar := range scalarNodes(&doc) {
+		for _, m := range interpolation.FindAllStringSubmatch(scalar.Value, -1) {
 			for _, family := range umbrelFamilies {
 				if strings.HasPrefix(m[1], family) {
 					t.Errorf("%s:%d interpolates $%s — the regtest stack must run on generic "+
 						"settings only (spec §19): %s",
-						composePath, i+1, m[1], strings.TrimSpace(line))
+						composePath, scalar.Line, m[1], scalar.Value)
 				}
 			}
 		}
 		for _, tok := range textual {
-			if strings.Contains(line, tok) {
+			if strings.Contains(scalar.Value, tok) {
 				t.Errorf("%s:%d contains %q — the regtest stack must run on generic "+
-					"settings only (spec §19): %s", composePath, i+1, tok, strings.TrimSpace(line))
+					"settings only (spec §19): %s", composePath, scalar.Line, tok, scalar.Value)
 			}
 		}
 	}
+}
+
+// scalarNodes is every scalar in a YAML document, keys included, carrying its
+// Value and its Line.
+//
+// DELIBERATELY DUPLICATED from umbrel/lint_test.go under the same name: nothing
+// detects drift between the two but the name, so the name is kept identical on
+// purpose. Filed for extraction with the rest of the compose reader.
+func scalarNodes(node *yaml.Node) []*yaml.Node {
+	if node.Kind == yaml.ScalarNode {
+		return []*yaml.Node{node}
+	}
+	var out []*yaml.Node
+	for _, child := range node.Content {
+		out = append(out, scalarNodes(child)...)
+	}
+	return out
 }
 
 // Every environment key the two app services take must be a generic setting.

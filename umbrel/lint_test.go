@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -872,11 +873,26 @@ func TestTheStaticAddressIsOneVariableAtBothEnds(t *testing.T) {
 	if err := serverNetworks.Decode(&networks); err != nil {
 		t.Fatalf("the server's networks are not a mapping with an ipv4_address: %v", err)
 	}
-	var fixed string
+	// EVERY network that carries one, not the last the map happened to yield.
+	// Map order is random, so a server on two addressed networks would have made
+	// this test pick one at random and pass or fail by luck. Two is also a real
+	// answer to a real question — which address does LND see — so it is an
+	// error rather than a tie-break.
+	var addressed []string
 	for _, n := range networks {
 		if n.IPv4 != "" {
-			fixed = n.IPv4
+			addressed = append(addressed, n.IPv4)
 		}
+	}
+	if len(addressed) > 1 {
+		sort.Strings(addressed)
+		t.Fatalf("the server is addressed on %d networks (%s); the guard bakes ONE ipaddr "+
+			"caveat, and LND sees whichever address the route to it came out of",
+			len(addressed), strings.Join(addressed, ", "))
+	}
+	fixed := ""
+	if len(addressed) == 1 {
+		fixed = addressed[0]
 	}
 	if fixed == "" {
 		t.Fatal("the server has no ipv4_address: umbrelOS would assign whatever is free, and " +
@@ -998,10 +1014,10 @@ func interpolationsIn(t *testing.T, raw string) (required, defaulted map[string]
 		t.Fatalf("parsing the package compose as a document: %v", err)
 	}
 	required, defaulted = map[string]bool{}, map[string]bool{}
-	for _, value := range scalarsIn(&doc) {
-		for _, m := range interpolationRE.FindAllStringSubmatch(value, -1) {
-			name, suffix := m[1], m[2]
-			if strings.HasPrefix(suffix, ":-") || strings.HasPrefix(suffix, "-") {
+	for _, scalar := range scalarNodes(&doc) {
+		for _, m := range interpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
+			braced, name, operator := m[1] != "", m[2], m[3]
+			if braced && (operator == ":-" || operator == "-") {
 				defaulted[name] = true
 				continue
 			}
@@ -1014,18 +1030,40 @@ func interpolationsIn(t *testing.T, raw string) (required, defaulted map[string]
 	return required, defaulted
 }
 
-var interpolationRE = regexp.MustCompile(`\$\{?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:?[-?][^}]*)?\}?`)
+// THE DEFAULT'S VALUE IS NOT CONSUMED, which matters for a nested one. An
+// earlier `(:?[-?][^}]*)?` ran to the first `}`, so in
+// `${X:-${APP_BROLLYZAPPER_Y}}` the inner name was eaten as X's default TEXT and
+// scanning resumed past it: Y landed in neither set and the check that demands
+// every undefaulted name be exported never saw it. Matching only the OPERATOR
+// leaves the default's own interpolations to the next match.
+//
+// The brace is captured because it is what makes `-` an operator at all: in
+// `$APP_BROLLYZAPPER_X-suffix` compose interpolates X and leaves the rest, so
+// reading that as "defaulted" would excuse exports.sh from supplying it.
+var interpolationRE = regexp.MustCompile(`\$(\{)?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:?[-?])?`)
 
-// scalarsIn is every scalar value in a YAML document, keys included. Comments
-// are not scalars, which is the whole point of asking the parser rather than
-// the file.
-func scalarsIn(node *yaml.Node) []string {
+// scalarNodes is every scalar in a YAML document, keys included, carrying its
+// Value and its Line. Comments are not scalars, which is the whole point of
+// asking the parser rather than the file — and neither is a line break: yaml
+// folds a `\`-continued double-quoted scalar back into one Value, where a raw
+// line scan sees two halves and matches neither.
+//
+// An alias node carries no Content, only a pointer this does not follow, so a
+// recursive alias terminates rather than recursing forever — and nothing is
+// missed by not following it, since the anchor's own definition is a scalar
+// elsewhere in the same tree.
+//
+// DELIBERATELY DUPLICATED in regtest/lint_test.go under the same name: nothing
+// detects drift between the two but the name, so the name is kept identical on
+// purpose (the discipline internal/arch/arch_test.go states for its own twin).
+// Filed for extraction with the rest of the compose reader.
+func scalarNodes(node *yaml.Node) []*yaml.Node {
 	if node.Kind == yaml.ScalarNode {
-		return []string{node.Value}
+		return []*yaml.Node{node}
 	}
-	var out []string
+	var out []*yaml.Node
 	for _, child := range node.Content {
-		out = append(out, scalarsIn(child)...)
+		out = append(out, scalarNodes(child)...)
 	}
 	return out
 }
@@ -1043,7 +1081,12 @@ func wholeValueVariable(value string) string {
 	if m == nil {
 		return ""
 	}
-	return m[1]
+	return m[1] + m[2] // exactly one alternative matched, so one group is empty
 }
 
-var wholeValueRE = regexp.MustCompile(`^\$\{?([A-Z_][A-Z0-9_]*)\}?$`)
+// BALANCED OR NOT AT ALL. `^\$\{?(…)\}?$` made each brace independently
+// optional, so `${APP_BROLLYZAPPER_IP` and `$APP_BROLLYZAPPER_IP}` both read as
+// "the value is exactly this variable" — and both ends could carry the same
+// malformed spelling and be reported as agreeing, while compose resolves the
+// second to an address with a `}` stuck on it.
+var wholeValueRE = regexp.MustCompile(`^\$([A-Z_][A-Z0-9_]*)$|^\$\{([A-Z_][A-Z0-9_]*)\}$`)
