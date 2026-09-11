@@ -193,8 +193,8 @@ The supported template is [`deploy/`](deploy/), and this section is the procedur
 bitcoind, a test node, a payer, two relays and a setup job — and is not a deployment.
 
 **Steps 1 to 5 are the install**, done once and in order. Steps 6 to 10 are what you will want
-afterwards, and the two headings without a number — the mount hazard and trusted proxies — are
-background, placed where the decision they inform gets made.
+afterwards. The headings without a number are background rather than steps, placed where the
+decision they inform gets made.
 
 ### 1. Before you start
 
@@ -278,6 +278,15 @@ list does:
   the first start does not change the password**, because the stored hash wins once it exists.
   Change it from **Settings** instead, once you are in.
 
+  **INTERIM — remove at the 0.1.21 pin:** the paragraph above describes `0.1.21`, and `deploy/`
+  still pins `0.1.20` images. On those, an empty first start comes up and locks the install out
+  — the password it invents is shown only on a page behind the login — and a password set here
+  cannot be changed from Settings afterwards. The only way back from an empty first start is
+  destructive: stop the stack, set `ADMIN_PASSWORD`, delete `${DATA_DIR}/server` and start
+  again, which discards the database and with it the nostr identity. So set one now.
+  `deploy/.env.example` carries the same note beside `ADMIN_PASSWORD`; both go when the two
+  `image:` lines move.
+
 Two below the line are worth setting now rather than after the first start:
 
 - **`DATA_DIR`** — make it an **absolute** path, outside this checkout. The Sending page prints
@@ -300,7 +309,7 @@ never going ready. Getting the uid right now is cheaper than reading that back l
 # ADMIN_PASSWORD is in it.
 LND_DIR=/home/lnd/.lnd
 LND_NETWORK=mainnet
-DATA_DIR=/srv/brollyzapper/data
+DATA_DIR=/home/YOU/brollyzapper/data     # absolute, and somewhere you own
 
 ls -l "$LND_DIR/tls.cert" "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
 ```
@@ -311,13 +320,48 @@ refuses to start on that and names the path to remove, but not finding out is qu
 
 Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
 `RUN_AS_UID`'s comment in `.env.example` has the other way out, a group both can read through.
-Then create the data directories with that same decision, because it is one decision and not
-two:
+Read both numbers off `admin.macaroon` — the file the guard actually has to open, and the one
+LND writes `0600` — create the directories, and **`chown` only if they do not already have that
+owner**. Same shell as the block above, which set `$LND_DIR`, `$LND_NETWORK` and `$DATA_DIR`:
 
 ```bash
-sudo mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
-sudo chown -R 1000:1000 "$DATA_DIR"          # or the uid the `ls` above showed
+MAC="$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
+read -r RUN_AS_UID RUN_AS_GID <<<"$(stat -c '%u %g' "$MAC")"
+
+mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server || \
+  sudo mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+
+for d in "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server; do
+  [ "$(stat -c '%u %g' "$d")" = "$RUN_AS_UID $RUN_AS_GID" ] ||
+    sudo chown -R "$RUN_AS_UID:$RUN_AS_GID" "$d"
+done
+
+echo "RUN_AS_UID=$RUN_AS_UID"    # put both of these
+echo "RUN_AS_GID=$RUN_AS_GID"    # into .env
 ```
+
+**If those print `0`, stop and pick a different uid.** An LND running as root in Docker owns its
+files `0:0`, and this template deliberately does not run the containers as root — see
+`RUN_AS_UID` in `.env.example` for the other way out, a group both can read through, which is
+the answer whenever the owning uid is one you do not want the app to be.
+
+**The `chown` is conditional because on many hosts it is both unnecessary and impossible.** If
+LND's files belong to the uid you are logged in as — the case on umbrelOS, where they are
+`1000:1000` and so are you — `mkdir` has already produced the right ownership and there is
+nothing to change. And `sudo` may not be reachable at all: where it prompts for a password, a
+non-interactive SSH session cannot answer, so an unconditional `sudo` is a step that **stalls**
+rather than one that fails. Measured on the September 2026 field trip, where the unconditional
+form would have blocked a trip that needed no `chown` at all.
+
+**It tests each of the three directories, and both numbers.** One test on the parent would miss
+the case that actually happens: a first `up` that failed leaves Docker's own root-owned
+directories underneath a `$DATA_DIR` whose ownership is fine. And a gid-only mismatch is exactly
+the state the group route above produces.
+
+`stat -c` is GNU coreutils — this section already assumes a Linux host, which step 1 says.
+
+**If you regenerate `tls.cert` at step 4, check these numbers again**: LND writes the new file
+itself, and nothing guarantees the owner is the one you just read.
 
 ### 4. The two `lnd.conf` edits a host LND needs
 
@@ -486,9 +530,11 @@ Three signs, in the order they arrive:
    template's default is 8080.
 
 3. **You can sign in** at `http://<host>:${HTTP_PORT}/` with the password you set at step 3.
-   If you left `ADMIN_PASSWORD` empty the server will not have started at all, and its log says
-   so in one line naming the variable and the minimum — fix `.env` and `docker compose up -d`
-   again. Nothing has been written yet, so there is nothing to undo.
+   If you left `ADMIN_PASSWORD` empty **on `0.1.21` or later** the server will not have started
+   at all, and its log says so in one line naming the variable and the minimum — fix `.env` and
+   `docker compose up -d` again. Nothing has been written yet, so there is nothing to undo.
+   **On the `0.1.20` images this template still pins it comes up and locks you out instead**,
+   and the way back is destructive: see the interim note at step 3.
 
    Once in, **Settings** offers a password change. It does not on umbrelOS, where the platform
    supplies the password and displays it itself; here it is yours.
@@ -588,6 +634,14 @@ design change to how credentials are scoped rather than a setting to expose.
 
 ### 10. Testing beside an existing Umbrel install
 
+**`lncli` is not on umbrelOS's PATH.** It lives in the Lightning Node app's container, so every
+`lncli` in this section is really `docker exec <the lightning app's container> lncli
+--network=mainnet …`. Shorten it once and the rest of the section reads as written:
+
+```bash
+lncli() { docker exec <the lightning app's container> lncli --network=mainnet "$@"; }
+```
+
 **Record the node's root key ids before you start anything.** The put-back below is a diff
 against this list, and it cannot be taken afterwards:
 
@@ -600,8 +654,13 @@ is the node under test. Choose a fixed address in Umbrel's app network that noth
 allocated —
 
 ```bash
-docker network inspect <umbrel's app network> --format '{{range .Containers}}{{.IPv4Address}} {{end}}'
+docker network inspect <umbrel's app network> \
+  --format '{{range .Containers}}{{.IPv4Address}}{{"\n"}}{{end}}' | sort -t. -k3,3n -k4,4n
 ```
+
+Pick something well above the highest. **The list is running containers only**, so the
+BrollyZapper app you just stopped is not in it and its address will look free — leave a gap
+rather than taking the first number that appears unused.
 
 — and join that network from a local override file, which you write yourself and which is not
 shipped:
@@ -612,7 +671,7 @@ services:
   guard:
     environment:
       SERVER_IP: 10.21.21.90
-      NETWORK_CIDR: 10.21.21.0/24
+      NETWORK_CIDR: 10.21.0.0/16
     networks:
       brolly: {}
       umbrel: {}
@@ -627,26 +686,76 @@ networks:
     name: <umbrel's app network>
 ```
 
+`NETWORK_CIDR` matches umbrelOS's own app network, which is a `/16` — the platform's package
+sets `${NETWORK_IP}/16` for the same reason. **It is not read while `SERVER_IP` is set** —
+`docker-compose.yml`'s comment on it says why — so getting it right buys nothing here beyond
+not contradicting the network you just joined, which is why it is worth thirty seconds and no
+more.
+
 `LND_ADDRESS` stays in `.env` as usual — the base template already feeds it to both services —
 and it names the Lightning app. The certificate still has to name whatever it says, exactly as
 at step 4.
 
 **Both** services join the network, not just the server: the guard is the one that dials the
 node, and the server dials it too. Only the server takes a fixed address there, and `SERVER_IP`
-must equal it, for the reason at §Not supported above — and on a container with two networks
-the address LND sees is the one it routed out of.
+must equal it, for the reason at §Not supported above.
 
-**The put-back matters more than the test.** Stop the stack and delete the directories under
-its `DATA_DIR` — they are bind mounts, so `down -v` alone does not reach them. Then **revoke
-the root keys this guard minted at the node.** The Umbrel app's guard cannot see them, because a
-guard only ever revokes keys it recorded itself, so anything left behind stays live and
-revocable by nobody:
+**This override leaves the server dual-homed.** The container keeps the template's own `brolly`
+network *and* gains Umbrel's, so it has two addresses — and LND sees whichever one the route to
+the node came out of, while the `ipaddr` caveat names only the one in `SERVER_IP`. Set
+`SERVER_IP` to the address on the network the node is reached over, which here is Umbrel's. A
+bake that succeeds followed by every call failing for the address is this, and nothing else
+looks like it.
+
+#### Putting it back
+
+In this order, and the first two are the ones that are irreversible if you get them wrong.
+
+**1. Point any repointed hostname back, and confirm it answers.** A Cloudflare tunnel moved from
+the app's port to this stack's has to go back *before* the teardown: the moment
+`docker compose down` runs, the public address answers 502 from a connector pointing at nothing.
+
+> **Never leave a public lightning address pointing at a stack you are about to destroy.** While
+> it does, anything received lands on disposable infrastructure — step 3 below deletes the
+> database and with it the receipt-signing key — and clients that fetched the pay document may
+> have cached that instance's `nostrPubkey`, so receipts signed by the real install afterwards no
+> longer match what they were told to expect. The September 2026 field trip opened exactly this
+> window; nothing arrived in it, which is luck rather than design.
+
+**2. Read the root key ids while the guard's own record still exists.** Step 3 deletes it, and
+it is the only list that names *this* guard's keys rather than every key the node holds:
+
+```bash
+DATA_DIR=<the same absolute path you put in .env>    # this is a fresh shell
+grep -oE '"(receive|spend)_root_key_id":[0-9]+|"pending_root_key_ids":\[[^]]*\]' \
+  "$DATA_DIR/guard/guard-state.json"
+```
+
+`grep` rather than `cat`: the same file holds any outstanding sending authorisation **and its
+one-time code**, and there is no reason to put that in your scrollback.
+
+**3. Stop the stack and delete its data.** The directories are bind mounts, so `down -v` alone
+does not reach them — and `$DATA_DIR` must be set, from the line above, or the `rm` below is
+pointed at the filesystem root:
+
+```bash
+: "${DATA_DIR:?set DATA_DIR before running this}"
+docker compose down
+rm -rf "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+```
+
+**4. Revoke the root keys this guard minted at the node.** The Umbrel app's guard cannot see
+them — a guard only ever revokes keys it recorded itself — so anything left behind stays live
+and revocable by nobody:
 
 ```bash
 diff ~/macaroonids.before <(lncli listmacaroonids)
 lncli deletemacaroonid <id>    # every id that appeared in between
 ```
 
-The ids are also in `${DATA_DIR}/guard/guard-state.json`, as `receive_root_key_id`,
-`spend_root_key_id` and `pending_root_key_ids` — the more reliable of the two, since it is what
-the guard itself recorded. Then start the BrollyZapper app again.
+Use step 2's ids where you have them — they name *this* guard's keys and nothing else. The
+`diff` is the fallback if you skipped step 2: it still works after the teardown, because it asks
+the node rather than the deleted file, but it also lists anything else that baked in the window,
+so read it rather than piping it.
+
+**5. Start the BrollyZapper app again.**

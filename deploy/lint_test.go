@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -552,15 +553,54 @@ func TestBothServicesRunAsTheUidThatOwnsTheData(t *testing.T) {
 	}
 }
 
-// TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
-// complete: a variable the compose file reads and the example never mentions is
-// one the operator cannot know to set, and it interpolates to empty.
-func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
-	_, raw := loadCompose(t)
-	example, err := os.ReadFile(envPath)
+// assignedInExample is every variable .env.example ASSIGNS, commented or not.
+//
+// AN ASSIGNMENT, NOT A MENTION, and that distinction is the whole of `20i.6`.
+// The first version of this check was strings.Contains over the whole file with
+// comments included — and .env.example documents every variable by name in its
+// own prose, so the check passed on the paragraph and never looked at the line.
+// Measured twice: renaming the ASSIGNMENT `ADMIN_PASSWORD=` to `ADMIN_PASWORD=`
+// left the example setting nothing and the test green. It certified nothing for
+// any variable the file mentions, which is all of them.
+//
+// A LEADING `#` COUNTS, deliberately. `#HTTP_PORT=8080` is how this file shows
+// an optional setting at its real default: the operator can see the name, the
+// shape and the value, and uncommenting it is the whole edit. That is being
+// SHOWN the setting, which is what this check is about — the failure it exists
+// to catch is a variable the operator never sees at all.
+//
+// COLUMN ONE AND NO SPACE AFTER THE `#`, which is tighter than it first looks
+// necessary — and the brief's `^#?\s*` was measured letting prose back in. This
+// file explains the caps with an indented example:
+//
+//	#     GUARD_MAX_PAYMENT_MSAT=1000000
+//
+// which `\s*` reads as an assignment, so deleting the real `#GUARD_MAX_PAYMENT_MSAT=`
+// line left the check green — the same failure this rule exists to fix, one
+// comment later. The file's own convention for a commented setting is
+// `#NAME=value` with nothing between, so that is what counts.
+func assignedInExample(t *testing.T) map[string]bool {
+	t.Helper()
+	raw, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatalf("reading %s: %v", envPath, err)
 	}
+	assignment := regexp.MustCompile(`^#?([A-Z_][A-Z0-9_]*)=`)
+	out := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if m := assignment.FindStringSubmatch(line); m != nil {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
+// complete: a variable the compose file reads and the example never SETS is one
+// the operator cannot know to set, and it interpolates to empty.
+func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
+	_, raw := loadCompose(t)
+	assigned := assignedInExample(t)
 	// ${NAME} and ${NAME:-default} alike; the default half is this file's own
 	// business and not the operator's.
 	interpolated := regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)`).FindAllStringSubmatch(raw, -1)
@@ -571,11 +611,19 @@ func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 			continue
 		}
 		seen[name] = true
-		if !strings.Contains(string(example), name) {
-			t.Errorf("%s interpolates ${%s} and %s never mentions it; the operator cannot "+
-				"set what they are not shown, and it interpolates to empty", composePath, name, envPath)
+		if !assigned[name] {
+			t.Errorf("%s interpolates ${%s} and %s has no assignment line for it — a mention "+
+				"in a comment is not one. The operator cannot set what they are not shown, "+
+				"and it interpolates to empty. A commented `#%s=<default>` counts.",
+				composePath, name, envPath, name)
 		}
 	}
+	// THE INTERPOLATION SIDE IS THE ONLY VACUITY RISK LEFT, and that is the gain
+	// over the old shape rather than an accident. A substring match always found
+	// something, so a broken half passed silently; an assignment parser that
+	// stopped matching makes the loop above fail once per variable instead. A
+	// floor on the assignments would be dead code — reaching this line with
+	// len(seen) >= 4 means four names were found in the map.
 	if len(seen) < 4 {
 		t.Errorf("found %d interpolated variables in %s; the template takes at least the four "+
 			"an operator must fill, so this check is reading the wrong thing", len(seen), composePath)
@@ -609,4 +657,116 @@ func TestComposeValidatesTheTemplate(t *testing.T) {
 	if err != nil {
 		t.Errorf("`docker compose config` rejected the template with the example env:\n%s", out)
 	}
+}
+
+// interimRE is the marker a note carries when it describes behaviour that will
+// stop being true at a named version pin.
+//
+// THE TRIGGER IS DATA, not a convention someone remembers: the marker names the
+// version, so the check below can compare it against what the template actually
+// pins. `20i.8` and `20i.9` added two such notes about the 0.1.20 images, and
+// two comments plus "remember at release" is the depth this repository has
+// already been burned by — umbrel/lint_test.go's manifest check exists because
+// "the 0.1.1 release shipped with the manifest still saying 0.1.0, caught by a
+// human reading the file rather than by anything mechanical".
+var interimRE = regexp.MustCompile(`INTERIM — remove at the ([0-9]+\.[0-9]+\.[0-9]+) pin`)
+
+// interimFiles are the three an INTERIM note may live in. DEPLOYING.md is
+// outside this directory and named by path for that reason.
+var interimFiles = []string{envPath, composePath, "../DEPLOYING.md"}
+
+// TestAnInterimNoteIsRemovedByThePinItNames fails the moment the template pins a
+// version at or past the one an INTERIM note said it would go at.
+//
+// ZERO MARKERS IS THE CORRECT STEADY STATE, so there is no floor on how many are
+// found — a floor would go red every time the notes are correctly removed. What
+// IS guarded is the marker's spelling: any line carrying the bare word INTERIM in
+// these files must match the full pattern, because an ASCII hyphen where the em
+// dash belongs would disarm this check silently and leave the note in the
+// release it was meant to be removed from.
+func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
+	compose, _ := loadCompose(t)
+	// BOTH IMAGES, AND THE NEWER OF THE TWO. The notes say they go "when the two
+	// `image:` lines move", and nothing in this file asserts the two tags equal
+	// each other — TestTheImagesEqualThePackages compares each service to the
+	// package, not the two to one another. So a half-done bump has to fire:
+	// taking the OLDER would stay green while the server already shipped the
+	// behaviour the note says is not there yet, which is the failure this check
+	// exists for. Firing one commit early costs a deletion; firing late ships
+	// the note.
+	pinned := imageTag(t, compose.Services["server"].Image)
+	if guardTag := imageTag(t, compose.Services["guard"].Image); olderThan(pinned, guardTag) {
+		pinned = guardTag
+	}
+
+	for _, path := range interimFiles {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			if !strings.Contains(line, "INTERIM") {
+				continue
+			}
+			m := interimRE.FindStringSubmatch(line)
+			if m == nil {
+				t.Errorf("%s:%d says INTERIM but does not carry the marker this check reads "+
+					"(`INTERIM — remove at the <version> pin`, with an em dash): %q. A note "+
+					"whose marker does not parse is a note nothing will remind anyone to "+
+					"remove.", path, i+1, strings.TrimSpace(line))
+				continue
+			}
+			if !olderThan(pinned, m[1]) {
+				t.Errorf("%s:%d is an interim note for the %s pin, and %s now pins %s. The "+
+					"note describes behaviour that is no longer current; remove it in the "+
+					"same commit that moved the image lines.", path, i+1, m[1], composePath, pinned)
+			}
+		}
+	}
+}
+
+// imageTag is the tag out of a pinned reference, without the digest.
+func imageTag(t *testing.T, image string) string {
+	t.Helper()
+	if !imageRE.MatchString(image) {
+		t.Fatalf("the server image %q is not a digest-pinned reference, so no version can be "+
+			"read out of it and the interim check above would compare against nothing", image)
+	}
+	_, rest, _ := strings.Cut(image, ":")
+	tag, _, _ := strings.Cut(rest, "@")
+	return tag
+}
+
+// olderThan reports whether the pinned version is strictly below want.
+//
+// FIELD BY FIELD, not string comparison, because "0.1.9" sorts above "0.1.21"
+// as text and this check would then never fire on the release it exists for.
+//
+// A MISSING FIELD IS ZERO, not "older". `1.0` against a note naming `0.1.21`
+// has to read as NEWER, or a major bump disarms every interim note silently —
+// which is the failure this function exists to prevent, one release later.
+//
+// AN UNPARSEABLE FIELD READS AS NEWER TOO, so the caller fires. imageRE admits
+// a `-` in a tag, so `0.1.21-rc1` is reachable by construction, and the safe
+// reading of "I cannot tell whether this release has happened" is to make
+// somebody look. Saying nothing would leave the note in the release.
+func olderThan(pinned, want string) bool {
+	p, w := strings.Split(pinned, "."), strings.Split(want, ".")
+	for i := range w {
+		a, b := 0, 0
+		if i < len(p) {
+			var err error
+			if a, err = strconv.Atoi(p[i]); err != nil {
+				return false
+			}
+		}
+		var err error
+		if b, err = strconv.Atoi(w[i]); err != nil {
+			return false
+		}
+		if a != b {
+			return a < b
+		}
+	}
+	return false
 }
