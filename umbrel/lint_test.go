@@ -506,7 +506,11 @@ func TestExportsIsSourcedNotExecuted(t *testing.T) {
 	export := regexp.MustCompile(`^export ([A-Z_][A-Z0-9_]*)=(.*)$`)
 	exported := map[string]string{}
 	for _, line := range strings.Split(string(raw), "\n") {
-		code := strings.TrimLeft(line, " \t")
+		// TrimSpace, not TrimLeft of " \t": a file saved with CRLF leaves a lone
+		// \r as the whole line, which is whitespace the narrower trim keeps and
+		// strings.Fields then returns nothing for — an index panic instead of a
+		// verdict. Measured.
+		code := strings.TrimSpace(line)
 		if code == "" || strings.HasPrefix(code, "#") {
 			// A COMMENT IS NOT CODE. Reading them as code is what made the
 			// session-secret check vacuous, and it is also why a comment
