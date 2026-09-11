@@ -16,6 +16,7 @@ package regtest
 
 import (
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -27,7 +28,8 @@ import (
 
 const composePath = "docker-compose.yml"
 
-// genericSettings asks internal/config what it reads, rather than restating it.
+// genericSettings asks internal/config what it reads, per loader, rather than
+// restating it.
 //
 // This was a hand-kept list of seventeen names — the settings contract's FOURTH
 // statement, as 20i.1's report named it, after the config package, the deploy
@@ -38,32 +40,58 @@ const composePath = "docker-compose.yml"
 // have called a generic setting a deployment leak. Measured 11 Sep 2026:
 // eighteen names asked for, seventeen listed.
 //
+// PER LOADER, NOT THE UNION, and the first cut of this got that wrong. A union
+// waves through the server setting GUARD_MAX_SPEND_MSAT — a plausible
+// copy-paste from the guard block ten lines above it — which config.LoadServer
+// never reads, so the cap silently is not set while the operator believes it
+// is. deploy/lint_test.go keeps them apart for the same reason.
+//
 // THE BEHAVIOUR, NOT THE ARTIFACT, and the same shape deploy/lint_test.go uses
 // (configContract, whose own comment names this list as the thing it could
-// replace): both loaders run against a Lookup that records every name and
+// replace): each loader runs against a Lookup that records every name and
 // supplies nothing. They accumulate rather than stopping at the first missing
 // variable, so one pass sees the whole contract. It cannot go vacuous — the
 // names come from the loaders actually running, and a floor below says so.
-func genericSettings(t *testing.T) map[string]bool {
+func genericSettings(t *testing.T) map[string]map[string]bool {
 	t.Helper()
-	out := map[string]bool{}
-	record := func(name string) (string, bool) {
-		out[name] = true
-		return "", false
-	}
-	if _, err := config.LoadServer(record); err == nil {
-		t.Fatal("LoadServer accepted an entirely empty environment; this derivation reads the " +
-			"contract out of a loader that insists on something, and this one insisted on nothing")
-	}
-	if _, err := config.LoadGuard(record); err == nil {
-		t.Fatal("LoadGuard accepted an entirely empty environment; see above")
-	}
-	if len(out) < 10 {
-		t.Fatalf("the loaders asked for %d settings; the app takes more than that, so this "+
-			"derivation is reading the wrong thing", len(out))
+	out := map[string]map[string]bool{}
+	for _, loader := range []struct {
+		service string
+		load    func(config.Lookup) error
+	}{
+		{"brollyzapper", func(l config.Lookup) error { _, err := config.LoadServer(l); return err }},
+		{"guard", func(l config.Lookup) error { _, err := config.LoadGuard(l); return err }},
+	} {
+		asked := map[string]bool{}
+		record := func(name string) (string, bool) {
+			asked[name] = true
+			return "", false
+		}
+		if err := loader.load(record); err == nil {
+			t.Fatalf("the %s loader accepted an entirely empty environment; this derivation "+
+				"reads the contract out of a loader that insists on something, and this one "+
+				"insisted on nothing", loader.service)
+		}
+		if len(asked) < 8 {
+			t.Fatalf("the %s loader asked for %d settings; it takes more than that, so this "+
+				"derivation is reading the wrong thing", loader.service, len(asked))
+		}
+		delete(asked, passwordManagedVar)
+		out[loader.service] = asked
 	}
 	return out
 }
+
+// passwordManagedVar is read by internal/config, so the derivation above hands
+// it over as generic — and it is never right HERE. It says the PLATFORM supplies
+// the admin password and displays it, which is true of umbrelOS and false of
+// this stack, where the compose sets ADMIN_PASSWORD itself. Set here it would
+// hide the Settings password field and leave the operator unable to change a
+// password nothing is showing them (`20i.5`). deploy/lint_test.go refuses it in
+// the plain-Docker template by name for the same reason; the package compose's
+// own comment says "only this file sets it", and this is the half of that claim
+// that lives here.
+const passwordManagedVar = "ADMIN_PASSWORD_MANAGED"
 
 // The app's own two services. The rest of the stack is infrastructure and may
 // legitimately mention anything.
@@ -99,8 +127,7 @@ func networksOf(t *testing.T, c compose, service string) map[string]networkSetti
 		t.Fatalf("there is no %q service", service)
 	}
 	var out map[string]networkSettings
-	node := s.Networks
-	if err := node.Decode(&out); err != nil {
+	if err := s.Networks.Decode(&out); err != nil {
 		t.Fatalf("service %q does not give its networks in the mapping form, so it can carry "+
 			"neither an address nor an alias: %v", service, err)
 	}
@@ -121,17 +148,40 @@ func load(t *testing.T) (compose, string) {
 }
 
 // Criterion 2, and the whole point of the directory: no Umbrel anywhere.
+//
+// IT READS THE NAMES, NOT THE SPELLING, and that is a fix rather than a tidy.
+// The list used to be ${APP_LIGHTNING…, ${APP_DATA_DIR…, ${APP_BITCOIN… with the
+// braces in the token — and the package writes these BARE:
+//
+//	umbrel/brollyzapper/docker-compose.yml:39   LND_ADDRESS: $APP_LIGHTNING_NODE_IP:$APP_LIGHTNING_NODE_GRPC_PORT
+//
+// so copying the single most copy-pasteable line in the package into this file
+// matched none of the five tokens and the §19 lint stayed green. Measured on
+// 279678d. Collecting the interpolated NAMES instead means a spelling cannot
+// dodge it, and `app-data` and `UMBREL_` stay textual because they are not
+// variables at all.
+//
+// `APP_` alone is still not the rule: APP_PORT is this stack's own host-port
+// knob. The umbrelOS families are named.
 func TestComposeNamesNothingUmbrelSpecific(t *testing.T) {
 	_, raw := load(t)
-	// "APP_" would match APP_PORT, which is this stack's own host-port knob and
-	// not an Umbrel variable, so the forbidden token is the Umbrel spelling:
-	// ${APP_<something>} as umbrelOS injects it.
-	forbidden := []string{"UMBREL_", "${APP_LIGHTNING", "${APP_DATA_DIR", "${APP_BITCOIN", "app-data"}
+	umbrelFamilies := []string{"APP_LIGHTNING", "APP_DATA_DIR", "APP_BITCOIN", "APP_PASSWORD", "APP_BROLLYZAPPER"}
+	interpolation := regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
+	textual := []string{"UMBREL_", "app-data"}
 	for i, line := range strings.Split(raw, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "#") {
 			continue // the comments explain what is deliberately absent
 		}
-		for _, tok := range forbidden {
+		for _, m := range interpolation.FindAllStringSubmatch(line, -1) {
+			for _, family := range umbrelFamilies {
+				if strings.HasPrefix(m[1], family) {
+					t.Errorf("%s:%d interpolates $%s — the regtest stack must run on generic "+
+						"settings only (spec §19): %s",
+						composePath, i+1, m[1], strings.TrimSpace(line))
+				}
+			}
+		}
+		for _, tok := range textual {
 			if strings.Contains(line, tok) {
 				t.Errorf("%s:%d contains %q — the regtest stack must run on generic "+
 					"settings only (spec §19): %s", composePath, i+1, tok, strings.TrimSpace(line))
@@ -163,9 +213,10 @@ func TestAppServicesTakeOnlyGenericSettings(t *testing.T) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			if !generic[k] {
+			if !generic[name][k] {
 				t.Errorf("service %q sets %q, which is not one of the generic settings "+
-					"§19 promises the app runs on", name, k)
+					"§19 promises the app runs on — this service's loader never reads it",
+					name, k)
 			}
 		}
 	}
@@ -267,9 +318,7 @@ func TestServerIPMatchesTheStaticAddress(t *testing.T) {
 	// strings.Contains(raw, "ipv4_address: "+serverIP) over the whole file, so
 	// pinning the address on `lnd` instead of on the app satisfied it — measured
 	// on 279678d — and so would a comment quoting the address with the real line
-	// deleted. The guard bakes `ipaddr <SERVER_IP>` into the receive macaroon
-	// and LND checks the address it OBSERVES (verified against real LND in
-	// 0vk.12), so the address has to be on the container that dials.
+	// deleted. The address has to be on the container that dials.
 	pinned := ""
 	for _, settings := range networksOf(t, c, "brollyzapper") {
 		if settings.IPv4 != "" {

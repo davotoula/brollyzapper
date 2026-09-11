@@ -43,10 +43,15 @@ type composeFile struct {
 }
 
 // readPackageFile reads one file out of the App Store package, failing the test
-// rather than returning an error nobody checks. Three tests now read exports.sh
-// and two read the compose; the join with packageDir is the part worth having in
-// one place, since it is what a package-directory move would otherwise have to
-// find in five.
+// rather than returning an error nobody checks. The join with packageDir is the
+// part worth having in one place: a package-directory move has one site now,
+// where before this it had three and the first version of this comment claimed
+// one while leaving two behind.
+func exports(t *testing.T) map[string]string {
+	t.Helper()
+	return exportsIn(readPackageFile(t, "exports.sh"))
+}
+
 func readPackageFile(t *testing.T, name string) string {
 	t.Helper()
 	path := filepath.Join(packageDir, name)
@@ -59,19 +64,17 @@ func readPackageFile(t *testing.T, name string) string {
 
 func loadCompose(t *testing.T) (composeFile, string) {
 	t.Helper()
-	path := filepath.Join(packageDir, "docker-compose.yml")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
+	const name = "docker-compose.yml"
+	raw := readPackageFile(t, name)
+	path := filepath.Join(packageDir, name)
 	var compose composeFile
-	if err := yaml.Unmarshal(raw, &compose); err != nil {
+	if err := yaml.Unmarshal([]byte(raw), &compose); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
 	if len(compose.Services) == 0 {
 		t.Fatalf("%s declares no services; the lint is not actually running", path)
 	}
-	return compose, string(raw)
+	return compose, raw
 }
 
 // THE assertion. §16: adding an admin.macaroon mount to the server service is
@@ -179,13 +182,7 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 // that stopped matching cannot quietly satisfy a comparison.
 func lineOf(t *testing.T, lines []string, needle string) int {
 	t.Helper()
-	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), needle) {
-			return i + 1
-		}
-	}
-	t.Fatalf("no line sets %q in the package compose", needle)
-	return 0
+	return lineOfAfter(t, lines, needle, 0)
 }
 
 // Box-verified 2026-08-21: PROXY_TRUST_UPSTREAM=true makes app_proxy forward a
@@ -366,7 +363,11 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 		}
 	}
 	// THE EXPLANATION HAS TO SIT ON THE LINE IT EXPLAINS, which a whole-file
-	// scan cannot say. `strings.Contains(raw, "65532")` was satisfied by prose
+	// scan cannot say. ON THE SERVER'S LINE, which is where it sits: the guard's
+	// user: at the top of the file carries no comment at all, so applying this
+	// to both would be red on the package as it stands, and the brief forbids
+	// editing the package. Filed rather than widened — the general rule is what
+	// this says, and the file satisfies it once. `strings.Contains(raw, "65532")` was satisfied by prose
 	// anywhere in the file — and 65532 is valid hex, so one of the two image
 	// digests this file re-pins every release could satisfy it with no comment
 	// present at all. Worse, a live `user: "65532"` line would satisfy the check
@@ -375,22 +376,20 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 	// user: line names the uid the images default to.
 	lines := strings.Split(raw, "\n")
 	userLine := lineOfAfter(t, lines, "user:", lineOf(t, lines, "server:"))
-	explained := false
-	for _, comment := range commentBlockAbove(lines, userLine) {
-		if strings.Contains(comment, "65532") {
-			explained = true
-		}
-	}
-	if !explained {
+	if !strings.Contains(commentBlockAbove(lines, userLine), "65532") {
 		t.Errorf("the comment above the server's user: at line %d does not name 65532; the "+
 			"next person to touch user: will not know why 1000 matters, and an explanation "+
 			"somewhere else in the file is not one they will find", userLine)
 	}
 }
 
-// lineOfAfter is lineOf, restricted to lines below after. The package sets
-// `user:` twice and the uid is explained above the second; searching from the
-// top of the file finds the guard's and asserts against the wrong line.
+// lineOfAfter is lineOf from a given 1-based line rather than from the top, and
+// lineOf is the after=0 case of it — one loop, because the three things that
+// make it safe (1-based, a trimmed PREFIX rather than a substring, and Fatalf
+// rather than a sentinel) have to stay true of both.
+//
+// The package sets `user:` twice and the uid is explained above the second;
+// searching from the top finds the guard's and asserts against the wrong line.
 func lineOfAfter(t *testing.T, lines []string, needle string, after int) int {
 	t.Helper()
 	for i := after; i < len(lines); i++ {
@@ -403,20 +402,16 @@ func lineOfAfter(t *testing.T, lines []string, needle string, after int) int {
 }
 
 // commentBlockAbove is the run of comment lines immediately above the 1-based
-// line n, nearest first. It stops at the first line that is not a comment, so a
+// line n, in file order. It stops at the first line that is not a comment, so a
 // comment attached to some other setting cannot be read as this one's — which
 // is the whole difference between "the file explains it" and "this line is
 // explained".
-func commentBlockAbove(lines []string, n int) []string {
-	var out []string
-	for i := n - 2; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(trimmed, "#") {
-			break
-		}
-		out = append(out, trimmed)
+func commentBlockAbove(lines []string, n int) string {
+	first := n - 1
+	for first > 0 && strings.HasPrefix(strings.TrimSpace(lines[first-1]), "#") {
+		first--
 	}
-	return out
+	return strings.Join(lines[first:n-1], "\n")
 }
 
 // The framework already defaults app_proxy auth on, and setting it explicitly
@@ -452,13 +447,11 @@ type manifest struct {
 
 func loadManifest(t *testing.T) manifest {
 	t.Helper()
-	path := filepath.Join(packageDir, "umbrel-app.yml")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
+	const name = "umbrel-app.yml"
+	raw := readPackageFile(t, name)
+	path := filepath.Join(packageDir, name)
 	var m manifest
-	if err := yaml.Unmarshal(raw, &m); err != nil {
+	if err := yaml.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
 	return m
@@ -891,31 +884,32 @@ func TestTheStaticAddressIsOneVariableAtBothEnds(t *testing.T) {
 	}
 
 	baked := compose.Services["guard"].Environment["SERVER_IP"]
-	answered, bakedName := interpolatedName(fixed), interpolatedName(baked)
-	switch {
-	case answered == "":
-		t.Errorf("the server's ipv4_address is %q, not a variable; the package supplies this "+
+	answered, bakedName := wholeValueVariable(fixed), wholeValueVariable(baked)
+	if answered == "" {
+		t.Fatalf("the server's ipv4_address is %q, not a variable; the package supplies this "+
 			"address through exports.sh, and a literal here is a second place to change it",
 			fixed)
-	case bakedName == "":
-		t.Errorf("the guard bakes SERVER_IP=%q, not a variable; it must name the same "+
+	}
+	if bakedName == "" {
+		t.Fatalf("the guard bakes SERVER_IP=%q, not a variable; it must name the same "+
 			"$APP_BROLLYZAPPER_* the server is addressed with", baked)
-	case answered != bakedName:
-		t.Errorf("the server answers on $%s and the guard bakes $%s into both credentials; "+
+	}
+	if answered != bakedName {
+		t.Fatalf("the server answers on $%s and the guard bakes $%s into both credentials; "+
 			"LND checks the caveat against the connection's source address and would refuse "+
 			"every call", answered, bakedName)
-	default:
-		// AND THE VARIABLE HAS TO BE SET TO AN ADDRESS. Agreeing on the name of
-		// a variable nobody exports is agreeing on the empty string, which
-		// compose interpolates silently.
-		value, ok := exportsIn(readPackageFile(t, "exports.sh"))[answered]
-		if !ok {
-			t.Errorf("both ends name $%s and exports.sh does not export it; compose "+
-				"interpolates an unset variable to empty, so the server would take whatever "+
-				"address it was given", answered)
-		} else if addr, err := netip.ParseAddr(literalValue(value)); err != nil || !addr.Is4() {
-			t.Errorf("$%s = %s, which is not a literal IPv4 address", answered, value)
-		}
+	}
+
+	// AND THE VARIABLE HAS TO BE SET TO AN ADDRESS. Agreeing on the name of a
+	// variable nobody exports is agreeing on the empty string, which compose
+	// interpolates silently.
+	value, ok := exports(t)[answered]
+	if !ok {
+		t.Errorf("both ends name $%s and exports.sh does not export it; compose interpolates "+
+			"an unset variable to empty, so the server would take whatever address it was "+
+			"given", answered)
+	} else if addr, err := netip.ParseAddr(literalValue(value)); err != nil || !addr.Is4() {
+		t.Errorf("$%s = %s, which is not a literal IPv4 address", answered, value)
 	}
 }
 
@@ -937,8 +931,8 @@ func TestTheStaticAddressIsOneVariableAtBothEnds(t *testing.T) {
 // This is that comment, made checkable.
 func TestTheExportsAreExactlyWhatTheComposeNeeds(t *testing.T) {
 	_, raw := loadCompose(t)
-	exported := exportsIn(readPackageFile(t, "exports.sh"))
-	required, defaulted := interpolatedNames(raw)
+	exported := exports(t)
+	required, defaulted := interpolationsIn(t, raw)
 
 	for name := range required {
 		if _, ok := exported[name]; !ok {
@@ -966,8 +960,25 @@ func TestTheExportsAreExactlyWhatTheComposeNeeds(t *testing.T) {
 	}
 }
 
-// interpolatedNames splits the APP_BROLLYZAPPER_* variables the compose reads
+// interpolationsIn splits the APP_BROLLYZAPPER_* variables the compose reads
 // into those it needs supplied and those it only accepts as an override.
+//
+// IT WALKS THE PARSED DOCUMENT'S SCALARS, NOT THE RAW TEXT, and that is this
+// bead's own defect class caught in this bead's own fix. The first cut ran the
+// regexp over the whole file — and docker-compose.yml:52 is a PARAGRAPH about
+// these very variables. Adding one `$` to that prose moves a name out of
+// `defaulted` and into `required`, which deletes the `06v` guard below
+// entirely: measured, the regression plant went from red to green on a comment
+// edit that changed no setting. yaml.v3 keeps comments in HeadComment,
+// LineComment and FootComment and never in a scalar's Value, so walking scalars
+// is immune by construction rather than by a stripping heuristic that the next
+// spelling gets around.
+//
+// It also reads every scalar rather than only environment values, so an
+// interpolation that appears in ports: or volumes: some day is seen. Mapping
+// KEYS are scalars too and are walked; a key containing a `$` would be a
+// variable name in the position of a setting name, which is not a thing this
+// file does.
 //
 // SCOPED TO APP_BROLLYZAPPER_*, because the rest — APP_DATA_DIR, NETWORK_IP,
 // APP_PASSWORD, the APP_LIGHTNING_NODE_* family — are umbrelOS's own, set by
@@ -980,16 +991,22 @@ func TestTheExportsAreExactlyWhatTheComposeNeeds(t *testing.T) {
 // `${X:?…}` and `${X?…}` are NOT defaults — they are the opposite, an error
 // when unset — so they count as required. What would reopen this: compose
 // gaining a form that supplies a value some other way.
-func interpolatedNames(raw string) (required, defaulted map[string]bool) {
-	interpolation := regexp.MustCompile(`\$\{?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:?[-?][^}]*)?\}?`)
+func interpolationsIn(t *testing.T, raw string) (required, defaulted map[string]bool) {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing the package compose as a document: %v", err)
+	}
 	required, defaulted = map[string]bool{}, map[string]bool{}
-	for _, m := range interpolation.FindAllStringSubmatch(raw, -1) {
-		name, suffix := m[1], m[2]
-		if strings.HasPrefix(suffix, ":-") || strings.HasPrefix(suffix, "-") {
-			defaulted[name] = true
-			continue
+	for _, value := range scalarsIn(&doc) {
+		for _, m := range interpolationRE.FindAllStringSubmatch(value, -1) {
+			name, suffix := m[1], m[2]
+			if strings.HasPrefix(suffix, ":-") || strings.HasPrefix(suffix, "-") {
+				defaulted[name] = true
+				continue
+			}
+			required[name] = true
 		}
-		required[name] = true
 	}
 	for name := range required {
 		delete(defaulted, name)
@@ -997,14 +1014,36 @@ func interpolatedNames(raw string) (required, defaulted map[string]bool) {
 	return required, defaulted
 }
 
-// interpolatedName is the variable a compose value is, or "" if the value is
+var interpolationRE = regexp.MustCompile(`\$\{?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:?[-?][^}]*)?\}?`)
+
+// scalarsIn is every scalar value in a YAML document, keys included. Comments
+// are not scalars, which is the whole point of asking the parser rather than
+// the file.
+func scalarsIn(node *yaml.Node) []string {
+	if node.Kind == yaml.ScalarNode {
+		return []string{node.Value}
+	}
+	var out []string
+	for _, child := range node.Content {
+		out = append(out, scalarsIn(child)...)
+	}
+	return out
+}
+
+// wholeValueVariable is the variable a compose value IS, or "" if the value is
 // anything else — a literal, or a string with a variable inside it. The whole
 // value or nothing: `ipv4_address: 10.21.21.14` and `ipv4_address: ${X}.14` are
 // both things this package must not do, and both must be caught.
-func interpolatedName(value string) string {
-	m := regexp.MustCompile(`^\$\{?([A-Z_][A-Z0-9_]*)\}?$`).FindStringSubmatch(strings.TrimSpace(value))
+//
+// Not to be confused with interpolationsIn, which asks a different question of
+// a different input: which names the whole FILE reads. The two were named one
+// character apart and a reader had no way to tell they were unrelated.
+func wholeValueVariable(value string) string {
+	m := wholeValueRE.FindStringSubmatch(strings.TrimSpace(value))
 	if m == nil {
 		return ""
 	}
 	return m[1]
 }
+
+var wholeValueRE = regexp.MustCompile(`^\$\{?([A-Z_][A-Z0-9_]*)\}?$`)
