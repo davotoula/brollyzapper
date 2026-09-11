@@ -603,6 +603,25 @@ func TestTheExportsParserReadsWhatItClaimsTo(t *testing.T) {
 	}
 }
 
+// TestCodeLinesDropsCommentsAndKeepsCode asserts the skip DIRECTLY, and it took
+// a plant to learn that it had to: removing the comment skip from codeLines left
+// the parser table above green, because `^export` rejects a comment line anyway.
+// The skip is load-bearing for the OTHER caller — the forbidden-token scan, where
+// reading a comment as code is what would fail the package over a comment saying
+// why docker is forbidden. Nothing asserted that until this test.
+func TestCodeLinesDropsCommentsAndKeepsCode(t *testing.T) {
+	const raw = "# never run docker here\n\n" +
+		"export APP_X=1\n" +
+		"   # an indented comment, and it must not exit\n" +
+		"\texport APP_Y=2\n"
+	want := []string{"export APP_X=1", "export APP_Y=2"}
+	got := codeLines(raw)
+	if !slices.Equal(got, want) {
+		t.Errorf("codeLines(%q) = %q, want %q — a comment read as code fails the package for "+
+			"the words in its own explanation", raw, got, want)
+	}
+}
+
 func TestLiteralValueTakesTheAssignedLiteralAndNotTheComment(t *testing.T) {
 	for _, tc := range []struct{ value, want string }{
 		{`"10.21.21.14"`, "10.21.21.14"},
