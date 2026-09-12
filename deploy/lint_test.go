@@ -248,14 +248,25 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		scanned++
-		// Stripped ONCE, not once per needle: the strip rebuilds the whole file
-		// through a strings.Builder, and the result is the same for every needle.
-		cleaned := withoutComments(string(raw))
 		// COMMENTS ARE EXEMPT, as they are in both neighbouring lints. This
 		// repository's convention is that comments record WHY, and the template
 		// cannot explain what it does differently from the Umbrel package without
 		// naming the package's variables. What matters is what compose
 		// INTERPOLATES, which is never a comment.
+		//
+		// THE COMPOSE FILE IS EXEMPTED BY ITS PARSER, NOT BY A `#` RULE, and the
+		// difference is two measured holes. withoutComments cuts each line at the
+		// first `#`, so `TRUSTED_PROXIES: "see # note: ${NETWORK_IP}"` hid an
+		// umbrelOS-only variable that compose still interpolates — and a
+		// double-quoted scalar folded with a trailing backslash split
+		// `${NETWORK_I` / `P}` across two lines, which no line scan can rejoin
+		// and which yaml rejoins for compose. Both measured on f49f08f, both in
+		// the silent direction: the check exists to FORBID these names, so a name
+		// it cannot see is a name it permits. Scalars carry neither hazard.
+		//
+		// The other files stay a line scan: .env.example has no structure to
+		// parse, and `#` genuinely starts a comment there.
+		cleaned := scannableText(t, e.Name(), string(raw))
 		for _, needle := range umbrelOnly {
 			if !strings.Contains(cleaned, needle) {
 				continue
@@ -285,9 +296,29 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 	}
 }
 
-// withoutComments blanks whole-line and trailing `#` comments. Both files this
-// scans are YAML or shell-shaped env, where `#` starts a comment and no value in
-// either legitimately contains one.
+// scannableText is a file's content with its comments gone, by whichever route
+// the file's own shape allows: the compose is parsed and its scalars joined, and
+// anything else is cut at `#`. See the two hazards recorded at the call site.
+func scannableText(t *testing.T, name, raw string) string {
+	t.Helper()
+	if name != composePath {
+		return withoutComments(raw)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing %s as a document: %v", name, err)
+	}
+	var out strings.Builder
+	for _, scalar := range scalarNodes(&doc) {
+		out.WriteString(scalar.Value)
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+// withoutComments blanks whole-line and trailing `#` comments, for the files
+// that have no parser. The env example is shell-shaped, where `#` starts a
+// comment and no value legitimately contains one.
 func withoutComments(raw string) string {
 	var out strings.Builder
 	for _, line := range strings.Split(raw, "\n") {
@@ -610,9 +641,6 @@ func assignedInExample(t *testing.T) map[string]bool {
 	return out
 }
 
-// TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
-// complete: a variable the compose file reads and the example never SETS is one
-// the operator cannot know to set, and it interpolates to empty.
 // interpolatedNames is every variable the template reads, in either spelling,
 // taken off the parsed document's scalars.
 //
@@ -631,11 +659,6 @@ func assignedInExample(t *testing.T) map[string]bool {
 // interpolates it. Measured 12 Sep 2026: both readings return the same fourteen
 // names on the template as it stands, so this changes nothing today and closes
 // both tomorrows.
-//
-// DELIBERATELY DUPLICATED as scalarNodes in umbrel/lint_test.go and
-// regtest/lint_test.go, under the same name in all three: nothing detects drift
-// between the copies but the name, so the name is identical on purpose. This is
-// the third copy, and BrollyZap-20i.18 is where that argument lives.
 func interpolatedNames(t *testing.T, raw string) map[string]bool {
 	t.Helper()
 	var doc yaml.Node
@@ -644,7 +667,7 @@ func interpolatedNames(t *testing.T, raw string) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, scalar := range scalarNodes(&doc) {
-		for _, m := range interpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
+		for _, m := range anyInterpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
 			out[m[1]] = true
 		}
 	}
@@ -653,10 +676,29 @@ func interpolatedNames(t *testing.T, raw string) map[string]bool {
 
 // ${NAME}, ${NAME:-default} and bare $NAME alike; the default half is this
 // file's own business and not the operator's, so only the name is captured.
-var interpolationRE = regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
+//
+// NOT NAMED interpolationRE, which umbrel/lint_test.go already uses for a
+// DIFFERENT pattern — scoped to APP_BROLLYZAPPER_* and capturing the brace at
+// m[1] and the name at m[2]. Identical names are this repo's only drift
+// detector between deliberate copies, so a same-name-different-pattern pair is
+// the one arrangement that turns the detector into a trap: code moved between
+// the two packages compiles and reads the brace as the variable name. The
+// genuinely identical twin of THIS pattern is the local `interpolation` in
+// regtest/lint_test.go.
+var anyInterpolationRE = regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
 
-// scalarNodes is every scalar in a YAML document, keys included. Comments are
-// not scalars, and neither is a line break.
+// scalarNodes is every scalar in a YAML document, keys included, carrying its
+// Value and its Line. Comments are not scalars, and neither is a line break.
+//
+// An alias node carries no Content, only a pointer this does not follow, so a
+// recursive alias terminates rather than recursing forever — and nothing is
+// missed by not following it, since the anchor's own definition is a scalar
+// elsewhere in the same tree.
+//
+// DELIBERATELY DUPLICATED, byte-identical and under this same name, in
+// umbrel/lint_test.go and regtest/lint_test.go. THIS IS THE THIRD COPY, and
+// nothing detects drift between them but the name — so a change here is a change
+// in three places. BrollyZap-20i.18 carries the extraction argument.
 func scalarNodes(node *yaml.Node) []*yaml.Node {
 	if node.Kind == yaml.ScalarNode {
 		return []*yaml.Node{node}
@@ -668,6 +710,9 @@ func scalarNodes(node *yaml.Node) []*yaml.Node {
 	return out
 }
 
+// TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
+// complete: a variable the compose file reads and the example never SETS is one
+// the operator cannot know to set, and it interpolates to empty.
 func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 	_, raw := loadCompose(t)
 	assigned := assignedInExample(t)
@@ -831,4 +876,47 @@ func olderThan(pinned, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode is what makes the rule
+// above survive a revert.
+//
+// Every claim its comment block makes was measured once, by hand, against a
+// template that satisfies it: put the brace back in anyInterpolationRE and the
+// whole suite stays green, because this template has no bare form to catch.
+// That is a rule written rather than tested, and it is the shape
+// umbrel/lint_test.go's own parser table exists to avoid.
+func TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want []string
+	}{{
+		name: "braced, with and without a default",
+		raw:  "services:\n  s:\n    environment:\n      A: ${LND_DIR}\n      B: ${HTTP_PORT:-8080}\n",
+		want: []string{"HTTP_PORT", "LND_DIR"},
+	}, {
+		name: "bare, which the brace-only pattern never saw",
+		raw:  "services:\n  s:\n    environment:\n      A: $LND_DIR\n",
+		want: []string{"LND_DIR"},
+	}, {
+		name: "a comment must not demand an assignment",
+		raw:  "# an earlier draft read ${LND_SOCKET_PATH}\nservices:\n  s:\n    environment:\n      A: ${LND_DIR}\n",
+		want: []string{"LND_DIR"},
+	}, {
+		name: "a folded scalar is one name, not two halves",
+		raw:  "services:\n  s:\n    environment:\n      A: \"${LND_D\\\n        IR}\"\n",
+		want: []string{"LND_DIR"},
+	}, {
+		name: "a name in a volume string counts, wherever it appears",
+		raw:  "services:\n  s:\n    volumes:\n      - ${DATA_DIR}/guard:/guard\n",
+		want: []string{"DATA_DIR"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := slices.Sorted(maps.Keys(interpolatedNames(t, tc.raw)))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("interpolatedNames(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
 }
