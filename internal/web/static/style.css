@@ -42,7 +42,7 @@
   }
 }
 body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background: var(--ground); color: var(--text); }
-header { display: flex; gap: var(--gap); align-items: baseline; padding: var(--gap); border-bottom: 1px solid var(--hairline); }
+header { display: flex; flex-wrap: wrap; gap: var(--gap); align-items: baseline; padding: var(--gap); border-bottom: 1px solid var(--hairline); }
 /* The nav links are muted so that .here can be the one that is not. Left at the
    browser default, a link and the current-page marker are both a saturated
    purple-blue — measured as the same colour to anyone not comparing them side
@@ -53,6 +53,10 @@ nav a { margin-right: var(--gap); color: var(--muted); }
    push the whole row down by its height. Selected by element, not by class —
    it is the only image the chrome has. */
 header > img { align-self: center; border-radius: 5px; }
+/* Sign-out, at the far end so it is not read as one more page; the margin also
+   cancels the page-form rule's margin-bottom. By element, for the img's reason:
+   the only form the chrome has. The header wraps so it drops a line on a phone. */
+header > form { margin: 0 0 0 auto; }
 /* The wordmark and the running build, stacked. A column inside a baseline flex
    row still aligns on the wordmark's baseline, so the nav does not move. */
 .brand { display: flex; flex-direction: column; }

@@ -27,6 +27,15 @@
     <a href="/security"{{if eq .Page "security"}} class="here"{{end}}>Security</a>
     <a href="/settings"{{if eq .Page "settings"}} class="here"{{end}}>Settings</a>
   </nav>
+  {{- if .SignedIn}}
+  <!-- A POST form, never a link: a GET that signs out is prefetched, and this
+       one ends every session on every device (d46.28). Outside the nav
+       because it is an action, not a page. -->
+  <form method="post" action="/logout">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <button type="submit">Sign out everywhere</button>
+  </form>
+  {{- end}}
 </header>
 <main>
 {{if .Degraded}}
