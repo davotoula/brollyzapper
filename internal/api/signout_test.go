@@ -21,12 +21,12 @@ import (
 func TestTheSignOutControlRendersForASessionAndSignsOut(t *testing.T) {
 	h := newHarness(t)
 
-	if body := h.get(t, "/login", nil).Body.String(); strings.Contains(body, "/logout") {
+	if body := h.body(t, "/login", nil); strings.Contains(body, "/logout") {
 		t.Errorf("GET /login without a session renders a sign-out control:\n%s", body)
 	}
 
 	cookie := h.login(t)
-	body := h.get(t, "/", cookie).Body.String()
+	body := h.body(t, "/", cookie)
 	const action = `<form method="post" action="/logout">`
 	i := strings.Index(body, action)
 	if i < 0 {

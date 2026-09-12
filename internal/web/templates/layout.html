@@ -29,9 +29,8 @@
   </nav>
   {{- if .SignedIn}}
   <!-- A POST form, never a link: a GET that signs out is prefetched, and this
-       one ends every session on every device (d46.28). On .SignedIn, not
-       .CSRFToken — the login page shares this layout and carries a token of
-       its own (d46.29). Outside the nav because it is an action, not a page. -->
+       one ends every session on every device (d46.28). Outside the nav
+       because it is an action, not a page. -->
   <form method="post" action="/logout">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     <button type="submit">Sign out everywhere</button>

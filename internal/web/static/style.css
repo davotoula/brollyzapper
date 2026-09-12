@@ -53,11 +53,9 @@ nav a { margin-right: var(--gap); color: var(--muted); }
    push the whole row down by its height. Selected by element, not by class —
    it is the only image the chrome has. */
 header > img { align-self: center; border-radius: 5px; }
-/* Sign-out, pushed to the far end of the header so it is not read as one more
-   page. The margin replaces the page-form rule's margin-bottom, which would
-   otherwise hang the header's height off a button. By element, for the img's
-   reason: it is the only form the chrome has. The header wraps so the wider
-   button drops to its own line on a phone rather than overflowing it. */
+/* Sign-out, at the far end so it is not read as one more page; the margin also
+   cancels the page-form rule's margin-bottom. By element, for the img's reason:
+   the only form the chrome has. The header wraps so it drops a line on a phone. */
 header > form { margin: 0 0 0 auto; }
 /* The wordmark and the running build, stacked. A column inside a baseline flex
    row still aligns on the wordmark's baseline, so the nav does not move. */
