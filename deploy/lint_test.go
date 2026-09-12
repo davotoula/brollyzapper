@@ -266,7 +266,7 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 		//
 		// The other files stay a line scan: .env.example has no structure to
 		// parse, and `#` genuinely starts a comment there.
-		cleaned := scannableText(t, e.Name(), string(raw))
+		cleaned := commentFreeText(t, e.Name(), string(raw))
 		for _, needle := range umbrelOnly {
 			if !strings.Contains(cleaned, needle) {
 				continue
@@ -296,10 +296,10 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 	}
 }
 
-// scannableText is a file's content with its comments gone, by whichever route
+// commentFreeText is a file's content with its comments gone, by whichever route
 // the file's own shape allows: the compose is parsed and its scalars joined, and
 // anything else is cut at `#`. See the two hazards recorded at the call site.
-func scannableText(t *testing.T, name, raw string) string {
+func commentFreeText(t *testing.T, name, raw string) string {
 	t.Helper()
 	if name != composePath {
 		return withoutComments(raw)
