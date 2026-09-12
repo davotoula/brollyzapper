@@ -1023,15 +1023,17 @@ func checkAuditWritersAreClassified(t *testing.T, files []sourceFile) []problem 
 	// And in CODE: per package is exactly why prose cannot count here, since
 	// one comment naming the type anywhere in the directory would mark every
 	// writer in it bounded and the rule would stop asking (`44b`).
+	code := make([]string, len(files))
 	bounded := map[string]bool{}
-	for _, f := range files {
-		if strings.Contains(strings.Join(codeLines(t, f), "\n"), "RefusalBudget") {
+	for i, f := range files {
+		code[i] = strings.Join(codeLines(t, f), "\n")
+		if strings.Contains(code[i], "RefusalBudget") {
 			bounded[f.dir] = true
 		}
 	}
 	var found []problem
-	for _, f := range files {
-		body := strings.Join(codeLines(t, f), "\n")
+	for i, f := range files {
+		body := code[i]
 		// The definitions themselves are not writers.
 		if f.dir == "internal/logging" || !writes.MatchString(body) {
 			continue
@@ -1094,9 +1096,8 @@ func shout(ctx context.Context) {
 	// bounded in the real table, so the plant takes its path and gives it only
 	// a comment to stand on.
 	asPool := func(body string) []sourceFile {
-		f := planted("internal/nostr", body)
-		f.rel = "internal/nostr/pool.go"
-		return []sourceFile{f}
+		const rel = "internal/nostr/pool.go"
+		return []sourceFile{{rel: rel, dir: "internal/nostr", path: rel, src: []byte(body)}}
 	}
 	catches(t, checkAuditWritersAreClassified(t, asPool(`package nostr
 
@@ -5656,7 +5657,7 @@ func flattenTemplate(t *testing.T, name, body string, bodies defineBodies) strin
 	// FuncMap, which lives in internal/web and which internal/arch deliberately
 	// does not import.
 	tree.Mode = parse.SkipFuncCheck
-	defined := map[string]*parse.Tree{} // the root, and every {{define}} body
+	defined := map[string]*parse.Tree{} // the root, under name, and every {{define}} body
 	if _, err := tree.Parse(body, "", "", defined); err != nil {
 		t.Fatalf("parsing %s: %v", name, err)
 	}
@@ -5699,18 +5700,17 @@ func flattenTemplate(t *testing.T, name, body string, bodies defineBodies) strin
 			branch(n.List, n.ElseList)
 		}
 	}
-	walk(tree.Root)
 	if bodies == skipDefines {
-		return b.String()
+		defined = map[string]*parse.Tree{name: tree}
 	}
-	// Each body is its own subtree and cannot continue an attribute the root
+	// Each tree is its own subtree and cannot continue an attribute another
 	// left open, so a space is enough to keep them apart; sorted, so the text
 	// is the same on every run.
-	for _, n := range slices.Sorted(maps.Keys(defined)) {
-		if defined[n] != tree {
+	for i, n := range slices.Sorted(maps.Keys(defined)) {
+		if i > 0 {
 			b.WriteString(" ")
-			walk(defined[n].Root)
 		}
+		walk(defined[n].Root)
 	}
 	return b.String()
 }
@@ -6097,18 +6097,10 @@ func (g *Guard) forget() error {
 // field (`{{.Location}}`) is a Go value the Go arm reads where it is set; the
 // literal in an action is the gap, and the test pins it so this sentence cannot
 // go stale.
-// routeSource is what checkNoDeploymentRouteInTheApp reads a file as.
-type routeSource int
-
-const (
-	goSource routeSource = iota
-	templateSource
-	// templateRootOnly is the flatten without {{define}} bodies. No real run
-	// uses it; it is the control that proves templateSource needs readDefines.
-	templateRootOnly
-)
-
-func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, source routeSource) []problem {
+//
+// bodies is read by the template arm only; the real runs pass readDefines, and
+// skipDefines exists for the control that proves they need it.
+func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, bodies defineBodies) []problem {
 	// The two umbrelOS routes, and the sentence `06v` was filed on. `/Apps/` is
 	// the Files app's mapping and `app-data/` is umbreld's own directory; the
 	// third is not a path at all, which is the point — a route that does not
@@ -6122,22 +6114,21 @@ func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, source rou
 		if strings.HasPrefix(f.dir, "umbrel") || f.dir == "internal/arch" {
 			continue
 		}
+		// A template is matched whole and named at line 0: the flatten moves
+		// text around, so it has no line to give, and the file and the route
+		// are enough to find it.
+		gocode := strings.HasSuffix(f.rel, ".go")
 		var lines []string
-		switch source {
-		case goSource:
+		if gocode {
 			lines = codeLines(t, f)
-		case templateSource:
-			lines = strings.Split(flattenTemplate(t, f.rel, string(f.src), readDefines), "\n")
-		case templateRootOnly:
-			lines = strings.Split(flattenTemplate(t, f.rel, string(f.src), skipDefines), "\n")
+		} else {
+			lines = []string{flattenTemplate(t, f.rel, string(f.src), bodies)}
 		}
 		for i, line := range lines {
 			if route.MatchString(line) {
-				// The flatten moves text around, so a template finding has no
-				// line to name; the file and the route are enough to find it.
-				at := i + 1
-				if source != goSource {
-					at = 0
+				at := 0
+				if gocode {
+					at = i + 1
 				}
 				found = append(found, problem{f.rel, at,
 					"names a deployment-specific route, or one that does not exist. §19 " +
@@ -6152,8 +6143,8 @@ func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, source rou
 }
 
 func TestTheGenericAppNamesNoDeploymentRoute(t *testing.T) {
-	clean(t, checkNoDeploymentRouteInTheApp(t, sourceFiles(t), goSource))
-	clean(t, checkNoDeploymentRouteInTheApp(t, templateFiles(t), templateSource))
+	clean(t, checkNoDeploymentRouteInTheApp(t, sourceFiles(t), readDefines))
+	clean(t, checkNoDeploymentRouteInTheApp(t, templateFiles(t), readDefines))
 
 	sending := func(body string) []sourceFile {
 		return []sourceFile{{
@@ -6166,35 +6157,35 @@ func TestTheGenericAppNamesNoDeploymentRoute(t *testing.T) {
 	// into the page, which works on Umbrel and is a lie everywhere else.
 	catches(t, checkNoDeploymentRouteInTheApp(t,
 		sending(`<p>Open Files and go to /Apps/brollyzapper/data/guard/authorisation.txt</p>`),
-		templateSource), "deployment-specific data paths")
+		readDefines), "deployment-specific data paths")
 
 	// And the original defect itself, so the exact sentence `06v` was filed on
 	// can never come back.
 	catches(t, checkNoDeploymentRouteInTheApp(t,
 		sending(`<p>Set GUARD_ALLOW_SENDING to true in this app's settings.</p>`),
-		templateSource), "one that does not exist")
+		readDefines), "one that does not exist")
 
 	// A template COMMENT is prose, as a Go comment is (`44b`): explaining why the
 	// sentence comes from the deployment is the writing this rule must not punish.
 	clean(t, checkNoDeploymentRouteInTheApp(t,
 		sending(`{{/* Not /Apps/brollyzapper/x: the deployment supplies the place. */}}<p>ok</p>`),
-		templateSource))
+		readDefines))
 
 	// Where `06v`'s sentence actually lives: sending.html renders the location
 	// from its "authorisation" {{define}}, which the parser keeps out of the root
 	// tree. Red when define bodies are read, clean when they are not — the pair
-	// is what says templateSource's choice of readDefines is doing the work.
+	// is what says reading them is doing the work.
 	inDefine := sending(`{{template "authorisation" .}}
 {{define "authorisation"}}
   <p>Set GUARD_ALLOW_SENDING to true in this app's settings.</p>
 {{end}}`)
-	catches(t, checkNoDeploymentRouteInTheApp(t, inDefine, templateSource), "one that does not exist")
-	clean(t, checkNoDeploymentRouteInTheApp(t, inDefine, templateRootOnly))
+	catches(t, checkNoDeploymentRouteInTheApp(t, inDefine, readDefines), "one that does not exist")
+	clean(t, checkNoDeploymentRouteInTheApp(t, inDefine, skipDefines))
 
 	// A KNOWN LIMIT, pinned so the rule's comment stays true: a route spelled as
 	// a string constant inside an action is not text, and is not read.
 	clean(t, checkNoDeploymentRouteInTheApp(t,
-		sending(`<p>Open {{ "/Apps/brollyzapper/x" }}</p>`), templateSource))
+		sending(`<p>Open {{ "/Apps/brollyzapper/x" }}</p>`), readDefines))
 }
 
 // `06v`: `internal/api` may name the guard's OPERATOR VOCABULARY and nothing
