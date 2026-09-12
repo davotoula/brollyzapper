@@ -31,6 +31,8 @@
 package regtest
 
 import (
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -86,27 +88,77 @@ func TestRelayDatabasesAreNamedVolumes(t *testing.T) {
 // reproducible — and a whole session went into ruling the relay version in and
 // then back out precisely because it could have changed under us.
 func TestEveryImageInTheStackIsPinnedByDigest(t *testing.T) {
-	_, raw := load(t)
-	for i, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "image:") {
-			continue
+	c, _ := load(t)
+	for _, name := range serviceNames(c) {
+		image := c.Services[name].Image
+		if image == "" {
+			continue // reported by the control below, which is where absence belongs
 		}
-		image := strings.TrimSpace(strings.TrimPrefix(trimmed, "image:"))
-		if !strings.Contains(image, "@sha256:") {
-			t.Errorf("%s:%d pins %q by tag alone; every image here must carry an "+
-				"@sha256: digest, or this stack's behaviour changes with no commit to "+
-				"point at (BrollyZap-qnz)", composePath, i+1, image)
+		// THE DIGEST'S SHAPE, NOT THE PREFIX. strings.Contains(image, "@sha256:")
+		// was satisfied by the marker alone: a digest shortened by one hex digit
+		// passed, and so would `@sha256:` with nothing after it. Measured — the
+		// brief for BrollyZap-20i.16 named that plant expecting it to be red, and
+		// on main it was green. Docker would reject such a reference at pull
+		// time, which is exactly the failure this rule exists to catch BEFORE
+		// anyone pulls.
+		if !digestRE.MatchString(image) {
+			t.Errorf("service %q pins %q without a full @sha256: digest (64 lowercase hex); "+
+				"every image here must carry one, or this stack's behaviour changes with no "+
+				"commit to point at (BrollyZap-qnz)", name, image)
 		}
 	}
 }
 
-// The control for the test above: a compose file naming no images would pass it
-// having checked nothing.
+// The control for the test above, and the reason it is no longer a line scan.
+//
+// It was strings.Count(raw, "image:") >= 6 over the whole file, comments
+// included — so the check whose ONLY job is to prove the rule above is not
+// vacuous was itself satisfiable by prose. Verified by plant (BrollyZap-20i.16):
+// rename every real image: key to imaged: and append six comment lines reading
+// "# image: a comment", and BOTH tests pass having looked at nothing. The rule
+// above had the same shape, scanning raw lines for an image: prefix while the
+// parsed services sat in scope.
+//
+// Reading the struct is less code and strictly stronger in three ways. It
+// resolves the `<<: *lnd-common` merge key, so lnd and lnd-payer are two
+// services carrying an image rather than one anchor line the scan counted once.
+// It ignores x-lnd-common, which is an extension field and not a service, where
+// the line scan counted its image: as a seventh. And ABSENCE BECOMES VISIBLE: a
+// service with no image at all is something a raw scan cannot see, because
+// there is no line there to match.
+//
+// EVERY SERVICE HAS ONE, measured 12 Sep 2026 — bitcoind, lnd, lnd-payer,
+// relay, relay2, init, guard, brollyzapper. The brief that asked for this
+// expected init to be the exception; it is not, it runs the lnd image to drive
+// lncli. So there is no image-less allowance here, and a service that gains one
+// has to say so in this list rather than by passing quietly.
 func TestTheStackActuallyNamesImages(t *testing.T) {
-	_, raw := load(t)
-	if n := strings.Count(raw, "image:"); n < 6 {
-		t.Errorf("%s names %d images; too few for TestEveryImageInTheStackIsPinnedByDigest "+
-			"to mean anything", composePath, n)
+	c, _ := load(t)
+	names := serviceNames(c)
+	if len(names) < 6 {
+		t.Errorf("%s defines %d services (%s); too few for "+
+			"TestEveryImageInTheStackIsPinnedByDigest to mean anything",
+			composePath, len(names), strings.Join(names, ", "))
 	}
+	for _, name := range names {
+		if c.Services[name].Image == "" {
+			t.Errorf("service %q declares no image; every service in this stack runs one, so "+
+				"this is either a service that should say why it is different or a mount "+
+				"that lost its image line — and the digest rule above cannot see the "+
+				"difference", name)
+		}
+	}
+}
+
+var digestRE = regexp.MustCompile(`@sha256:[0-9a-f]{64}$`)
+
+// serviceNames is the stack's services in a stable order, so a failure names the
+// same service every run and two failures read in the same order.
+func serviceNames(c compose) []string {
+	names := make([]string, 0, len(c.Services))
+	for name := range c.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
