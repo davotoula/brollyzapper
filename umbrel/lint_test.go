@@ -1053,10 +1053,12 @@ var interpolationRE = regexp.MustCompile(`\$(\{)?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:
 // missed by not following it, since the anchor's own definition is a scalar
 // elsewhere in the same tree.
 //
-// DELIBERATELY DUPLICATED in regtest/lint_test.go under the same name: nothing
-// detects drift between the two but the name, so the name is kept identical on
+// DELIBERATELY DUPLICATED, byte-identical and under this same name, in
+// regtest/lint_test.go and deploy/lint_test.go — three copies, and nothing
+// detects drift between them but the name, so the name is kept identical on
 // purpose (the discipline internal/arch/arch_test.go states for its own twin).
-// Filed for extraction with the rest of the compose reader.
+// Not extracted, on size and shape: deploy/lint_test.go's package comment
+// carries the argument, and BrollyZap-20i.18 the sequencing.
 func scalarNodes(node *yaml.Node) []*yaml.Node {
 	if node.Kind == yaml.ScalarNode {
 		return []*yaml.Node{node}

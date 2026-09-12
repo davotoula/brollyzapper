@@ -207,9 +207,11 @@ func TestComposeNamesNothingUmbrelSpecific(t *testing.T) {
 // scalarNodes is every scalar in a YAML document, keys included, carrying its
 // Value and its Line.
 //
-// DELIBERATELY DUPLICATED from umbrel/lint_test.go under the same name: nothing
-// detects drift between the two but the name, so the name is kept identical on
-// purpose. Filed for extraction with the rest of the compose reader.
+// DELIBERATELY DUPLICATED, byte-identical and under this same name, in
+// umbrel/lint_test.go and deploy/lint_test.go — three copies, and nothing
+// detects drift between them but the name, so the name is kept identical on
+// purpose. Not extracted, on size and shape: deploy/lint_test.go's package
+// comment carries the argument, and BrollyZap-20i.18 the sequencing.
 func scalarNodes(node *yaml.Node) []*yaml.Node {
 	if node.Kind == yaml.ScalarNode {
 		return []*yaml.Node{node}

@@ -2,6 +2,85 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.21 — 2026-09-12
+
+The release that makes BrollyZapper deployable on plain Docker beside any LND, not only as an
+Umbrel app: a `deploy/` template with its own lint, a DEPLOYING procedure that was walked on a
+real node, and the one binary change that path needed — the admin password. Tripped on the
+reference box as `0.1.21-rc1` twice on 12 Sep: an in-place Umbrel update where every operator
+surface read verbatim as it did on 0.1.20 and a real zap published its receipt to five of five
+relays in **999 ms**; and an A/B on a plain-Docker install beside that same Umbrel, where the
+only thing swapped between the two readings was the image digests.
+
+### Changed
+
+- **The admin password is now required, and off Umbrel it is yours to change.** Set
+  `ADMIN_PASSWORD` (at least 12 characters) before the first start — the server refuses to start
+  without it, rather than inventing one and showing it on a page behind the login it would have
+  opened. Once you are in, **Settings** offers a password change on any deployment the platform
+  does not manage; umbrelOS installs are unaffected in every respect, including the password
+  they already have. Existing plain-Docker installs that already set `ADMIN_PASSWORD` need no
+  action. *(Breaking for a plain-Docker install that relied on the invented password.)*
+
+### Fixed
+
+- **Two failures a plain-Docker install hits now say what to do.** If LND's certificate does not
+  name the address the app dials, the guard says so before it connects and names the exact
+  `lnd.conf` edit, instead of a TLS handshake message at the first request. And if your node is
+  refusing the credential for the address it sees, the Node page says that — with the address it
+  is locked to — instead of reporting a rotation and offering a Re-link button that cannot help.
+  umbrelOS installs are unaffected: both conditions need a deployment the platform does not
+  produce, and the pages and logs of a healthy install are unchanged.
+- **Asking for a second confirmation code now records what happened to the first.** If you ask
+  for a code and then ask again before using it, the security trail says the earlier one was
+  superseded, instead of simply ending at the request. Nothing about the ceremony itself
+  changes: the newest code is still the only one that works.
+- **A wallet connection missing half its key pair is refused by name** instead of stored as a
+  pairing that could never sign a response. Unreachable from the pages; closes the hand-crafted
+  case. Underneath, the payment preimage is typed as a secret from the node to the receipt, so
+  it cannot reach a log or an error by accident — no visible change.
+
+### Added
+
+- **`deploy/`: a plain-Docker Compose template** for running beside an existing LND on the same
+  host, with an `.env.example` that shows every setting and a lint that keeps the template equal
+  to the Umbrel package where it must be and different only where it should be.
+- **`DEPLOYING.md` §Running outside Umbrel is a procedure**, walked against a real node: the
+  two snags a first start meets (the certificate name, the file ownership) with their fixes, what
+  is not supported and why, and how to test beside an Umbrel install without touching its node.
+
+### Documentation
+
+- One root file per reader: `README`, `DEPLOYING`, `OPERATING`, `CONTRIBUTING`. `MANUAL.html`
+  is retired; the settings are stated once, in `OPERATING.md`.
+
+### Lint controls
+
+None of these change behaviour. Each is a check that turned out to be satisfiable by prose — a
+comment, a folded line, a word in the wrong place — and now reads the thing it checks:
+
+- `umbrel/`: the package lint reads `exports.sh` as assignments rather than text — the
+  session-secret and static-IP checks could previously be satisfied by a comment — and ties it
+  to the compose that consumes it: the static address is checked at both ends, `exports.sh` must
+  export exactly what the compose needs, and the generic-settings contract is derived from
+  `internal/config` rather than hand-kept.
+- `deploy/`: the env-name lint checks assignments rather than prose, reads both interpolation
+  spellings off the parsed compose, and the template says what the spend caps cost and that
+  `NETWORK_CIDR` is inert while `SERVER_IP` is set.
+- `regtest/`: the lints read the compose they parse rather than its text; the image control
+  counts parsed services rather than the word `image:`, and the digest rule requires a real
+  digest and a version tag.
+
+### Upgrading
+
+**On umbrelOS, nothing to do.** No migration (schema stays 15), no setting changes, no key baked
+or revoked by the update, and the Settings page still says the password is managed by Umbrel.
+An in-place update recreates both containers; about 40 s with the app down.
+
+**On plain Docker, `ADMIN_PASSWORD` must be set** (12 characters or more) before the update
+starts the new server, or it refuses to start and says so. An install that already set it needs
+nothing else.
+
 ## 0.1.20 — 2026-09-08
 
 Mostly what an operator sees when a limit change is refused, plus three corrections in the
