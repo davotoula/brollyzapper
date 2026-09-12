@@ -15,15 +15,30 @@
 // the package." umbrel/lint_test.go and regtest/lint_test.go are the other two,
 // and the §6/§20 mount rule is now stated in three of them.
 //
-// NOT EXTRACTED HERE, and the reason is scope rather than disagreement: 20i.1's
-// brief rules out any change under umbrel/, and a shared test-support package
-// has to move that file to be worth making. internal/lnd/lndtest and
-// internal/lnurl/lnurltest are the precedent for where it would go. Named in
-// this bead's report for the PM rather than done quietly.
+// NOT EXTRACTED, AND THE REASON HAS CHANGED. It used to be scope — 20i.1's brief
+// ruled out any change under umbrel/, and a shared package has to move that file
+// to be worth making. Brief D changed umbrel/ AND regtest/, so that reason is
+// dead and this paragraph would otherwise be a dead excuse the next reader
+// either acts on or stops at.
+//
+// The honest reason is size and shape. The duplicated piece is the compose
+// loader and the networks model — about fourteen lines per copy, where the bar
+// arch set is forty. And a shared composeFile struct would be the UNION of three
+// different documents: umbrel alone needs container_name, this file alone needs
+// top-level networks and ipam, regtest alone needs aliases. A field a lint does
+// not read is exactly the vacuity risk this whole family of checks hunts, so the
+// union struct would be worse than the duplication it replaced.
+//
+// What IS duplicated deliberately is named identically in all three files —
+// scalarNodes here, in umbrel/lint_test.go and in regtest/lint_test.go — because
+// nothing detects drift between copies but the name. BrollyZap-20i.18 carries
+// the full argument and the sequencing. internal/lnd/lndtest and
+// internal/lnurl/lnurltest are the precedent for where it would go.
 package deploy
 
 import (
 	"errors"
+	"maps"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -598,19 +613,66 @@ func assignedInExample(t *testing.T) map[string]bool {
 // TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
 // complete: a variable the compose file reads and the example never SETS is one
 // the operator cannot know to set, and it interpolates to empty.
+// interpolatedNames is every variable the template reads, in either spelling,
+// taken off the parsed document's scalars.
+//
+// BOTH SPELLINGS, because `\$\{([A-Z_]…)` required the brace and the bare form is
+// equally valid compose: `$LND_DIR` would never have been collected, so
+// .env.example would never have been required to show it and the operator would
+// not have been shown a setting (BrollyZap-20i.19). Latent rather than live —
+// this template has no bare form today, and the floor below would still have
+// passed on the other names — but the Umbrel package writes bare
+// interpolations seven times, and this template is what a reader copies.
+//
+// OFF THE SCALARS, not the raw text, for the two reasons brief D paid for next
+// door: a comment naming `${SOMETHING}` would otherwise demand an assignment for
+// a variable the template does not read, and a double-quoted scalar folded with
+// a trailing backslash hides a name from a per-line regexp while compose still
+// interpolates it. Measured 12 Sep 2026: both readings return the same fourteen
+// names on the template as it stands, so this changes nothing today and closes
+// both tomorrows.
+//
+// DELIBERATELY DUPLICATED as scalarNodes in umbrel/lint_test.go and
+// regtest/lint_test.go, under the same name in all three: nothing detects drift
+// between the copies but the name, so the name is identical on purpose. This is
+// the third copy, and BrollyZap-20i.18 is where that argument lives.
+func interpolatedNames(t *testing.T, raw string) map[string]bool {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing %s as a document: %v", composePath, err)
+	}
+	out := map[string]bool{}
+	for _, scalar := range scalarNodes(&doc) {
+		for _, m := range interpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// ${NAME}, ${NAME:-default} and bare $NAME alike; the default half is this
+// file's own business and not the operator's, so only the name is captured.
+var interpolationRE = regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
+
+// scalarNodes is every scalar in a YAML document, keys included. Comments are
+// not scalars, and neither is a line break.
+func scalarNodes(node *yaml.Node) []*yaml.Node {
+	if node.Kind == yaml.ScalarNode {
+		return []*yaml.Node{node}
+	}
+	var out []*yaml.Node
+	for _, child := range node.Content {
+		out = append(out, scalarNodes(child)...)
+	}
+	return out
+}
+
 func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 	_, raw := loadCompose(t)
 	assigned := assignedInExample(t)
-	// ${NAME} and ${NAME:-default} alike; the default half is this file's own
-	// business and not the operator's.
-	interpolated := regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)`).FindAllStringSubmatch(raw, -1)
-	seen := map[string]bool{}
-	for _, m := range interpolated {
-		name := m[1]
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
+	seen := interpolatedNames(t, raw)
+	for _, name := range slices.Sorted(maps.Keys(seen)) {
 		if !assigned[name] {
 			t.Errorf("%s interpolates ${%s} and %s has no assignment line for it — a mention "+
 				"in a comment is not one. The operator cannot set what they are not shown, "+
