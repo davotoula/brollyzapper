@@ -6084,10 +6084,31 @@ func (g *Guard) forget() error {
 //
 // SCANNED IN THE TEMPLATES AS WELL AS THE GO, and that is the half that matters:
 // the sentence naming a place that does not exist lived in sending.html, and no
-// rule looked there. In Go it reads code only — a comment explaining why a
+// rule looked there. In both it reads code only — a comment explaining why a
 // deployment mechanism exists is exactly the reasoning this codebase wants, and
-// a rule that punished it would be a rule against writing things down.
-func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, gocode bool) []problem {
+// a rule that punished it would be a rule against writing things down. In Go
+// that is codeLines; in a template it is flattenTemplate, which drops
+// {{/* */}} and reads {{define}} bodies, where sending.html's authorisation
+// block lives (`44b`).
+//
+// WHAT THE TEMPLATE READING DOES NOT SEE: a string constant inside an action.
+// `{{ "/Apps/x" }}` and `{{if eq .X "/Apps/x"}}` flatten to a marker, so a route
+// spelled that way passes. Copy is written as text, and a route rendered from a
+// field (`{{.Location}}`) is a Go value the Go arm reads where it is set; the
+// literal in an action is the gap, and the test pins it so this sentence cannot
+// go stale.
+// routeSource is what checkNoDeploymentRouteInTheApp reads a file as.
+type routeSource int
+
+const (
+	goSource routeSource = iota
+	templateSource
+	// templateRootOnly is the flatten without {{define}} bodies. No real run
+	// uses it; it is the control that proves templateSource needs readDefines.
+	templateRootOnly
+)
+
+func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, source routeSource) []problem {
 	// The two umbrelOS routes, and the sentence `06v` was filed on. `/Apps/` is
 	// the Files app's mapping and `app-data/` is umbreld's own directory; the
 	// third is not a path at all, which is the point — a route that does not
@@ -6101,13 +6122,24 @@ func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, gocode boo
 		if strings.HasPrefix(f.dir, "umbrel") || f.dir == "internal/arch" {
 			continue
 		}
-		lines := strings.Split(string(f.src), "\n")
-		if gocode {
+		var lines []string
+		switch source {
+		case goSource:
 			lines = codeLines(t, f)
+		case templateSource:
+			lines = strings.Split(flattenTemplate(t, f.rel, string(f.src), readDefines), "\n")
+		case templateRootOnly:
+			lines = strings.Split(flattenTemplate(t, f.rel, string(f.src), skipDefines), "\n")
 		}
 		for i, line := range lines {
 			if route.MatchString(line) {
-				found = append(found, problem{f.rel, i + 1,
+				// The flatten moves text around, so a template finding has no
+				// line to name; the file and the route are enough to find it.
+				at := i + 1
+				if source != goSource {
+					at = 0
+				}
+				found = append(found, problem{f.rel, at,
 					"names a deployment-specific route, or one that does not exist. §19 " +
 						"forbids the generic app assuming deployment-specific data paths — " +
 						"the same binary has to run on a plain Docker host. The deployment " +
@@ -6120,22 +6152,49 @@ func checkNoDeploymentRouteInTheApp(t *testing.T, files []sourceFile, gocode boo
 }
 
 func TestTheGenericAppNamesNoDeploymentRoute(t *testing.T) {
-	clean(t, checkNoDeploymentRouteInTheApp(t, sourceFiles(t), true))
-	clean(t, checkNoDeploymentRouteInTheApp(t, templateFiles(t), false))
+	clean(t, checkNoDeploymentRouteInTheApp(t, sourceFiles(t), goSource))
+	clean(t, checkNoDeploymentRouteInTheApp(t, templateFiles(t), templateSource))
+
+	sending := func(body string) []sourceFile {
+		return []sourceFile{{
+			rel: "internal/web/templates/sending.html", dir: "internal/web/templates",
+			src: []byte(body),
+		}}
+	}
 
 	// The plausible mistake: someone "fixes" the copy by writing the real route
 	// into the page, which works on Umbrel and is a lie everywhere else.
-	catches(t, checkNoDeploymentRouteInTheApp(t, []sourceFile{{
-		rel: "internal/web/templates/sending.html", dir: "internal/web/templates",
-		src: []byte(`<p>Open Files and go to /Apps/brollyzapper/data/guard/authorisation.txt</p>`),
-	}}, false), "deployment-specific data paths")
+	catches(t, checkNoDeploymentRouteInTheApp(t,
+		sending(`<p>Open Files and go to /Apps/brollyzapper/data/guard/authorisation.txt</p>`),
+		templateSource), "deployment-specific data paths")
 
 	// And the original defect itself, so the exact sentence `06v` was filed on
 	// can never come back.
-	catches(t, checkNoDeploymentRouteInTheApp(t, []sourceFile{{
-		rel: "internal/web/templates/sending.html", dir: "internal/web/templates",
-		src: []byte(`<p>Set GUARD_ALLOW_SENDING to true in this app's settings.</p>`),
-	}}, false), "one that does not exist")
+	catches(t, checkNoDeploymentRouteInTheApp(t,
+		sending(`<p>Set GUARD_ALLOW_SENDING to true in this app's settings.</p>`),
+		templateSource), "one that does not exist")
+
+	// A template COMMENT is prose, as a Go comment is (`44b`): explaining why the
+	// sentence comes from the deployment is the writing this rule must not punish.
+	clean(t, checkNoDeploymentRouteInTheApp(t,
+		sending(`{{/* Not /Apps/brollyzapper/x: the deployment supplies the place. */}}<p>ok</p>`),
+		templateSource))
+
+	// Where `06v`'s sentence actually lives: sending.html renders the location
+	// from its "authorisation" {{define}}, which the parser keeps out of the root
+	// tree. Red when define bodies are read, clean when they are not — the pair
+	// is what says templateSource's choice of readDefines is doing the work.
+	inDefine := sending(`{{template "authorisation" .}}
+{{define "authorisation"}}
+  <p>Set GUARD_ALLOW_SENDING to true in this app's settings.</p>
+{{end}}`)
+	catches(t, checkNoDeploymentRouteInTheApp(t, inDefine, templateSource), "one that does not exist")
+	clean(t, checkNoDeploymentRouteInTheApp(t, inDefine, templateRootOnly))
+
+	// A KNOWN LIMIT, pinned so the rule's comment stays true: a route spelled as
+	// a string constant inside an action is not text, and is not read.
+	clean(t, checkNoDeploymentRouteInTheApp(t,
+		sending(`<p>Open {{ "/Apps/brollyzapper/x" }}</p>`), templateSource))
 }
 
 // `06v`: `internal/api` may name the guard's OPERATOR VOCABULARY and nothing
