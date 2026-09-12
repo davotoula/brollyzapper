@@ -1019,9 +1019,13 @@ func checkAuditWritersAreClassified(t *testing.T, files []sourceFile) []problem 
 	// writing, and the write itself is usually a few files away from where the
 	// bound is held. internal/guard keeps its budget on the Guard and consults
 	// it from two files; internal/nwc holds it on the Service.
+	//
+	// And in CODE: per package is exactly why prose cannot count here, since
+	// one comment naming the type anywhere in the directory would mark every
+	// writer in it bounded and the rule would stop asking (`44b`).
 	bounded := map[string]bool{}
 	for _, f := range files {
-		if strings.Contains(string(f.src), "RefusalBudget") {
+		if strings.Contains(strings.Join(codeLines(t, f), "\n"), "RefusalBudget") {
 			bounded[f.dir] = true
 		}
 	}
@@ -1082,6 +1086,36 @@ func shout(ctx context.Context) {
 	_ = auditor.Record(ctx, slog.LevelWarn, "something", logging.EventGuardReject)
 }
 `)}), "not classified")
+
+	// THE BUDGET MUST BE CODE, NOT PROSE (`44b`). The bounded set is built per
+	// package, so a comment anywhere in the directory that merely names
+	// RefusalBudget would otherwise mark the whole package bounded and silence
+	// the demand for every writer in it. internal/nostr/pool.go is declared
+	// bounded in the real table, so the plant takes its path and gives it only
+	// a comment to stand on.
+	asPool := func(body string) []sourceFile {
+		f := planted("internal/nostr", body)
+		f.rel = "internal/nostr/pool.go"
+		return []sourceFile{f}
+	}
+	catches(t, checkAuditWritersAreClassified(t, asPool(`package nostr
+
+// Events here should go through a logging.RefusalBudget.
+func (p *Pool) refuse(ctx context.Context) {
+	_ = p.auditor.Record(ctx, slog.LevelWarn, "refused", logging.EventGuardReject)
+}
+`)), "references no logging.RefusalBudget")
+
+	// The control: the same file holding the budget in code is bounded, so what
+	// the plant above proves is the comment and not the path.
+	clean(t, checkAuditWritersAreClassified(t, asPool(`package nostr
+
+type Pool struct{ refusals *logging.RefusalBudget }
+
+func (p *Pool) refuse(ctx context.Context) {
+	_ = p.auditor.Record(ctx, slog.LevelWarn, "refused", logging.EventGuardReject)
+}
+`)))
 }
 
 // §14 forbids `rpcmiddleware.addmandatory` BY NAME, and this is that rule.
