@@ -278,15 +278,6 @@ list does:
   the first start does not change the password**, because the stored hash wins once it exists.
   Change it from **Settings** instead, once you are in.
 
-  **INTERIM — remove at the 0.1.21 pin:** the paragraph above describes `0.1.21`, and `deploy/`
-  still pins `0.1.20` images. On those, an empty first start comes up and locks the install out
-  — the password it invents is shown only on a page behind the login — and a password set here
-  cannot be changed from Settings afterwards. The only way back from an empty first start is
-  destructive: stop the stack, set `ADMIN_PASSWORD`, delete `${DATA_DIR}/server` and start
-  again, which discards the database and with it the nostr identity. So set one now.
-  `deploy/.env.example` carries the same note beside `ADMIN_PASSWORD`; both go when the two
-  `image:` lines move.
-
 Two below the line are worth setting now rather than after the first start:
 
 - **`DATA_DIR`** — make it an **absolute** path, outside this checkout. The Sending page prints
@@ -705,7 +696,9 @@ network *and* gains Umbrel's, so it has two addresses — and LND sees whichever
 the node came out of, while the `ipaddr` caveat names only the one in `SERVER_IP`. Set
 `SERVER_IP` to the address on the network the node is reached over, which here is Umbrel's. A
 bake that succeeds followed by every call failing for the address is this, and nothing else
-looks like it.
+looks like it. Measured on the reference Pi on 12 Sep 2026: with `SERVER_IP` set to the
+address on Umbrel's network, the route to the node leaves by that interface and the locked
+macaroon minted invoices — the dual-homing is benign once `SERVER_IP` names the right side.
 
 #### Putting it back
 
