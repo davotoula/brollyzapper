@@ -667,7 +667,8 @@ func assignedInExample(t *testing.T) map[string]bool {
 // not have been shown a setting (BrollyZap-20i.19). Latent rather than live —
 // this template has no bare form today, and the floor below would still have
 // passed on the other names — but the Umbrel package writes bare
-// interpolations seven times, and this template is what a reader copies.
+// interpolations eight times over six code lines, and this template is what a
+// reader copies from.
 //
 // OFF THE SCALARS, not the raw text, for the two reasons brief D paid for next
 // door: a comment naming `${SOMETHING}` would otherwise demand an assignment for
