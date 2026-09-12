@@ -35,7 +35,7 @@ services:
   # listens on nothing: its sole input is a unix socket in the shared credential
   # volume (spec §3, §6). It publishes no port, and the lint asserts that.
   guard:
-    image: ghcr.io/davotoula/brollyzapper-guard:0.1.21@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/davotoula/brollyzapper-guard:0.1.21@sha256:ef30751da667901970f09853b30df317af8ca36d2e32d400ea92dd1e5d2faad7
     # OVERRIDABLE, AND THE GUARD IS WHY. On umbrelOS the app data is created
     # 1000:1000 and 1000 is simply right; on an Ubuntu host LND's own files
     # usually belong to an `lnd` user at mode 0600, so a guard running as 1000
@@ -122,7 +122,7 @@ services:
   # admin.macaroon — adding that mount here would silently undo §3, §6 and half
   # of §11, which is what the lint exists to prevent.
   server:
-    image: ghcr.io/davotoula/brollyzapper:0.1.21@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/davotoula/brollyzapper:0.1.21@sha256:5043c62f449d3d357e14514c84a215af7656b38210faa5a95711fe7e1737847c
     # The images run as uid 65532 (distroless/static:nonroot) by default; this
     # overrides that. THE DIRECTORIES UNDER ${DATA_DIR} MUST BE OWNED BY THIS
     # UID on the host — umbrelOS creates them as 1000:1000, a plain host does
