@@ -43,6 +43,11 @@ type PageData struct {
 	// handler that could pass it could pass a different one.
 	Version   string
 	CSRFToken string
+	// SignedIn is whether the request carries a session, so the layout can
+	// offer sign-out. Handlers never set it; the server's page() does, from the
+	// session, for Page's reason. It is not CSRFToken != "": the login page
+	// carries a pre-authentication token of its own (d46.29).
+	SignedIn bool
 	// Flash is a one-shot message: the outcome of the last form submission.
 	Flash string
 	Error string
