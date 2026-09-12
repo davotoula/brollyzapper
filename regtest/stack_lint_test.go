@@ -88,12 +88,31 @@ func TestRelayDatabasesAreNamedVolumes(t *testing.T) {
 // because the pinning creates a reasonable belief that the stack is
 // reproducible — and a whole session went into ruling the relay version in and
 // then back out precisely because it could have changed under us.
-// A version tag AND a full digest. umbrel/lint_test.go refuses a bare repo and
-// a :latest tag for the same reason this file gives at the top: the digest says
-// what ran, and the tag is how a human reading the file knows WHICH VERSION that
-// was without resolving it. A reference with a digest and no tag pulls correctly
-// and tells the next reader nothing.
-var pinnedImageRE = regexp.MustCompile(`^[^:@[:space:]]+:[^:@[:space:]]+@sha256:[0-9a-f]{64}$`)
+// pinnedImage is a reference that carries BOTH a version tag and a full digest.
+// umbrel/lint_test.go refuses a bare repo and a :latest tag for the same reason
+// this file gives at the top: the digest says what ran, and the tag is how a
+// human reading the file knows WHICH VERSION that was without resolving it. A
+// reference with a digest and no tag pulls correctly and tells the next reader
+// nothing.
+//
+// NOT ONE REGEXP, because the one I wrote refused a reference that is correct.
+// `^[^:@[:space:]]+:[^:@[:space:]]+@sha256:…` allows exactly one colon before
+// the `@`, so `localhost:5000/img:1.0@sha256:…` — a normal pin against a
+// port-bearing registry — could not match, and the rule failed a file that was
+// right. Measured. That is the direction that gets a lint deleted rather than
+// fixed, so the tag is found where Docker finds it: a colon in the LAST path
+// segment, after any registry host and port.
+func pinnedImage(ref string) bool {
+	name, digest, ok := strings.Cut(ref, "@")
+	if !ok || !digestRE.MatchString(digest) {
+		return false
+	}
+	lastSegment := name[strings.LastIndex(name, "/")+1:]
+	_, tag, tagged := strings.Cut(lastSegment, ":")
+	return tagged && tag != ""
+}
+
+var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func TestEveryImageInTheStackIsPinnedByDigest(t *testing.T) {
 	c, _ := load(t)
@@ -112,7 +131,7 @@ func TestEveryImageInTheStackIsPinnedByDigest(t *testing.T) {
 		// on main it was green. Docker would reject such a reference at pull
 		// time, which is exactly the failure this rule exists to catch BEFORE
 		// anyone pulls.
-		if !pinnedImageRE.MatchString(image) {
+		if !pinnedImage(image) {
 			t.Errorf("service %q pins %q; every image here must carry a version tag AND a "+
 				"full @sha256: digest of 64 lowercase hex, or this stack's behaviour changes "+
 				"with no commit to point at (BrollyZap-qnz)", name, image)
@@ -180,7 +199,7 @@ func serviceNames(c compose) []string {
 	return slices.Sorted(maps.Keys(c.Services))
 }
 
-// TestPinnedImageREAcceptsOnlyATagAndAFullDigest is what makes the rule above
+// TestPinnedImageAcceptsOnlyATagAndAFullDigest is what makes the rule above
 // survive a revert.
 //
 // Both halves of BrollyZap-20i.16 were revertible-without-red when they landed:
@@ -188,7 +207,7 @@ func serviceNames(c compose) []string {
 // tag, and the stack's own compose exercises none of them because it is
 // correct. A rule whose only input is a file that satisfies it has been written,
 // not tested.
-func TestPinnedImageREAcceptsOnlyATagAndAFullDigest(t *testing.T) {
+func TestPinnedImageAcceptsOnlyATagAndAFullDigest(t *testing.T) {
 	const digest = "@sha256:e81d238db13507f6ef24c49d47cd0b0ea58ff207961f10581fa2a7c901054df4"
 	for _, tc := range []struct {
 		image string
@@ -205,9 +224,14 @@ func TestPinnedImageREAcceptsOnlyATagAndAFullDigest(t *testing.T) {
 		{"dockurr/strfry:1.1.2" + strings.ToUpper(digest[8:]), false, "uppercase hex: no registry emits it"},
 		{"dockurr/strfry:1.1.2" + digest + " ", false, "trailing space"},
 		{"dockurr/strfry:latest" + digest, true, "a moving tag is still pinned by its digest"},
+		{"localhost:5000/dockurr/strfry:1.1.2" + digest, true, "a registry with a PORT: the colon before the tag is not the tag"},
+		{"registry.example.com:5000/a/b/c:1.0" + digest, true, "a port and a deep path"},
+		{"localhost:5000/dockurr/strfry" + digest, false, "a port does not supply the missing tag"},
+		{"dockurr/strfry:1.1.2@sha512:" + strings.Repeat("a", 64), false, "only sha256 is a digest here"},
+		{"dockurr/strfry:" + digest, false, "an empty tag is not a tag"},
 	} {
-		if got := pinnedImageRE.MatchString(tc.image); got != tc.want {
-			t.Errorf("pinnedImageRE.MatchString(%q) = %v, want %v — %s", tc.image, got, tc.want, tc.why)
+		if got := pinnedImage(tc.image); got != tc.want {
+			t.Errorf("pinnedImage(%q) = %v, want %v — %s", tc.image, got, tc.want, tc.why)
 		}
 	}
 }

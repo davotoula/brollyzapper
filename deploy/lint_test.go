@@ -308,11 +308,28 @@ func commentFreeText(t *testing.T, name, raw string) string {
 	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
 		t.Fatalf("parsing %s as a document: %v", name, err)
 	}
+	// ANCHORS TOO, and that is not theoretical tidiness. An anchor name is not a
+	// scalar Value, so `environment: &NETWORK_IP_anchor` put a forbidden name in
+	// the file and this check passed — measured, and it is the same silent
+	// direction as the two holes above. Anchors sit on mappings and sequences as
+	// readily as on scalars, so every node is asked for one.
 	var out strings.Builder
-	for _, scalar := range scalarNodes(&doc) {
-		out.WriteString(scalar.Value)
-		out.WriteString("\n")
+	var walk func(*yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Anchor != "" {
+			out.WriteString(n.Anchor)
+			out.WriteString("\n")
+		}
+		if n.Kind == yaml.ScalarNode {
+			out.WriteString(n.Value)
+			out.WriteString("\n")
+			return
+		}
+		for _, child := range n.Content {
+			walk(child)
+		}
 	}
+	walk(&doc)
 	return out.String()
 }
 
@@ -667,7 +684,15 @@ func interpolatedNames(t *testing.T, raw string) map[string]bool {
 	}
 	out := map[string]bool{}
 	for _, scalar := range scalarNodes(&doc) {
-		for _, m := range anyInterpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
+		// `$$` IS COMPOSE'S ESCAPE FOR A LITERAL `$`, never an interpolation, and
+		// Go's regexp has no lookbehind to say so. Removing the pairs first is
+		// exact rather than approximate: `$$NAME` becomes `NAME` and matches
+		// nothing, while `$$$NAME` becomes `$NAME` — which is what compose does
+		// with it too, a literal dollar followed by a real interpolation.
+		// Measured: without this, `$$NOT_REAL_VAR` demanded an assignment for a
+		// name compose never reads.
+		value := strings.ReplaceAll(scalar.Value, "$$", "")
+		for _, m := range anyInterpolationRE.FindAllStringSubmatch(value, -1) {
 			out[m[1]] = true
 		}
 	}
@@ -906,6 +931,14 @@ func TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode(t *testing.T) {
 	}, {
 		name: "a folded scalar is one name, not two halves",
 		raw:  "services:\n  s:\n    environment:\n      A: \"${LND_D\\\n        IR}\"\n",
+		want: []string{"LND_DIR"},
+	}, {
+		name: "$$ is an escaped literal dollar, not an interpolation",
+		raw:  "services:\n  s:\n    environment:\n      A: \"$$NOT_REAL\"\n      B: ${LND_DIR}\n",
+		want: []string{"LND_DIR"},
+	}, {
+		name: "$$$NAME is a literal dollar and then a real one",
+		raw:  "services:\n  s:\n    environment:\n      A: \"$$$LND_DIR\"\n",
 		want: []string{"LND_DIR"},
 	}, {
 		name: "a name in a volume string counts, wherever it appears",
