@@ -5657,7 +5657,7 @@ func flattenTemplate(t *testing.T, name, body string, bodies defineBodies) strin
 	// FuncMap, which lives in internal/web and which internal/arch deliberately
 	// does not import.
 	tree.Mode = parse.SkipFuncCheck
-	defined := map[string]*parse.Tree{} // the root, under name, and every {{define}} body
+	defined := map[string]*parse.Tree{} // the root, under name, and every {{define}} or {{block}} body
 	if _, err := tree.Parse(body, "", "", defined); err != nil {
 		t.Fatalf("parsing %s: %v", name, err)
 	}
