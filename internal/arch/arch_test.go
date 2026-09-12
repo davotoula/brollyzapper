@@ -5624,6 +5624,16 @@ func functions(t *testing.T, f sourceFile) []fn {
 // cannot collide with it.
 const classSentinel = "\x00"
 
+// defineBodies is flattenTemplate's choice of whether {{define}} bodies are
+// read. An explicit argument rather than a default, so that a rule reading the
+// root alone says so at its call site.
+type defineBodies bool
+
+const (
+	skipDefines defineBodies = false
+	readDefines defineBodies = true
+)
+
 // flattenTemplate renders a template's TEXT with every action replaced by a
 // marker, using html/template's own parser.
 //
@@ -5635,14 +5645,19 @@ const classSentinel = "\x00"
 // and ends, so quotes inside one never reach the text, and both arms of a
 // conditional are walked, which is what "this class list can render either of
 // these" actually means. A `with`, a `range` or a pipeline needs no new case.
-func flattenTemplate(t *testing.T, name, body string) string {
+//
+// A {{define}} body is NOT in the root tree — the parser lifts it out into the
+// set — so bodies says whether those are walked too. sending.html renders its
+// authorisation block from one; a root-only walk reads none of it (`44b`).
+func flattenTemplate(t *testing.T, name, body string, bodies defineBodies) string {
 	t.Helper()
 	tree := parse.New(name)
 	// The rule reads structure, not semantics: it must not need the template
 	// FuncMap, which lives in internal/web and which internal/arch deliberately
 	// does not import.
 	tree.Mode = parse.SkipFuncCheck
-	if _, err := tree.Parse(body, "", "", map[string]*parse.Tree{}); err != nil {
+	defined := map[string]*parse.Tree{} // the root, and every {{define}} body
+	if _, err := tree.Parse(body, "", "", defined); err != nil {
 		t.Fatalf("parsing %s: %v", name, err)
 	}
 	var b strings.Builder
@@ -5685,6 +5700,18 @@ func flattenTemplate(t *testing.T, name, body string) string {
 		}
 	}
 	walk(tree.Root)
+	if bodies == skipDefines {
+		return b.String()
+	}
+	// Each body is its own subtree and cannot continue an attribute the root
+	// left open, so a space is enough to keep them apart; sorted, so the text
+	// is the same on every run.
+	for _, n := range slices.Sorted(maps.Keys(defined)) {
+		if defined[n] != tree {
+			b.WriteString(" ")
+			walk(defined[n].Root)
+		}
+	}
 	return b.String()
 }
 
@@ -5885,8 +5912,11 @@ func templateFiles(t *testing.T) []sourceFile {
 
 func TestEveryTemplateClassIsStyled(t *testing.T) {
 	renderers := map[string]string{}
+	// skipDefines, and KNOWN WRONG: this rule has never read a {{define}} body,
+	// and reading them turns it red on sending.html's unstyled "notice". Both
+	// halves are BrollyZap-d46.30, sequenced after d46.29's style.css change.
 	for _, f := range templateFiles(t) {
-		renderers[f.rel] = flattenTemplate(t, f.rel, string(f.src))
+		renderers[f.rel] = flattenTemplate(t, f.rel, string(f.src), skipDefines)
 	}
 	// The Go half comes from the shared, cached walk every other rule uses, so
 	// the paths a finding names read like every other rule's finding.
@@ -5912,7 +5942,7 @@ func TestEveryTemplateClassIsStyled(t *testing.T) {
 
 	planted := func(t *testing.T, body string) map[string]string {
 		t.Helper()
-		return map[string]string{"planted.html": flattenTemplate(t, "planted.html", body)}
+		return map[string]string{"planted.html": flattenTemplate(t, "planted.html", body, skipDefines)}
 	}
 
 	// A class a template asks for and the stylesheet never answers.
