@@ -16,7 +16,6 @@ package regtest
 
 import (
 	"fmt"
-	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -104,10 +103,13 @@ var appServices = []string{"brollyzapper", "guard"}
 
 type compose struct {
 	Services map[string]struct {
-		Image       string            `yaml:"image"`
-		Command     commandLine       `yaml:"command"`
-		Volumes     []string          `yaml:"volumes"`
-		Ports       []string          `yaml:"ports"`
+		Image   string      `yaml:"image"`
+		Command commandLine `yaml:"command"`
+		Volumes []string    `yaml:"volumes"`
+		// A yaml.Node, like Networks: compose also takes a long mapping form,
+		// and a []string would make that spelling on any service a decode error
+		// in load() that fails every test here. Decoded where it is read.
+		Ports       yaml.Node         `yaml:"ports"`
 		Environment map[string]string `yaml:"environment"`
 		// A yaml.Node because this file spells networks two ways — `networks:
 		// [brolly]` for most services, and the mapping form where one needs an
@@ -394,12 +396,7 @@ func TestServerIPMatchesTheStaticAddress(t *testing.T) {
 	// pinning the address on `lnd` instead of on the app satisfied it — measured
 	// on 279678d — and so would a comment quoting the address with the real line
 	// deleted. The address has to be on the container that dials.
-	pinned := ""
-	for _, settings := range networksOf(t, c, "brollyzapper") {
-		if settings.IPv4 != "" {
-			pinned = settings.IPv4
-		}
-	}
+	pinned, _ := pinnedAddress(t, c, "brollyzapper")
 	if pinned != serverIP {
 		t.Errorf("the guard bakes SERVER_IP=%q and the brollyzapper service answers on %q; "+
 			"the ipaddr caveat would be checked against an address the app does not have",
@@ -423,12 +420,7 @@ func TestServerIPMatchesTheStaticAddress(t *testing.T) {
 // taken out and then locks both credentials to the wrong range.
 func TestTheNetworkRangeIsOneFactInAllItsPlaces(t *testing.T) {
 	c, _ := load(t)
-	var pinned, onNetwork string
-	for name, settings := range networksOf(t, c, "brollyzapper") {
-		if settings.IPv4 != "" {
-			pinned, onNetwork = settings.IPv4, name
-		}
-	}
+	pinned, onNetwork := pinnedAddress(t, c, "brollyzapper")
 	addr, err := netip.ParseAddr(pinned)
 	if err != nil {
 		t.Fatalf("the brollyzapper service's ipv4_address %q is not an address: %v", pinned, err)
@@ -447,17 +439,51 @@ func TestTheNetworkRangeIsOneFactInAllItsPlaces(t *testing.T) {
 		t.Errorf("the brollyzapper service's address %s is outside network %q's subnet %s",
 			addr, onNetwork, subnet)
 	}
-	for _, setting := range []struct{ service, key, why string }{
-		{"guard", "NETWORK_CIDR", "the guard locks both credentials to it the moment SERVER_IP is removed"},
-		{"brollyzapper", "TRUSTED_PROXIES", "the forwarded-for walk trusts exactly this range (spec §7)"},
+	// EVERY SERVICE THAT SETS ONE, not the two that do today: the fact is about
+	// the range, and a third service taking either setting takes it too.
+	for _, setting := range []struct{ key, why string }{
+		{"NETWORK_CIDR", "the guard locks both credentials to it the moment SERVER_IP is removed"},
+		{"TRUSTED_PROXIES", "the forwarded-for walk trusts exactly this range (spec §7)"},
 	} {
-		value := c.Services[setting.service].Environment[setting.key]
-		if got, err := netip.ParsePrefix(value); err != nil || got != subnet {
-			t.Errorf("the %s service sets %s=%q and network %q's subnet is %s; %s, so changing "+
-				"the range in one place has to change it in all four", setting.service,
-				setting.key, value, onNetwork, subnet, setting.why)
+		found := false
+		for _, name := range serviceNames(c) {
+			value, ok := c.Services[name].Environment[setting.key]
+			if !ok {
+				continue
+			}
+			found = true
+			if got, err := netip.ParsePrefix(value); err != nil || got != subnet {
+				t.Errorf("the %s service sets %s=%q and network %q's subnet is %s; %s, so "+
+					"changing the range in one place has to change it in all four", name,
+					setting.key, value, onNetwork, subnet, setting.why)
+			}
+		}
+		if !found {
+			t.Errorf("no service sets %s; this check would pass having compared nothing", setting.key)
 		}
 	}
+}
+
+// pinnedAddress is a service's ipv4_address and the network it is on.
+//
+// EXACTLY ONE, or the test fails. Both callers used to take whichever addressed
+// network the map yielded last, and map order is random, so a service on two
+// addressed networks would pass or fail by luck — umbrel/lint_test.go refuses
+// that case for the same reason. Two is also a real question with no answer
+// here: which address does LND see.
+func pinnedAddress(t *testing.T, c compose, service string) (addr, network string) {
+	t.Helper()
+	found := 0
+	for name, settings := range networksOf(t, c, service) {
+		if settings.IPv4 != "" {
+			addr, network = settings.IPv4, name
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("the %s service has an ipv4_address on %d networks, want exactly 1", service, found)
+	}
+	return addr, network
 }
 
 // The guard dials `lnd:10009`, and `--tlsextradomain=lnd` is what puts that name
@@ -473,12 +499,13 @@ func TestTheNetworkRangeIsOneFactInAllItsPlaces(t *testing.T) {
 // something a compose lint can read.
 func TestEveryDialledNodeCertifiesTheNameItIsDialledBy(t *testing.T) {
 	c, _ := load(t)
-	certifies := func(service, host string) bool {
-		return slices.Contains(c.Services[service].Command, "--tlsextradomain="+host)
+	runsLND := func(service string) bool {
+		command := c.Services[service].Command
+		return len(command) > 0 && command[0] == "lnd"
 	}
 
 	dialled := 0
-	for _, name := range slices.Sorted(maps.Keys(c.Services)) {
+	for _, name := range serviceNames(c) {
 		address, ok := c.Services[name].Environment["LND_ADDRESS"]
 		if !ok {
 			continue
@@ -489,36 +516,32 @@ func TestEveryDialledNodeCertifiesTheNameItIsDialledBy(t *testing.T) {
 			t.Errorf("service %q sets LND_ADDRESS=%q, which is not host:port: %v", name, address, err)
 			continue
 		}
-		if _, ok := c.Services[host]; !ok {
-			t.Errorf("service %q dials %q, which is not a service in this stack", name, host)
-			continue
-		}
-		if !certifies(host, host) {
-			t.Errorf("service %q dials %s, and the %s service's command carries no "+
-				"--tlsextradomain=%s; the certificate will not name the host, and the TLS "+
-				"failure reads exactly like a macaroon problem", name, address, host, host)
+		// Only that the name IS a node: whether its certificate carries the name
+		// is the loop below's, so one missing flag is one error.
+		if !runsLND(host) {
+			t.Errorf("service %q dials %s, and %q is not a service in this stack that runs lnd",
+				name, address, host)
 		}
 	}
 
 	nodes := 0
-	for _, name := range slices.Sorted(maps.Keys(c.Services)) {
-		command := c.Services[name].Command
-		if len(command) == 0 || command[0] != "lnd" {
+	for _, name := range serviceNames(c) {
+		if !runsLND(name) {
 			continue
 		}
 		nodes++
-		if !certifies(name, name) {
+		if !slices.Contains(c.Services[name].Command, "--tlsextradomain="+name) {
 			t.Errorf("the %s service runs lnd with no --tlsextradomain=%s; everything in this "+
-				"stack dials a node by its service name, init.sh included, so the certificate "+
-				"has to carry it", name, name)
+				"stack dials a node by its service name — LND_ADDRESS and init.sh alike — and "+
+				"without it the TLS failure reads exactly like a macaroon problem", name, name)
 		}
 	}
 
 	// The controls: an LND_ADDRESS renamed or a command respelled would leave
-	// both loops with nothing to check.
-	if dialled < 2 || nodes < 2 {
-		t.Errorf("found %d services setting LND_ADDRESS and %d running lnd; this stack has "+
-			"two of each, so the checks above are reading the wrong thing", dialled, nodes)
+	// a loop with nothing to check.
+	if dialled == 0 || nodes == 0 {
+		t.Errorf("found %d services setting LND_ADDRESS and %d running lnd; the checks above "+
+			"are reading the wrong thing", dialled, nodes)
 	}
 }
 
@@ -531,7 +554,9 @@ func TestEveryDialledNodeCertifiesTheNameItIsDialledBy(t *testing.T) {
 // nothing is published at all. The host side has to be it too, and it is the
 // one a tidy-up changes — `8081:8080` publishes a working app whose self-probe
 // fails while everything else looks fine. The host side is `${APP_PORT:-8080}`,
-// an operator's knob, so what is checked is its DEFAULT.
+// an operator's knob, so what is checked is its DEFAULT: an operator who sets
+// APP_PORT to anything else breaks the same thing, which the compose header
+// says and no lint can see.
 func TestTheAppIsPublishedOnThePortItListensOn(t *testing.T) {
 	c, _ := load(t)
 	app := c.Services["brollyzapper"]
@@ -539,18 +564,31 @@ func TestTheAppIsPublishedOnThePortItListensOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LISTEN_ADDR=%q is not host:port: %v", app.Environment["LISTEN_ADDR"], err)
 	}
-	if len(app.Ports) != 1 {
-		t.Fatalf("the brollyzapper service publishes %d ports %v; it publishes exactly one, "+
-			"the port it listens on", len(app.Ports), app.Ports)
+	var ports []string
+	if err := app.Ports.Decode(&ports); err != nil {
+		t.Fatalf("the brollyzapper service's ports are not in the short string form this "+
+			"check reads: %v", err)
 	}
-	host, container, err := publishedPorts(app.Ports[0])
-	if err != nil {
-		t.Fatal(err)
+	published := false
+	for _, mapping := range ports {
+		host, container, err := publishedPorts(mapping)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if container != listen {
+			continue
+		}
+		published = true
+		if host != listen {
+			t.Errorf("the brollyzapper service publishes its listen port %s as %q, on host "+
+				"port %s; the two have to be the same number, or the self-probe cannot reach "+
+				"the lightning address it is checking", listen, mapping, host)
+		}
 	}
-	if container != listen || host != listen {
-		t.Errorf("the brollyzapper service is published as %q (host %s, container %s) and "+
-			"listens on %s; all three have to be the same number, or the self-probe cannot "+
-			"reach the lightning address it is checking", app.Ports[0], host, container, listen)
+	if !published {
+		t.Errorf("the brollyzapper service listens on %s and publishes nothing to it: %v",
+			listen, ports)
 	}
 }
 

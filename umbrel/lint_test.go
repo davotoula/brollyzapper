@@ -421,9 +421,13 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 	// asks the user: key of the named service — not the first `user:` line found
 	// below a `guard:` somewhere in the text, which reads the server's comment
 	// the day the guard's user: line is deleted.
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing the package compose as a document: %v", err)
+	}
 	for _, name := range []string{"guard", "server"} {
-		user, ok := serviceKey(t, raw, name, "user")
-		if !ok {
+		user := serviceKey(&doc, name, "user")
+		if user == nil {
 			continue // already reported above, by value
 		}
 		if !strings.Contains(user.HeadComment, "65532") {
@@ -435,17 +439,15 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 }
 
 // serviceKey is the KEY node of one setting on one service — the node that
-// carries the setting's line and the comment block written above it.
-func serviceKey(t *testing.T, raw, service, key string) (*yaml.Node, bool) {
-	t.Helper()
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("parsing the package compose as a document: %v", err)
+// carries the setting's line and the comment block written above it — or nil.
+func serviceKey(doc *yaml.Node, service, key string) *yaml.Node {
+	if len(doc.Content) == 0 {
+		return nil
 	}
 	_, services := mappingEntry(doc.Content[0], "services")
 	_, svc := mappingEntry(services, service)
 	k, _ := mappingEntry(svc, key)
-	return k, k != nil
+	return k
 }
 
 // mappingEntry is one key of a yaml mapping node and its value. A nil or

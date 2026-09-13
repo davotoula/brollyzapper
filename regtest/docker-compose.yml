@@ -6,7 +6,9 @@
 # either: this header used to be one, and it had drifted twice (20i.17).
 #
 # ${APP_PORT} is the one deliberate APP_ name, and it is not a setting: it is
-# this stack's host-port knob, read by compose and never by the app.
+# this stack's host-port knob, read by compose and never by the app. Move it off
+# the port the app listens on and the self-probe breaks — see brollyzapper's
+# ports: below.
 
 name: brollyregtest
 
