@@ -125,6 +125,12 @@ th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(-
 /* The semantic ladder (see the admin-UI palette design notes (private)).
    One meaning per colour, applied identically on every page. */
 .degraded { background: var(--raised); border-left: 4px solid var(--caution); padding: var(--gap); }
+/* sending.html's authorisation block: stop, open the file, check what it says
+   before typing the code. That is a check, so the caution rung; the primary
+   colour would read as an action to take. Its own rule rather than a second
+   selector on .degraded, which is the system's state rather than a step the
+   operator is in the middle of — the two share a look, not a meaning. */
+.notice { background: var(--raised); border-left: 4px solid var(--caution); padding: var(--gap); }
 /* display: block, because overflow does not apply to a table box and the rule
    without it computes to `visible` and does nothing. Measured on a 390px
    viewport with a 120-character unbreakable comment: without this the PAGE
