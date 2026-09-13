@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,5 +272,121 @@ func newAuthorisationTestGuard(t *testing.T, store *stateStore, data string,
 		rotation:        NewRotationDetector(clock, 0, 0),
 		authoriseBudget: logging.NewRefusalBudget(auditAuthorisationBound, clock),
 		log:             logging.New(os.Stderr, logging.NewLevelVar(slog.LevelError)),
+	}
+}
+
+// redeemAgainstAReplacement drives ApplyChange for grant A's change while another
+// connection supersedes A with a request for a different change, in the window
+// between ApplyChange loading state and redeem writing it.
+//
+// THE CLOCK IS THE INJECTION POINT, as in its neighbours: redeem's own `now` is
+// the first clock read after ApplyChange's load, and it is taken outside the
+// store's lock. RequestAuthorisation takes no bakeMu, so nothing ApplyChange holds
+// keeps it out — that is the whole defect. It returns the guard, the code the
+// operator can now read (B's), and ApplyChange's error.
+func redeemAgainstAReplacement(t *testing.T, offer func(a *Authorisation) string) (*Guard, State, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	data := filepath.Join(dir, "guard-data")
+	store, err := openStateStore(data, operatorSeed{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	var g *Guard
+	armed, fired := false, false
+	clock := func() time.Time {
+		if armed {
+			armed, fired = false, true
+			if err := g.RequestAuthorisation(t.Context(), Change{Control: ControlSpendCap, Msat: 200_000_000}); err != nil {
+				t.Errorf("the other connection's request failed, so nothing was superseded: %v", err)
+			}
+		}
+		return now
+	}
+	g = newAuthorisationTestGuard(t, store, data, clock)
+
+	first := Change{Control: ControlSending, On: true}
+	if err := g.RequestAuthorisation(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	st, err := g.state.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered := offer(st.Authorisation)
+
+	armed = true
+	applyErr := g.ApplyChange(t.Context(), first, offered)
+	if !fired {
+		t.Fatal("the interleaving never fired, so this asserts nothing about a stale snapshot; " +
+			"redeem's clock read has moved")
+	}
+	after, err := g.state.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(data, AuthorisationFile))
+	if err != nil {
+		t.Fatalf("the replacement grant's code file is gone: %v; the operator is told to read a "+
+			"file that is not there", err)
+	}
+	var readable string
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if _, code, ok := strings.Cut(line, AuthorisationCodeLine); ok {
+			readable = strings.TrimSpace(code)
+		}
+	}
+	return g, after, readable, applyErr
+}
+
+// A wrong code against a grant that was superseded mid-redeem must not put that
+// grant back over its replacement (`rvw`, the stale-snapshot rule's third coat).
+//
+// redeem bumped Attempts on the grant from ApplyChange's snapshot and wrote it
+// back whole. If another connection had meanwhile issued B, that write restored
+// A over B: the stored grant is one the trail has already called superseded, and
+// the file on disk carries B's code — a code the guard no longer holds. The
+// operator types what they can read and is told it is wrong, and B has left the
+// state with no row at all.
+func TestAWrongCodeOnAStaleSnapshotDoesNotRestoreTheSupersededGrant(t *testing.T) {
+	_, after, readable, err := redeemAgainstAReplacement(t, func(*Authorisation) string { return "0000-0000" })
+	if err == nil {
+		t.Fatal("a wrong code was accepted")
+	}
+	if after.Authorisation == nil {
+		t.Fatal("the replacement grant is gone from the state")
+	}
+	if after.Authorisation.Code != readable {
+		t.Errorf("the stored grant's code is not the one in the operator's file: the attempt bump "+
+			"restored the superseded grant over its replacement (stored %s, attempts %d; err %v)",
+			after.Authorisation.Change.Control, after.Authorisation.Attempts, err)
+	}
+}
+
+// The right code for a grant superseded mid-redeem must not consume the
+// replacement, nor apply a change the trail already says was abandoned (`rvw`).
+//
+// consumeAuthorisation cleared whatever was stored, so a redeem judged on the
+// snapshot's A deleted B — row and file — and then applied A's change as
+// authorised. §12 then holds A superseded AND authorised, and nothing at all
+// about B.
+func TestARedeemOnAStaleSnapshotDoesNotConsumeTheReplacement(t *testing.T) {
+	g, after, readable, err := redeemAgainstAReplacement(t, func(a *Authorisation) string { return a.Code })
+	if err == nil {
+		t.Error("a superseded code redeemed: the change was applied on a grant the trail had " +
+			"already recorded as superseded by a new request")
+	}
+	if after.SendingLatch {
+		t.Error("sending was turned on by a superseded grant")
+	}
+	if after.Authorisation == nil || after.Authorisation.Code != readable {
+		t.Errorf("the replacement grant was consumed by a redeem that never saw it; stored %+v",
+			after.Authorisation != nil)
+	}
+	for _, event := range g.recentAuditEvents() {
+		if event.Event == logging.EventGuardAuthorise && event.Attrs["outcome"] == "authorised" {
+			t.Errorf("the trail records the superseded grant as authorised")
+		}
 	}
 }
