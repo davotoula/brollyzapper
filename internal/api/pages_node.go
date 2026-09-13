@@ -4,15 +4,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/davotoula/brollyzapper/internal/guard"
-	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/preflight"
 	"github.com/davotoula/brollyzapper/internal/web"
 )
 
 func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	data, _, _ := s.page(ctx, "Node")
+	data, _, report := s.page(ctx, "Node")
 	view := web.NodeView{State: "unknown"}
 	if s.NodeState != nil {
 		view.State = string(s.NodeState())
@@ -27,23 +25,14 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 			view.ReceiveMacaroonPresent = status.ReceiveMacaroonPresent
 			view.SpendMacaroonPresent = status.SpendMacaroonPresent
 			view.ReceiveExpiry = status.ReceiveExpiry
-			// TWO FACTS, AND NEITHER IS ENOUGH ALONE (`20i.3`).
-			//
-			// The guard's kind means "a re-bake would change nothing" — which
-			// is equally true of an operator who pressed Re-link twice on a
-			// healthy install inside MinBakeInterval, and measuring that was
-			// what caught this: a working deployment was being told its address
-			// was wrong, with its only recovery button removed, until the next
-			// renewal days later.
-			//
-			// The other half is the node ACTUALLY rejecting the credential,
-			// which this guard never observes and the server does. Together
-			// they are the condition; apart they are a guess.
-			if status.RefusalKind == guard.KindAddressMismatch &&
-				view.State == string(lnd.StateRelink) {
-				view.MismatchedAddress = status.CredentialAddress
-			}
 		}
+	}
+	// FROM THE REPORT, NOT COMPUTED HERE (`20i.11`). This page used to hold the
+	// address verdict itself, so the Security panel could only point at it;
+	// preflight's credential-address check now computes it once, from both
+	// halves, for both pages — and the handler below asks the same one.
+	if report.Blocked(preflight.BlocksRelink) {
+		view.MismatchedAddress = report.MismatchedAddress
 	}
 	data.Node = view
 	data.Flash = flashFrom(r)
@@ -53,6 +42,14 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 // relink asks the guard for a fresh receive macaroon. §6: the server never
 // exits over a rotated macaroon — it shows this state and re-requests a bake.
 func (s *Server) relink(w http.ResponseWriter, r *http.Request) {
+	// THE HANDLER ASKS, NOT ONLY THE TEMPLATE (`20i.11`). Hiding the button left
+	// this route mounted, so the refusal lived in HTML and a replayed or scripted
+	// POST was honoured — a bake the guard declines anyway, a reconnect retry for
+	// a credential that did not change, and a "saved" flash for nothing.
+	if s.checks(r.Context()).Blocked(preflight.BlocksRelink) {
+		http.Redirect(w, r, "/node?flash=relink_blocked", http.StatusSeeOther)
+		return
+	}
 	if s.Broker != nil {
 		if err := s.Broker.RequestReceiveBake(r.Context()); err != nil {
 			s.Log.Warn("re-link failed", "error", err.Error())

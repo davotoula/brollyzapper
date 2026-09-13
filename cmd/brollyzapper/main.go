@@ -239,9 +239,8 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// measured cost of doing so is ~1 ms per call on a local unix socket.
 	guardSocket := guard.NewSocketClient(cfg.GuardSocket, relayGuardEvents)
 	broker := api.NewCachedBroker(guardSocket, api.NodeStatusTTL, time.Now)
-	node := lnd.New(cfg.LNDAddress,
-		lnd.VolumeCredentials(cfg.CredentialsDir, lnd.ReceiveMacaroon),
-		lnd.Options{Log: log, Broker: broker})
+	receiveCredentials := lnd.VolumeCredentials(cfg.CredentialsDir, lnd.ReceiveMacaroon)
+	node := lnd.New(cfg.LNDAddress, receiveCredentials, lnd.Options{Log: log, Broker: broker})
 	defer node.Close()
 
 	// A SECOND client, for the payment path only (d24.2).
@@ -364,6 +363,12 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 					return db.CountAuditEventsSince(ctx, logging.EventGuardReject, since)
 				},
 				ProxiesDeclared: func() bool { return handler != nil && handler.ProxiesDeclared() },
+				// The certificate the receive client dials with, against the
+				// address it dials: the same decision lnd.Client makes before it
+				// dials, read for the panel (`20i.11`).
+				CertificateName: func() *lnd.CertificateNameError {
+					return lnd.CertificateNamesMatch(receiveCredentials.CertPath(), cfg.LNDAddress)
+				},
 				Repair: func(what string) {
 					if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
 						logging.EventPreflightRepair, slog.String("detail", what)); err != nil {
