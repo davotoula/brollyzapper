@@ -1,11 +1,12 @@
 # The off-Umbrel deployment, exercised (spec §19).
 #
-# Every BrollyZapper setting below is the generic one the app has always taken:
-# LND_ADDRESS, LND_CERT_FILE, LND_ADMIN_MACAROON, CREDENTIALS_DIR, DATA_DIR,
-# SERVER_IP, NETWORK_CIDR, TRUSTED_PROXIES, LISTEN_ADDR, ADMIN_PASSWORD,
-# SESSION_SECRET, LOG_LEVEL. No APP_, no UMBREL_, no ${APP_LIGHTNING_NODE_DATA_DIR}.
-# lint_test.go asserts that mechanically, because a promise a test does not hold
-# is a sentence in a spec.
+# Every setting the two app services take is one internal/config reads, and
+# nothing umbrelOS supplies. lint_test.go derives the list from the loaders
+# themselves rather than keeping one, so there is deliberately no list here
+# either: this header used to be one, and it had drifted twice (20i.17).
+#
+# ${APP_PORT} is the one deliberate APP_ name, and it is not a setting: it is
+# this stack's host-port knob, read by compose and never by the app.
 
 name: brollyregtest
 

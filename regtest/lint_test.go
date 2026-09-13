@@ -15,8 +15,13 @@
 package regtest
 
 import (
+	"fmt"
+	"maps"
+	"net"
+	"net/netip"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -100,7 +105,9 @@ var appServices = []string{"brollyzapper", "guard"}
 type compose struct {
 	Services map[string]struct {
 		Image       string            `yaml:"image"`
+		Command     commandLine       `yaml:"command"`
 		Volumes     []string          `yaml:"volumes"`
+		Ports       []string          `yaml:"ports"`
 		Environment map[string]string `yaml:"environment"`
 		// A yaml.Node because this file spells networks two ways — `networks:
 		// [brolly]` for most services, and the mapping form where one needs an
@@ -109,6 +116,41 @@ type compose struct {
 		// looking at.
 		Networks yaml.Node `yaml:"networks"`
 	} `yaml:"services"`
+	// The top-level networks, for the subnet: the one place the range is
+	// declared rather than repeated (TestTheNetworkRangeIsOneFactInAllItsPlaces).
+	Networks map[string]struct {
+		IPAM struct {
+			Config []struct {
+				Subnet string `yaml:"subnet"`
+			} `yaml:"config"`
+		} `yaml:"ipam"`
+	} `yaml:"networks"`
+}
+
+// commandLine is a service's `command:`, which compose accepts in two spellings:
+// a YAML list, one argument per item, or a single string it splits like a shell.
+//
+// BOTH DECODE, rather than []string refusing the string form. A []string field
+// makes a string `command:` on ANY service — bitcoind, a relay — a decode error
+// in load(), which fails every test in this package over a spelling none of
+// them is about. The string form is split on whitespace, which is not compose's
+// shlex: a quoted argument containing a space comes back in pieces. The only
+// arguments asked about here are `--flag=value` with no space in them, so that
+// can only ever split an argument nobody is looking for. What would reopen it:
+// a check that needs a quoted argument whole.
+type commandLine []string
+
+func (c *commandLine) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		*c = strings.Fields(value.Value)
+		return nil
+	}
+	var args []string
+	if err := value.Decode(&args); err != nil {
+		return err
+	}
+	*c = args
+	return nil
 }
 
 // networkSettings is one service's entry in the mapping form of `networks:`.
@@ -362,5 +404,217 @@ func TestServerIPMatchesTheStaticAddress(t *testing.T) {
 		t.Errorf("the guard bakes SERVER_IP=%q and the brollyzapper service answers on %q; "+
 			"the ipaddr caveat would be checked against an address the app does not have",
 			serverIP, pinned)
+	}
+}
+
+// The range is one fact written in four places — the network's subnet, the
+// server's ipv4_address, the guard's NETWORK_CIDR and the server's
+// TRUSTED_PROXIES — and the test above checks the middle two (20i.17).
+//
+// deploy/lint_test.go's TestTheServerHasAFixedAddressAndTheGuardBakesIt records
+// why two is not enough: its first version checked SERVER_IP against
+// ipv4_address and stopped, so changing the subnet and forgetting NETWORK_CIDR
+// left the guard with a stale idea of its network and nothing went red. This
+// file then repeated that history. Subnet-versus-address drift is the loud half
+// — Docker refuses to start — and NETWORK_CIDR and TRUSTED_PROXIES are the
+// silent half, which is the half worth a lint. NETWORK_CIDR is silent twice
+// over: with SERVER_IP set the guard does not read it at all
+// (internal/guard/caveats.go), so a stale one waits for the day SERVER_IP is
+// taken out and then locks both credentials to the wrong range.
+func TestTheNetworkRangeIsOneFactInAllItsPlaces(t *testing.T) {
+	c, _ := load(t)
+	var pinned, onNetwork string
+	for name, settings := range networksOf(t, c, "brollyzapper") {
+		if settings.IPv4 != "" {
+			pinned, onNetwork = settings.IPv4, name
+		}
+	}
+	addr, err := netip.ParseAddr(pinned)
+	if err != nil {
+		t.Fatalf("the brollyzapper service's ipv4_address %q is not an address: %v", pinned, err)
+	}
+	network, ok := c.Networks[onNetwork]
+	if !ok || len(network.IPAM.Config) != 1 {
+		t.Fatalf("the brollyzapper service is addressed on network %q, which does not declare "+
+			"exactly one subnet; a fixed address needs a network with an explicit one", onNetwork)
+	}
+	subnet, err := netip.ParsePrefix(network.IPAM.Config[0].Subnet)
+	if err != nil {
+		t.Fatalf("network %q declares subnet %q, which is not a prefix: %v",
+			onNetwork, network.IPAM.Config[0].Subnet, err)
+	}
+	if !subnet.Contains(addr) {
+		t.Errorf("the brollyzapper service's address %s is outside network %q's subnet %s",
+			addr, onNetwork, subnet)
+	}
+	for _, setting := range []struct{ service, key, why string }{
+		{"guard", "NETWORK_CIDR", "the guard locks both credentials to it the moment SERVER_IP is removed"},
+		{"brollyzapper", "TRUSTED_PROXIES", "the forwarded-for walk trusts exactly this range (spec §7)"},
+	} {
+		value := c.Services[setting.service].Environment[setting.key]
+		if got, err := netip.ParsePrefix(value); err != nil || got != subnet {
+			t.Errorf("the %s service sets %s=%q and network %q's subnet is %s; %s, so changing "+
+				"the range in one place has to change it in all four", setting.service,
+				setting.key, value, onNetwork, subnet, setting.why)
+		}
+	}
+}
+
+// The guard dials `lnd:10009`, and `--tlsextradomain=lnd` is what puts that name
+// in the node's certificate. Without it TLS fails "in a way that reads exactly
+// like a macaroon problem" — the compose comment names the symptom that
+// precisely because somebody paid for it. One fact in two places, and nothing
+// tied them (20i.17).
+//
+// TWO HALVES, because not every dialler is in this file. The first follows each
+// LND_ADDRESS to the service it names. The second requires every node to
+// certify its OWN service name, because init.sh dials both `lnd` and
+// `lnd-payer` by name with --rpcserver, and a shell script's argument is not
+// something a compose lint can read.
+func TestEveryDialledNodeCertifiesTheNameItIsDialledBy(t *testing.T) {
+	c, _ := load(t)
+	certifies := func(service, host string) bool {
+		return slices.Contains(c.Services[service].Command, "--tlsextradomain="+host)
+	}
+
+	dialled := 0
+	for _, name := range slices.Sorted(maps.Keys(c.Services)) {
+		address, ok := c.Services[name].Environment["LND_ADDRESS"]
+		if !ok {
+			continue
+		}
+		dialled++
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			t.Errorf("service %q sets LND_ADDRESS=%q, which is not host:port: %v", name, address, err)
+			continue
+		}
+		if _, ok := c.Services[host]; !ok {
+			t.Errorf("service %q dials %q, which is not a service in this stack", name, host)
+			continue
+		}
+		if !certifies(host, host) {
+			t.Errorf("service %q dials %s, and the %s service's command carries no "+
+				"--tlsextradomain=%s; the certificate will not name the host, and the TLS "+
+				"failure reads exactly like a macaroon problem", name, address, host, host)
+		}
+	}
+
+	nodes := 0
+	for _, name := range slices.Sorted(maps.Keys(c.Services)) {
+		command := c.Services[name].Command
+		if len(command) == 0 || command[0] != "lnd" {
+			continue
+		}
+		nodes++
+		if !certifies(name, name) {
+			t.Errorf("the %s service runs lnd with no --tlsextradomain=%s; everything in this "+
+				"stack dials a node by its service name, init.sh included, so the certificate "+
+				"has to carry it", name, name)
+		}
+	}
+
+	// The controls: an LND_ADDRESS renamed or a command respelled would leave
+	// both loops with nothing to check.
+	if dialled < 2 || nodes < 2 {
+		t.Errorf("found %d services setting LND_ADDRESS and %d running lnd; this stack has "+
+			"two of each, so the checks above are reading the wrong thing", dialled, nodes)
+	}
+}
+
+// The app is published on the SAME port it listens on, deliberately: the
+// lightning address is http://localhost:8080, and it has to reach the app both
+// from the host and from inside the container, where the self-probe fetches it.
+// The compose comment says so; nothing checked it (20i.17).
+//
+// BOTH SIDES OF THE MAPPING. The container side has to be the listen port or
+// nothing is published at all. The host side has to be it too, and it is the
+// one a tidy-up changes — `8081:8080` publishes a working app whose self-probe
+// fails while everything else looks fine. The host side is `${APP_PORT:-8080}`,
+// an operator's knob, so what is checked is its DEFAULT.
+func TestTheAppIsPublishedOnThePortItListensOn(t *testing.T) {
+	c, _ := load(t)
+	app := c.Services["brollyzapper"]
+	_, listen, err := net.SplitHostPort(app.Environment["LISTEN_ADDR"])
+	if err != nil {
+		t.Fatalf("LISTEN_ADDR=%q is not host:port: %v", app.Environment["LISTEN_ADDR"], err)
+	}
+	if len(app.Ports) != 1 {
+		t.Fatalf("the brollyzapper service publishes %d ports %v; it publishes exactly one, "+
+			"the port it listens on", len(app.Ports), app.Ports)
+	}
+	host, container, err := publishedPorts(app.Ports[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if container != listen || host != listen {
+		t.Errorf("the brollyzapper service is published as %q (host %s, container %s) and "+
+			"listens on %s; all three have to be the same number, or the self-probe cannot "+
+			"reach the lightning address it is checking", app.Ports[0], host, container, listen)
+	}
+}
+
+// publishedPorts reads compose's short port syntax — [ip:]host:container[/proto]
+// — with the host side either a number or `${VAR:-number}`, in which case the
+// default is returned. Any other spelling is an error rather than a guess.
+func publishedPorts(mapping string) (host, container string, err error) {
+	mapping, _, _ = strings.Cut(mapping, "/")
+	cut := strings.LastIndex(mapping, ":")
+	if cut < 0 {
+		return "", "", fmt.Errorf("port %q publishes no host port", mapping)
+	}
+	hostSide, container := mapping[:cut], mapping[cut+1:]
+	if m := defaultedPortRE.FindStringSubmatch(hostSide); m != nil {
+		return m[1], container, nil
+	}
+	if i := strings.LastIndex(hostSide, ":"); i >= 0 {
+		hostSide = hostSide[i+1:] // an ip: prefix
+	}
+	if !numericRE.MatchString(hostSide) || !numericRE.MatchString(container) {
+		return "", "", fmt.Errorf("port %q is not a spelling this lint reads", mapping)
+	}
+	return hostSide, container, nil
+}
+
+var (
+	defaultedPortRE = regexp.MustCompile(`^\$\{[A-Z_][A-Z0-9_]*:-([0-9]+)\}$`)
+	numericRE       = regexp.MustCompile(`^[0-9]+$`)
+)
+
+func TestCommandLineDecodesBothSpellings(t *testing.T) {
+	for _, doc := range []string{
+		"command: [lnd, --tlsextradomain=lnd]",
+		"command:\n  - lnd\n  - --tlsextradomain=lnd   # a trailing comment is not an argument\n",
+		"command: lnd  --tlsextradomain=lnd",
+	} {
+		var got struct {
+			Command commandLine `yaml:"command"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &got); err != nil {
+			t.Errorf("decoding %q: %v", doc, err)
+			continue
+		}
+		if want := []string{"lnd", "--tlsextradomain=lnd"}; !slices.Equal(got.Command, want) {
+			t.Errorf("decoding %q = %q, want %q", doc, got.Command, want)
+		}
+	}
+}
+
+func TestPublishedPortsReadsTheSpellingsItClaims(t *testing.T) {
+	for _, tc := range []struct {
+		mapping, host, container string
+		wantErr                  bool
+	}{
+		{mapping: "${APP_PORT:-8080}:8080", host: "8080", container: "8080"},
+		{mapping: "8081:8080", host: "8081", container: "8080"},
+		{mapping: "127.0.0.1:8080:8080/tcp", host: "8080", container: "8080"},
+		{mapping: "${APP_PORT}:8080", wantErr: true},
+		{mapping: "8080", wantErr: true},
+	} {
+		host, container, err := publishedPorts(tc.mapping)
+		if (err != nil) != tc.wantErr || host != tc.host || container != tc.container {
+			t.Errorf("publishedPorts(%q) = %q, %q, %v; want %q, %q, error=%v", tc.mapping,
+				host, container, err, tc.host, tc.container, tc.wantErr)
+		}
 	}
 }

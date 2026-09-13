@@ -187,7 +187,13 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 // that stopped matching cannot quietly satisfy a comparison.
 func lineOf(t *testing.T, lines []string, needle string) int {
 	t.Helper()
-	return lineOfAfter(t, lines, needle, 0)
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), needle) {
+			return i + 1
+		}
+	}
+	t.Fatalf("no line in the package compose sets %q", needle)
+	return 0
 }
 
 // Box-verified 2026-08-21: PROXY_TRUST_UPSTREAM=true makes app_proxy forward a
@@ -399,55 +405,61 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 		}
 	}
 	// THE EXPLANATION HAS TO SIT ON THE LINE IT EXPLAINS, which a whole-file
-	// scan cannot say. ON THE SERVER'S LINE, which is where it sits: the guard's
-	// user: at the top of the file carries no comment at all, so applying this
-	// to both would be red on the package as it stands, and the brief forbids
-	// editing the package. Filed rather than widened — the general rule is what
-	// this says, and the file satisfies it once. `strings.Contains(raw, "65532")` was satisfied by prose
+	// scan cannot say. `strings.Contains(raw, "65532")` was satisfied by prose
 	// anywhere in the file — and 65532 is valid hex, so one of the two image
 	// digests this file re-pins every release could satisfy it with no comment
 	// present at all. Worse, a live `user: "65532"` line would satisfy the check
-	// that exists to warn about that value. The adjacency idiom 200 lines up is
-	// what this check meant: the comment block immediately above the server's
-	// user: line names the uid the images default to.
-	lines := strings.Split(raw, "\n")
-	userLine := lineOfAfter(t, lines, "user:", lineOf(t, lines, "server:"))
-	if !strings.Contains(commentBlockAbove(lines, userLine), "65532") {
-		t.Errorf("the comment above the server's user: at line %d does not name 65532; the "+
-			"next person to touch user: will not know why 1000 matters, and an explanation "+
-			"somewhere else in the file is not one they will find", userLine)
-	}
-}
-
-// lineOfAfter is lineOf from a given 1-based line rather than from the top, and
-// lineOf is the after=0 case of it — one loop, because the three things that
-// make it safe (1-based, a trimmed PREFIX rather than a substring, and Fatalf
-// rather than a sentinel) have to stay true of both.
-//
-// The package sets `user:` twice and the uid is explained above the second;
-// searching from the top finds the guard's and asserts against the wrong line.
-func lineOfAfter(t *testing.T, lines []string, needle string, after int) int {
-	t.Helper()
-	for i := after; i < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), needle) {
-			return i + 1
+	// that exists to warn about that value.
+	//
+	// ON BOTH user: LINES since `20i.17`. It covered the server's alone, because
+	// the guard's had no comment and widening the rule would have been red on
+	// the package; the guard's line now carries one, and the two lines are one
+	// decision, so either can be the one somebody changes.
+	//
+	// THE PARSER SAYS WHICH COMMENT BELONGS TO WHICH LINE. yaml.v3 attaches the
+	// comment block immediately above a key to that key's HeadComment, so this
+	// asks the user: key of the named service — not the first `user:` line found
+	// below a `guard:` somewhere in the text, which reads the server's comment
+	// the day the guard's user: line is deleted.
+	for _, name := range []string{"guard", "server"} {
+		user, ok := serviceKey(t, raw, name, "user")
+		if !ok {
+			continue // already reported above, by value
+		}
+		if !strings.Contains(user.HeadComment, "65532") {
+			t.Errorf("the comment above the %s's user: at line %d does not name 65532; the "+
+				"next person to touch user: will not know why 1000 matters, and an explanation "+
+				"somewhere else in the file is not one they will find", name, user.Line)
 		}
 	}
-	t.Fatalf("no line below %d sets %q in the package compose", after, needle)
-	return 0
 }
 
-// commentBlockAbove is the run of comment lines immediately above the 1-based
-// line n, in file order. It stops at the first line that is not a comment, so a
-// comment attached to some other setting cannot be read as this one's — which
-// is the whole difference between "the file explains it" and "this line is
-// explained".
-func commentBlockAbove(lines []string, n int) string {
-	first := n - 1
-	for first > 0 && strings.HasPrefix(strings.TrimSpace(lines[first-1]), "#") {
-		first--
+// serviceKey is the KEY node of one setting on one service — the node that
+// carries the setting's line and the comment block written above it.
+func serviceKey(t *testing.T, raw, service, key string) (*yaml.Node, bool) {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing the package compose as a document: %v", err)
 	}
-	return strings.Join(lines[first:n-1], "\n")
+	_, services := mappingEntry(doc.Content[0], "services")
+	_, svc := mappingEntry(services, service)
+	k, _ := mappingEntry(svc, key)
+	return k, k != nil
+}
+
+// mappingEntry is one key of a yaml mapping node and its value. A nil or
+// non-mapping node has no keys, so a chain of lookups fails once, at the end.
+func mappingEntry(node *yaml.Node, key string) (k, v *yaml.Node) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i], node.Content[i+1]
+		}
+	}
+	return nil, nil
 }
 
 // The framework already defaults app_proxy auth on, and setting it explicitly
