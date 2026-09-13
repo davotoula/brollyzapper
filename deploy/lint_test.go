@@ -642,17 +642,21 @@ func TestBothServicesRunAsTheUidThatOwnsTheData(t *testing.T) {
 // line left the check green — the same failure this rule exists to fix, one
 // comment later. The file's own convention for a commented setting is
 // `#NAME=value` with nothing between, so that is what counts.
-func assignedInExample(t *testing.T) map[string]bool {
+//
+// THE VALUE IS KEPT, per assignment, because that same paragraph is a claim about
+// the value too — and until 20i.14 nothing checked it. See
+// TestTheExampleShowsEachSettingAtTheTemplatesDefault.
+func assignedInExample(t *testing.T) map[string][]string {
 	t.Helper()
 	raw, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatalf("reading %s: %v", envPath, err)
 	}
-	assignment := regexp.MustCompile(`^#?([A-Z_][A-Z0-9_]*)=`)
-	out := map[string]bool{}
+	assignment := regexp.MustCompile(`^#?([A-Z_][A-Z0-9_]*)=(.*)$`)
+	out := map[string][]string{}
 	for _, line := range strings.Split(string(raw), "\n") {
 		if m := assignment.FindStringSubmatch(line); m != nil {
-			out[m[1]] = true
+			out[m[1]] = append(out[m[1]], m[2])
 		}
 	}
 	return out
@@ -679,11 +683,55 @@ func assignedInExample(t *testing.T) map[string]bool {
 // both tomorrows.
 func interpolatedNames(t *testing.T, raw string) map[string]bool {
 	t.Helper()
+	out := map[string]bool{}
+	for _, value := range unescapedScalars(t, raw) {
+		for _, m := range anyInterpolationRE.FindAllStringSubmatch(value, -1) {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// interpolatedDefaults is every default the template gives a variable, by name —
+// interpolatedNames' sibling, reading the same scalars for the same reasons.
+//
+// A SIBLING RATHER THAN AN EXTENSION: interpolatedNames' contract is the set of
+// names, and anyInterpolationRE captures the name only, by a comment that names
+// its identical twin in regtest/lint_test.go. Widening either would break the one
+// drift detector those copies have.
+//
+// A SLICE PER NAME, because DATA_DIR is read with its default seven times over,
+// and a template that disagreed with itself is a finding, not a coin toss.
+//
+// `:-` and `-` both count — compose substitutes for unset-or-empty and for unset
+// respectively, and either is what an operator who leaves the line commented
+// gets. `:?` and `?` are an error message, never a value, so they do not match.
+func interpolatedDefaults(t *testing.T, raw string) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, value := range unescapedScalars(t, raw) {
+		for _, m := range interpolationDefaultRE.FindAllStringSubmatch(value, -1) {
+			out[m[1]] = append(out[m[1]], m[2])
+		}
+	}
+	return out
+}
+
+// ${NAME:-default} and ${NAME-default}: m[1] the name, m[2] the default. A nested
+// ${A:-${B}} is not read correctly — the default stops at the first `}` — and the
+// template has none; the parser table below says so rather than this comment
+// alone.
+var interpolationDefaultRE = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*):?-([^}]*)\}`)
+
+// unescapedScalars is every scalar's value in the template with compose's `$$`
+// escape removed, which is what both interpolation readers above scan.
+func unescapedScalars(t *testing.T, raw string) []string {
+	t.Helper()
 	var doc yaml.Node
 	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
 		t.Fatalf("parsing %s as a document: %v", composePath, err)
 	}
-	out := map[string]bool{}
+	var out []string
 	for _, scalar := range scalarNodes(&doc) {
 		// `$$` IS COMPOSE'S ESCAPE FOR A LITERAL `$`, never an interpolation, and
 		// Go's regexp has no lookbehind to say so. Removing the pairs first is
@@ -692,10 +740,7 @@ func interpolatedNames(t *testing.T, raw string) map[string]bool {
 		// with it too, a literal dollar followed by a real interpolation.
 		// Measured: without this, `$$NOT_REAL_VAR` demanded an assignment for a
 		// name compose never reads.
-		value := strings.ReplaceAll(scalar.Value, "$$", "")
-		for _, m := range anyInterpolationRE.FindAllStringSubmatch(value, -1) {
-			out[m[1]] = true
-		}
+		out = append(out, strings.ReplaceAll(scalar.Value, "$$", ""))
 	}
 	return out
 }
@@ -744,7 +789,7 @@ func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 	assigned := assignedInExample(t)
 	seen := interpolatedNames(t, raw)
 	for _, name := range slices.Sorted(maps.Keys(seen)) {
-		if !assigned[name] {
+		if len(assigned[name]) == 0 {
 			t.Errorf("%s interpolates ${%s} and %s has no assignment line for it — a mention "+
 				"in a comment is not one. The operator cannot set what they are not shown, "+
 				"and it interpolates to empty. A commented `#%s=<default>` counts.",
@@ -761,6 +806,101 @@ func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
 		t.Errorf("found %d interpolated variables in %s; the template takes at least the four "+
 			"an operator must fill, so this check is reading the wrong thing", len(seen), composePath)
 	}
+}
+
+// TestTheExampleShowsEachSettingAtTheTemplatesDefault holds the other half of
+// assignedInExample's argument: `#HTTP_PORT=8080` is fine BECAUSE the operator
+// is shown the value they get by leaving it commented. Nothing checked that value
+// (20i.14). Every pair agreed by hand, which is the state that drifts — and the
+// caps paragraph now carries a second pair of numbers beside the real ones.
+//
+// VALUES, NOT RAW STRINGS: both sides are trimmed, and the example's surrounding
+// quotes are dropped as compose's own .env reader drops them. A byte comparison
+// fails `100000000` against ` 100000000` on a stray space, and a check that is
+// red for that gets deleted rather than fixed.
+//
+// Names with no default in the template are not compared — LND_DIR, LND_ADDRESS
+// and LND_NETWORK are the operator's to fill, and the example's value for those
+// is an illustration.
+func TestTheExampleShowsEachSettingAtTheTemplatesDefault(t *testing.T) {
+	// TRUSTED_PROXIES IS SHOWN AT A SUGGESTED VALUE, NOT ITS DEFAULT. The template
+	// defaults it to empty, which trusts no forwarding header; the example shows
+	// the app network's range for an operator who adds a reverse proxy, and says
+	// so in capitals. That difference is the point of the line, so it is exempt
+	// here — and required to STAY different below, because a template default
+	// that quietly started trusting a range is a security change this check would
+	// otherwise now wave through as "the two agree".
+	exempt := map[string]string{
+		"TRUSTED_PROXIES": "the example shows the value for a reverse-proxy install; the default is empty",
+	}
+
+	_, raw := loadCompose(t)
+	assigned := assignedInExample(t)
+	defaults := interpolatedDefaults(t, raw)
+
+	compared := 0
+	for _, name := range slices.Sorted(maps.Keys(defaults)) {
+		var want []string
+		for _, d := range defaults[name] {
+			want = append(want, strings.TrimSpace(d))
+		}
+		slices.Sort(want)
+		want = slices.Compact(want)
+		if len(want) > 1 {
+			t.Errorf("%s gives ${%s} %d different defaults %q; an operator leaving it unset "+
+				"gets a different value depending on which line reads it", composePath, name, len(want), want)
+			continue
+		}
+		shown := assigned[name]
+		if len(shown) == 0 {
+			continue // TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates owns this
+		}
+		for _, value := range shown {
+			got := envValue(value)
+			if reason, ok := exempt[name]; ok {
+				if got == want[0] {
+					t.Errorf("%s now shows %s=%s, which IS the template's default — the exemption "+
+						"(%s) no longer describes the files. If the default moved, that is a change "+
+						"to what the app trusts; decide it, then remove the exemption", envPath, name, got, reason)
+				}
+				continue
+			}
+			compared++
+			if got != want[0] {
+				t.Errorf("%s shows %s=%s, but %s defaults it to %q — an operator who leaves the line "+
+					"commented gets the template's value, not the one they were shown",
+					envPath, name, got, composePath, want[0])
+			}
+		}
+	}
+	for name := range exempt {
+		if len(defaults[name]) == 0 || len(assigned[name]) == 0 {
+			t.Errorf("the exemption names %s, which %s no longer reads with a default or %s no "+
+				"longer shows; remove it", name, composePath, envPath)
+		}
+	}
+	// A reader that stopped matching compares nothing and passes. The template
+	// defaults eight settings the example shows at a real value, and ADMIN_PASSWORD
+	// and SESSION_SECRET at empty; fewer than eight means the capture broke, not
+	// that the files got shorter.
+	if compared < 8 {
+		t.Errorf("compared %d example values against template defaults; there are at least eight, "+
+			"so one of the two readers is reading the wrong thing", compared)
+	}
+}
+
+// envValue is an .env.example right-hand side as compose's .env reader yields
+// it: trimmed, one pair of matching surrounding quotes removed. An unquoted
+// ` #` starts a comment there, so it ends the value here.
+func envValue(rhs string) string {
+	value := strings.TrimSpace(rhs)
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+		return value[1 : len(value)-1]
+	}
+	if before, _, found := strings.Cut(value, " #"); found {
+		value = strings.TrimSpace(before)
+	}
+	return value
 }
 
 // TestComposeValidatesTheTemplate is check 6, and it SKIPS LOUDLY rather than
@@ -952,5 +1092,62 @@ func TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode(t *testing.T) {
 				t.Errorf("interpolatedNames(%q) = %v, want %v", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestInterpolatedDefaultsReadsOnlyARealDefault is the parser table for the
+// value comparison, for the reason the one above exists: every row here is a
+// template shape that would make TestTheExampleShowsEachSettingAtTheTemplatesDefault
+// compare against something compose never substitutes.
+func TestInterpolatedDefaultsReadsOnlyARealDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want map[string][]string
+	}{{
+		name: "both default spellings, and a name read twice keeps both",
+		raw:  "services:\n  s:\n    environment:\n      A: ${HTTP_PORT:-8080}\n      B: ${LOG_LEVEL-INFO}\n      C: ${HTTP_PORT:-8080}\n",
+		want: map[string][]string{"HTTP_PORT": {"8080", "8080"}, "LOG_LEVEL": {"INFO"}},
+	}, {
+		name: "an empty default is a default",
+		raw:  "services:\n  s:\n    environment:\n      A: ${TRUSTED_PROXIES:-}\n",
+		want: map[string][]string{"TRUSTED_PROXIES": {""}},
+	}, {
+		name: "a required variable's message is not a default, and neither is no default",
+		raw:  "services:\n  s:\n    environment:\n      A: ${LND_DIR:?LND_DIR is unset}\n      B: ${LND_ADDRESS}\n      C: $LND_NETWORK\n",
+		want: map[string][]string{},
+	}, {
+		name: "a comment's default is not the template's",
+		raw:  "# was ${HTTP_PORT:-9090}\nservices:\n  s:\n    ports:\n      - \"${HTTP_PORT:-8080}:8080\"\n",
+		want: map[string][]string{"HTTP_PORT": {"8080"}},
+	}, {
+		name: "an escaped dollar is not an interpolation",
+		raw:  "services:\n  s:\n    environment:\n      A: \"$${HTTP_PORT:-9090}\"\n",
+		want: map[string][]string{},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := interpolatedDefaults(t, tc.raw)
+			if !maps.EqualFunc(got, tc.want, slices.Equal) {
+				t.Errorf("interpolatedDefaults(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnvValueIsTheValueComposeReads pins the normalisation the comparison
+// depends on, so that "trim both sides" cannot quietly become a byte compare.
+func TestEnvValueIsTheValueComposeReads(t *testing.T) {
+	for rhs, want := range map[string]string{
+		"8080":         "8080",
+		" 100000000 ":  "100000000",
+		`"./data"`:     "./data",
+		`'INFO'`:       "INFO",
+		"":             "",
+		"8080  # port": "8080",
+		`"`:            `"`,
+	} {
+		if got := envValue(rhs); got != want {
+			t.Errorf("envValue(%q) = %q, want %q", rhs, got, want)
+		}
 	}
 }
