@@ -529,6 +529,7 @@ func (s *Server) page(ctx context.Context, title string) (web.PageData, settings
 	data := web.PageData{Title: title, Degraded: degraded(report)}
 	if session, ok := SessionFrom(ctx); ok {
 		data.CSRFToken = session.CSRFToken
+		data.SignedIn = true
 	}
 	return data, values, report
 }
