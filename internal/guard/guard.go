@@ -190,10 +190,13 @@ func (g *Guard) Close() error { return g.node.Close() }
 // CopyCertificate re-copies LND's certificate into the credential volume. The
 // guard does this on every start: it is how a regenerated certificate reaches
 // the server, which holds no mount from the lightning app at all (§6).
+//
+// A PERMISSION FAILURE NAMES WHO OWNS THE FILE (20i.14), through the same
+// advice PreflightReadable gives at startup.
 func (g *Guard) CopyCertificate() error {
 	certificate, err := os.ReadFile(g.certSourcePath)
 	if err != nil {
-		return fmt.Errorf("guard: reading %s: %w", g.certSourcePath, err)
+		return fmt.Errorf("guard: reading %s: %w", g.certSourcePath, withOwnerAdvice(g.certSourcePath, err))
 	}
 	return WriteCredential(g.credentialPath(lnd.CertFile), certificate, 0o600)
 }

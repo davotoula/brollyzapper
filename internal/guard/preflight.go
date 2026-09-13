@@ -74,3 +74,81 @@ func PreflightMounts(paths ...string) error {
 	}
 	return nil
 }
+
+// PreflightReadable asserts this process can READ every path, and when it
+// cannot, says who owns the file and what to set (20i.14).
+//
+// SEPARATE FROM PreflightMounts BECAUSE IT IS NOT FATAL. A mount that is a
+// directory is a container that can do nothing, and exiting with the path to
+// remove is the whole help. An unreadable file is a guard that can still answer
+// Status, so the admin UI shows what is wrong rather than the tile going dead
+// (§11) — the reason the certificate copy was never fatal either.
+//
+// AT STARTUP, AND FOR THE MACAROON ABOVE ALL. LND writes tls.cert 0644 and
+// admin.macaroon 0640, so a guard running as the wrong uid copies the certificate
+// without complaint and first meets the macaroon inside a gRPC credential, where
+// the error arrives with no owner in it. This is the one place both files are
+// opened before anything depends on them.
+//
+// Opened, not judged from the mode bits: whether THIS uid may read depends on
+// its groups too, and the open is the question the later read will ask.
+func PreflightReadable(paths ...string) error {
+	var errs []error
+	for _, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("guard: cannot read %s: %w", path, withOwnerAdvice(path, err)))
+			continue
+		}
+		_ = f.Close()
+	}
+	return errors.Join(errs...)
+}
+
+// withOwnerAdvice adds who owns path, and what to set, to a permission error;
+// any other error it returns untouched. The result still matches
+// fs.ErrPermission.
+func withOwnerAdvice(path string, err error) error {
+	if !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		return err
+	}
+	return fmt.Errorf("%w. %s", err, unreadableAdvice(filepath.Base(path), info, os.Getuid(), os.Getgid()))
+}
+
+// unreadableAdvice says who owns a file this process was refused, and what to
+// set so it is not. uid and gid are this process's, passed in so the branch an
+// operator hits — a different owner — is testable without a second user.
+func unreadableAdvice(name string, info fs.FileInfo, uid, gid int) string {
+	ownerUID, ownerGID, ok := fileOwner(info)
+	return ownershipAdvice(name, ownerUID, ownerGID, ok, uid, gid)
+}
+
+// ownershipAdvice is the sentence itself.
+//
+// RUN_AS_UID and RUN_AS_GID are the plain-Docker template's names for the
+// containers' user, not settings this binary reads; they are named because they
+// are what the operator edits. On umbrelOS LND's files and the containers
+// normally share 1000:1000, which is why this is a plain-Docker message.
+func ownershipAdvice(name string, ownerUID, ownerGID uint32, ok bool, uid, gid int) string {
+	switch {
+	case !ok:
+		return fmt.Sprintf("%s is not readable by the user this process runs as; set RUN_AS_UID and "+
+			"RUN_AS_GID to the file's owner, or make it readable by the group RUN_AS_GID names", name)
+	case ownerUID == 0:
+		// Never "set RUN_AS_UID=0": the template deliberately does not run the
+		// containers as root, and DEPLOYING says to stop if the owner is 0.
+		return fmt.Sprintf("%s is owned by root (uid 0:%d) and this process runs as %d:%d; do not run "+
+			"the app as root — make the file readable by a group and set RUN_AS_GID to it", name, ownerGID, uid, gid)
+	case int64(ownerUID) == int64(uid):
+		return fmt.Sprintf("%s is owned by uid %d:%d, which this process runs as, so it is the file's "+
+			"mode that refuses it; give its owner read permission", name, ownerUID, ownerGID)
+	default:
+		return fmt.Sprintf("%s is owned by uid %d:%d and this process runs as %d:%d; set RUN_AS_UID=%d and "+
+			"RUN_AS_GID=%d, or make the file readable by the group RUN_AS_GID names",
+			name, ownerUID, ownerGID, uid, gid, ownerUID, ownerGID)
+	}
+}

@@ -67,6 +67,12 @@ func run(ctx context.Context, args []string, env config.Lookup, stdout, stderr i
 		log.Error("mount preflight failed", "error", err.Error())
 		return exitConfig
 	}
+	// Not fatal, for the reason below; but a file the guard cannot read is named
+	// with its owner and the two settings that fix it, which is what DEPLOYING
+	// step 3 would otherwise have the operator run stat for (20i.14).
+	if err := guard.PreflightReadable(cfg.LNDCertFile, cfg.LNDAdminMacaroonFile); err != nil {
+		log.Error("cannot read a file mounted from LND", "error", err.Error())
+	}
 	// Not fatal: the guard can still answer Status, so the admin UI shows what
 	// is wrong rather than the tile going dead (§11). But it is the difference
 	// between an operator reading one chown command and chasing a bake that
