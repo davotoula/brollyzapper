@@ -593,8 +593,9 @@ func TestBothServicesRunAsTheUidThatOwnsTheData(t *testing.T) {
 	guard, server := compose.Services["guard"].User, compose.Services["server"].User
 
 	// THE SAME VALUE, not a particular one. The uid is overridable because an
-	// Ubuntu host's LND files usually belong to an `lnd` user at mode 0600 and a
-	// guard running as 1000 cannot read them — so the number is the operator's.
+	// Ubuntu host's LND files usually belong to an `lnd` user, admin.macaroon at
+	// mode 0640, and a guard running as 1000 cannot read it — so the number is the
+	// operator's.
 	// What is NOT theirs is letting the two drift: the guard writes
 	// recv.macaroon into the credential volume the server reads, and a
 	// mismatch shows up as a bake failure on first run rather than as anything
