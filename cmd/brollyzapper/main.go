@@ -336,10 +336,8 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// THE RECEIVE CLIENT, and GetInfo on it: read-only, in ReceivePermissions,
 	// and never the client that holds the spend macaroon. A seam test holds this
 	// by watching which macaroon the node is sent.
-	serverCredential := preflight.NewCredentialProbe(ctx, func(ctx context.Context) error {
-		_, err := node.GetInfo(ctx)
-		return err
-	}, preflight.ProbeOptions{})
+	serverCredential := preflight.NewCredentialProbe(ctx,
+		serverCredentialProbe(node, receiveCredentials), preflight.ProbeOptions{})
 	// ONE report, built from one set of inputs, differing in a single argument:
 	// where the guard's status comes from. The UI reads the cache; the ladder
 	// reads the socket. Two closures over one construction, so the policy cannot
@@ -545,6 +543,25 @@ const guardEventInterval = 5 * time.Minute
 // response's events to the relay. Polling once before the first tick is
 // deliberate — a bake raised at install time should be on the Security page
 // when the operator first opens it, not five minutes later.
+// serverCredentialProbe is the call behind the Node page's server line: GetInfo
+// on the receive client (`20i.21`).
+//
+// A FAILURE WITH NO CREDENTIAL ON DISK IS "NOT LINKED", whatever code it came
+// back with. Once the connection is cached, grpc-go stringifies the per-RPC
+// credential's ErrNotLinked into an Unauthenticated status — the code the row
+// reads as the node refusing the credential — which is why lnd's recordState asks
+// the credential source rather than the error. Measured: without this, deleting
+// recv.macaroon after one good probe reported a refusal.
+func serverCredentialProbe(node *lnd.Client, creds lnd.CredentialSource) func(context.Context) error {
+	return func(ctx context.Context) error {
+		_, err := node.GetInfo(ctx)
+		if err != nil && !creds.Ready() {
+			return lnd.ErrNotLinked
+		}
+		return err
+	}
+}
+
 func runGuardEvents(ctx context.Context, broker *api.CachedBroker, log *slog.Logger) {
 	poll := func() {
 		if _, err := broker.Status(ctx); err != nil && ctx.Err() == nil {
