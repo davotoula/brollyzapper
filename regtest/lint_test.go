@@ -15,18 +15,15 @@
 package regtest
 
 import (
-	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
-
+	"github.com/davotoula/brollyzapper/internal/composelint"
 	"github.com/davotoula/brollyzapper/internal/config"
 )
 
@@ -101,22 +98,16 @@ const passwordManagedVar = "ADMIN_PASSWORD_MANAGED"
 // legitimately mention anything.
 var appServices = []string{"brollyzapper", "guard"}
 
+// compose is what THIS lint reads of the stack. Ports and a service's networks
+// are not fields: compose spells both two ways, and the document answers them
+// on demand (composelint's Ports and Networks), so a spelling no check here is
+// about cannot fail the decode for every test in the package.
 type compose struct {
 	Services map[string]struct {
-		Image   string      `yaml:"image"`
-		Command commandLine `yaml:"command"`
-		Volumes []string    `yaml:"volumes"`
-		// A yaml.Node, like Networks: compose also takes a long mapping form,
-		// and a []string would make that spelling on any service a decode error
-		// in load() that fails every test here. Decoded where it is read.
-		Ports       yaml.Node         `yaml:"ports"`
-		Environment map[string]string `yaml:"environment"`
-		// A yaml.Node because this file spells networks two ways — `networks:
-		// [brolly]` for most services, and the mapping form where one needs an
-		// address or an alias. Decoding the mapping on demand keeps both legal
-		// and keeps a check from having to ask the raw text which service it is
-		// looking at.
-		Networks yaml.Node `yaml:"networks"`
+		Image       string                  `yaml:"image"`
+		Command     composelint.CommandLine `yaml:"command"`
+		Volumes     []string                `yaml:"volumes"`
+		Environment map[string]string       `yaml:"environment"`
 	} `yaml:"services"`
 	// The top-level networks, for the subnet: the one place the range is
 	// declared rather than repeated (TestTheNetworkRangeIsOneFactInAllItsPlaces).
@@ -129,66 +120,30 @@ type compose struct {
 	} `yaml:"networks"`
 }
 
-// commandLine is a service's `command:`, which compose accepts in two spellings:
-// a YAML list, one argument per item, or a single string it splits like a shell.
-//
-// BOTH DECODE, rather than []string refusing the string form. A []string field
-// makes a string `command:` on ANY service — bitcoind, a relay — a decode error
-// in load(), which fails every test in this package over a spelling none of
-// them is about. The string form is split on whitespace, which is not compose's
-// shlex: a quoted argument containing a space comes back in pieces. The only
-// arguments asked about here are `--flag=value` with no space in them, so that
-// can only ever split an argument nobody is looking for. What would reopen it:
-// a check that needs a quoted argument whole.
-type commandLine []string
-
-func (c *commandLine) UnmarshalYAML(value *yaml.Node) error {
-	if value.Kind == yaml.ScalarNode {
-		*c = strings.Fields(value.Value)
-		return nil
-	}
-	var args []string
-	if err := value.Decode(&args); err != nil {
-		return err
-	}
-	*c = args
-	return nil
-}
-
-// networkSettings is one service's entry in the mapping form of `networks:`.
-// The sequence form decodes into it as an error, which is the right answer for
-// every caller here: they are asking for something only the mapping form can
-// carry.
-type networkSettings struct {
-	IPv4    string   `yaml:"ipv4_address"`
-	Aliases []string `yaml:"aliases"`
-}
-
-func networksOf(t *testing.T, c compose, service string) map[string]networkSettings {
+// networksOf is a service's networks in the mapping form, the only form that can
+// carry an address or an alias.
+func networksOf(t *testing.T, c compose, doc *composelint.Document, service string) map[string]composelint.NetworkSettings {
 	t.Helper()
-	s, ok := c.Services[service]
+	_, ok := c.Services[service]
 	if !ok {
 		t.Fatalf("there is no %q service", service)
 	}
-	var out map[string]networkSettings
-	if err := s.Networks.Decode(&out); err != nil {
+	out, err := doc.Networks(service)
+	if err != nil {
 		t.Fatalf("service %q does not give its networks in the mapping form, so it can carry "+
 			"neither an address nor an alias: %v", service, err)
 	}
 	return out
 }
 
-func load(t *testing.T) (compose, string) {
+// load is the stack, decoded into this lint's own struct, and its document.
+// There is no text: a check that wants to know what the file says asks the
+// document (BrollyZap-20i.18).
+func load(t *testing.T) (compose, *composelint.Document) {
 	t.Helper()
-	raw, err := os.ReadFile(composePath)
-	if err != nil {
-		t.Fatalf("reading %s: %v", composePath, err)
-	}
 	var c compose
-	if err := yaml.Unmarshal(raw, &c); err != nil {
-		t.Fatalf("parsing %s: %v", composePath, err)
-	}
-	return c, string(raw)
+	doc := composelint.Load(t, composePath, &c)
+	return c, doc
 }
 
 // Criterion 2, and the whole point of the directory: no Umbrel anywhere.
@@ -218,18 +173,14 @@ func load(t *testing.T) (compose, string) {
 // `APP_` alone is still not the rule: APP_PORT is this stack's own host-port
 // knob. The umbrelOS families are named.
 func TestComposeNamesNothingUmbrelSpecific(t *testing.T) {
-	_, raw := load(t)
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("parsing %s as a document: %v", composePath, err)
-	}
+	_, doc := load(t)
 	umbrelFamilies := []string{"APP_LIGHTNING", "APP_DATA_DIR", "APP_BITCOIN", "APP_PASSWORD", "APP_BROLLYZAPPER"}
 	interpolation := regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
 	// Not variables, so they are matched as text — in a scalar, which is still
 	// not the raw file: a path in a comment explaining what is absent must not
 	// fail the package.
 	textual := []string{"UMBREL_", "app-data"}
-	for _, scalar := range scalarNodes(&doc) {
+	for _, scalar := range doc.Scalars() {
 		for _, m := range interpolation.FindAllStringSubmatch(scalar.Value, -1) {
 			for _, family := range umbrelFamilies {
 				if strings.HasPrefix(m[1], family) {
@@ -246,25 +197,6 @@ func TestComposeNamesNothingUmbrelSpecific(t *testing.T) {
 			}
 		}
 	}
-}
-
-// scalarNodes is every scalar in a YAML document, keys included, carrying its
-// Value and its Line.
-//
-// DELIBERATELY DUPLICATED, byte-identical and under this same name, in
-// umbrel/lint_test.go and deploy/lint_test.go — three copies, and nothing
-// detects drift between them but the name, so the name is kept identical on
-// purpose. Not extracted, on size and shape: deploy/lint_test.go's package
-// comment carries the argument, and BrollyZap-20i.18 the sequencing.
-func scalarNodes(node *yaml.Node) []*yaml.Node {
-	if node.Kind == yaml.ScalarNode {
-		return []*yaml.Node{node}
-	}
-	var out []*yaml.Node
-	for _, child := range node.Content {
-		out = append(out, scalarNodes(child)...)
-	}
-	return out
 }
 
 // Every environment key the two app services take must be a generic setting.
@@ -356,7 +288,7 @@ func TestGuardDoesMountTheMacaroonAsASingleFile(t *testing.T) {
 // tidying the alias away would not break the stack — they would silently make
 // the criterion unfailable, which is worse.
 func TestTheSecondRelayKeepsItsDottedAlias(t *testing.T) {
-	c, _ := load(t)
+	c, doc := load(t)
 	if _, ok := c.Services["relay2"]; !ok {
 		t.Fatal("service \"relay2\" is missing; e2e.sh criterion 9 cannot open a " +
 			"sender-named connection without it, and would pass having tested nothing")
@@ -368,7 +300,7 @@ func TestTheSecondRelayKeepsItsDottedAlias(t *testing.T) {
 	// asserting the opposite of its own name. Measured on 279678d. That is the
 	// hole this test's own comment was written to close.
 	dotted := false
-	for _, settings := range networksOf(t, c, "relay2") {
+	for _, settings := range networksOf(t, c, doc, "relay2") {
 		for _, alias := range settings.Aliases {
 			if strings.Contains(alias, ".") {
 				dotted = true
@@ -386,7 +318,7 @@ func TestTheSecondRelayKeepsItsDottedAlias(t *testing.T) {
 // address and the guard's SERVER_IP drift apart, every authenticated call fails
 // and it reads like a credential problem rather than a compose typo.
 func TestServerIPMatchesTheStaticAddress(t *testing.T) {
-	c, _ := load(t)
+	c, doc := load(t)
 	serverIP := c.Services["guard"].Environment["SERVER_IP"]
 	if serverIP == "" {
 		t.Fatal("the guard sets no SERVER_IP")
@@ -396,7 +328,7 @@ func TestServerIPMatchesTheStaticAddress(t *testing.T) {
 	// pinning the address on `lnd` instead of on the app satisfied it — measured
 	// on 279678d — and so would a comment quoting the address with the real line
 	// deleted. The address has to be on the container that dials.
-	pinned, _ := pinnedAddress(t, c, "brollyzapper")
+	pinned, _ := pinnedAddress(t, c, doc, "brollyzapper")
 	if pinned != serverIP {
 		t.Errorf("the guard bakes SERVER_IP=%q and the brollyzapper service answers on %q; "+
 			"the ipaddr caveat would be checked against an address the app does not have",
@@ -419,8 +351,8 @@ func TestServerIPMatchesTheStaticAddress(t *testing.T) {
 // (internal/guard/caveats.go), so a stale one waits for the day SERVER_IP is
 // taken out and then locks both credentials to the wrong range.
 func TestTheNetworkRangeIsOneFactInAllItsPlaces(t *testing.T) {
-	c, _ := load(t)
-	pinned, onNetwork := pinnedAddress(t, c, "brollyzapper")
+	c, doc := load(t)
+	pinned, onNetwork := pinnedAddress(t, c, doc, "brollyzapper")
 	addr, err := netip.ParseAddr(pinned)
 	if err != nil {
 		t.Fatalf("the brollyzapper service's ipv4_address %q is not an address: %v", pinned, err)
@@ -471,10 +403,10 @@ func TestTheNetworkRangeIsOneFactInAllItsPlaces(t *testing.T) {
 // addressed networks would pass or fail by luck — umbrel/lint_test.go refuses
 // that case for the same reason. Two is also a real question with no answer
 // here: which address does LND see.
-func pinnedAddress(t *testing.T, c compose, service string) (addr, network string) {
+func pinnedAddress(t *testing.T, c compose, doc *composelint.Document, service string) (addr, network string) {
 	t.Helper()
 	found := 0
-	for name, settings := range networksOf(t, c, service) {
+	for name, settings := range networksOf(t, c, doc, service) {
 		if settings.IPv4 != "" {
 			addr, network = settings.IPv4, name
 			found++
@@ -558,20 +490,20 @@ func TestEveryDialledNodeCertifiesTheNameItIsDialledBy(t *testing.T) {
 // APP_PORT to anything else breaks the same thing, which the compose header
 // says and no lint can see.
 func TestTheAppIsPublishedOnThePortItListensOn(t *testing.T) {
-	c, _ := load(t)
+	c, doc := load(t)
 	app := c.Services["brollyzapper"]
 	_, listen, err := net.SplitHostPort(app.Environment["LISTEN_ADDR"])
 	if err != nil {
 		t.Fatalf("LISTEN_ADDR=%q is not host:port: %v", app.Environment["LISTEN_ADDR"], err)
 	}
-	var ports []string
-	if err := app.Ports.Decode(&ports); err != nil {
+	ports, err := doc.Ports("brollyzapper")
+	if err != nil {
 		t.Fatalf("the brollyzapper service's ports are not in the short string form this "+
 			"check reads: %v", err)
 	}
 	published := false
 	for _, mapping := range ports {
-		host, container, err := publishedPorts(mapping)
+		host, container, err := composelint.SplitPort(mapping)
 		if err != nil {
 			t.Error(err)
 			continue
@@ -589,70 +521,5 @@ func TestTheAppIsPublishedOnThePortItListensOn(t *testing.T) {
 	if !published {
 		t.Errorf("the brollyzapper service listens on %s and publishes nothing to it: %v",
 			listen, ports)
-	}
-}
-
-// publishedPorts reads compose's short port syntax — [ip:]host:container[/proto]
-// — with the host side either a number or `${VAR:-number}`, in which case the
-// default is returned. Any other spelling is an error rather than a guess.
-func publishedPorts(mapping string) (host, container string, err error) {
-	mapping, _, _ = strings.Cut(mapping, "/")
-	cut := strings.LastIndex(mapping, ":")
-	if cut < 0 {
-		return "", "", fmt.Errorf("port %q publishes no host port", mapping)
-	}
-	hostSide, container := mapping[:cut], mapping[cut+1:]
-	if m := defaultedPortRE.FindStringSubmatch(hostSide); m != nil {
-		return m[1], container, nil
-	}
-	if i := strings.LastIndex(hostSide, ":"); i >= 0 {
-		hostSide = hostSide[i+1:] // an ip: prefix
-	}
-	if !numericRE.MatchString(hostSide) || !numericRE.MatchString(container) {
-		return "", "", fmt.Errorf("port %q is not a spelling this lint reads", mapping)
-	}
-	return hostSide, container, nil
-}
-
-var (
-	defaultedPortRE = regexp.MustCompile(`^\$\{[A-Z_][A-Z0-9_]*:-([0-9]+)\}$`)
-	numericRE       = regexp.MustCompile(`^[0-9]+$`)
-)
-
-func TestCommandLineDecodesBothSpellings(t *testing.T) {
-	for _, doc := range []string{
-		"command: [lnd, --tlsextradomain=lnd]",
-		"command:\n  - lnd\n  - --tlsextradomain=lnd   # a trailing comment is not an argument\n",
-		"command: lnd  --tlsextradomain=lnd",
-	} {
-		var got struct {
-			Command commandLine `yaml:"command"`
-		}
-		if err := yaml.Unmarshal([]byte(doc), &got); err != nil {
-			t.Errorf("decoding %q: %v", doc, err)
-			continue
-		}
-		if want := []string{"lnd", "--tlsextradomain=lnd"}; !slices.Equal(got.Command, want) {
-			t.Errorf("decoding %q = %q, want %q", doc, got.Command, want)
-		}
-	}
-}
-
-func TestPublishedPortsReadsTheSpellingsItClaims(t *testing.T) {
-	for _, tc := range []struct {
-		mapping, host, container string
-		wantErr                  bool
-	}{
-		{mapping: "${APP_PORT:-8080}:8080", host: "8080", container: "8080"},
-		{mapping: "8081:8080", host: "8081", container: "8080"},
-		{mapping: "127.0.0.1:8080:8080/tcp", host: "8080", container: "8080"},
-		{mapping: "${APP_PORT}:8080", wantErr: true},
-		{mapping: "8080", wantErr: true},
-	} {
-		host, container, err := publishedPorts(tc.mapping)
-		if (err != nil) != tc.wantErr || host != tc.host || container != tc.container {
-			t.Errorf("publishedPorts(%q) = %q, %q, %v; want %q, %q, error=%v", tc.mapping,
-				host, container, err, tc.host, tc.container, tc.wantErr)
-		}
 	}
 }
