@@ -6282,6 +6282,12 @@ func TestTheGenericAppNamesNoDeploymentRoute(t *testing.T) {
 // The allow-list is the operator vocabulary and the two errors a handler must be
 // able to name. Anything else is a handler reaching past the socket, which is
 // the one thing the two-container split exists to prevent.
+//
+// `internal/preflight` IS HELD TO THE SAME LIST since `20i.11`, which made it the
+// second server-side package to import `internal/guard` — for KindAddressMismatch,
+// so the credential-address check can read the guard's refusal kind. The import
+// puts the same cone in reach there, and a rule scoped to one directory would
+// have left the new edge exactly as unguarded as the old one was before review.
 func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []problem {
 	// THE REFUSAL KIND JOINED THE LIST IN `0vk.53`, and it is admitted on the
 	// rule's own stated grounds rather than as an exception to them: it is a
@@ -6318,7 +6324,7 @@ func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []pr
 
 	var found []problem
 	for _, f := range files {
-		if f.dir != "internal/api" {
+		if f.dir != "internal/api" && f.dir != "internal/preflight" {
 			continue
 		}
 		for i, line := range codeLines(t, f) {
@@ -6327,7 +6333,7 @@ func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []pr
 					continue
 				}
 				found = append(found, problem{f.rel, i + 1, fmt.Sprintf(
-					"names guard.%s. internal/api may name the guard's OPERATOR VOCABULARY "+
+					"names guard.%s. "+f.dir+" may name the guard's OPERATOR VOCABULARY "+
 						"only — Change, Control and the three controls — because that is the "+
 						"one thing it could not learn through lnd.BrokerStatus without a "+
 						"second copy of a closed set. Everything else in that package is "+
@@ -6374,6 +6380,15 @@ func refuse(err error) error {
 	return &guard.Refusal{Kind: guard.KindCapPair, Err: err}
 }
 `)}), "names guard.Refusal")
+
+	// And the second importer (`20i.11`): a check that reads the guard's STATE to
+	// decide a verdict, rather than the BrokerStatus the socket relays.
+	catches(t, checkAPINamesOnlyTheGuardsVocabulary(t, []sourceFile{planted("internal/preflight", `package preflight
+
+func latched(st guard.State) bool {
+	return st.SendingLatch
+}
+`)}), "internal/preflight may name the guard's OPERATOR VOCABULARY")
 }
 
 // A generic type's LogValue is credited to it, and its absence is still reported.
