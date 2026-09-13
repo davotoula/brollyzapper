@@ -823,7 +823,8 @@ func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 	}
 
 	for _, path := range interimFiles {
-		for i, line := range interimCandidates(t, path, doc) {
+		for _, candidate := range interimCandidates(t, path, doc) {
+			i, line := candidate.Line-1, candidate.Text
 			if !strings.Contains(line, "INTERIM") {
 				continue
 			}
@@ -844,29 +845,26 @@ func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 	}
 }
 
-// interimCandidates is every line of path an INTERIM note could be on, keyed by
-// its zero-based line index so the messages keep their line numbers.
+// interimCandidates is every line of path an INTERIM note could be on, in file
+// order, each with its line number.
 //
 // THE COMPOSE GIVES ITS COMMENTS, NOT ITS TEXT. A note about the template lives
 // in its prose by design, so this is the one check whose subject is a comment —
 // and the document places each comment on its own line (composelint's
 // Comments), so nothing needs the file as lines. The other two files are prose
 // throughout, and are read as lines.
-func interimCandidates(t *testing.T, path string, compose *composelint.Document) map[int]string {
+func interimCandidates(t *testing.T, path string, compose *composelint.Document) []composelint.Comment {
 	t.Helper()
-	out := map[int]string{}
 	if path == composePath {
-		for _, c := range compose.Comments() {
-			out[c.Line-1] = c.Text
-		}
-		return out
+		return compose.Comments()
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
+	var out []composelint.Comment
 	for i, line := range strings.Split(string(raw), "\n") {
-		out[i] = line
+		out = append(out, composelint.Comment{Text: line, Line: i + 1})
 	}
 	return out
 }
