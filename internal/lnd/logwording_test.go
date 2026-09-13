@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -184,10 +185,16 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 				handle = func(context.Context, *lnrpc.Invoice) error { return nil }
 			}
 			var logged syncBuffer
-			opts := testOptions(&lndtest.Broker{})
+			// A ceiling no single attempt can reach. testOptions pins it at 1ms,
+			// and the stream counts an attempt that outlasts the ceiling as one
+			// that worked — so a slow run flipped the never-up rows to WARN. Only
+			// the first retry line is read, so nothing ever waits for it.
+			opts := lnd.Options{Broker: &lndtest.Broker{}, MinBackoff: time.Millisecond, MaxBackoff: time.Minute}
 			opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
 			client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
-			defer client.Close()
+			// A cleanup, not a defer: cleanups run last-in first-out, so the stream
+			// is cancelled and joined before the connection under it is closed.
+			t.Cleanup(func() { _ = client.Close() })
 			if tc.prime != nil {
 				tc.prime(t, client, dir)
 			}
@@ -234,6 +241,8 @@ func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 		{"a node that is starting", status.Error(codes.Unknown, "waiting to start, RPC services not available"), false},
 		{"a locked wallet", status.Error(codes.Unknown, "wallet locked, unlock it to enable full RPC access"), false},
 		{"a macaroon the parser refused", status.Error(codes.Unknown, "cannot determine data format of binary-encoded macaroon"), false},
+		// A code other than Unknown, so the code attribute is read from the cause.
+		{"an internal error", status.Error(codes.Internal, "unexpected failure"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
@@ -246,7 +255,9 @@ func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 			opts := testOptions(broker)
 			opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
 			client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
-			defer client.Close()
+			// A cleanup, not a defer: cleanups run last-in first-out, so the stream
+			// is cancelled and joined before the connection under it is closed.
+			t.Cleanup(func() { _ = client.Close() })
 			runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
 
 			// The line is written before the request, so a request means the line exists.
