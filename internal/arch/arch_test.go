@@ -5820,17 +5820,19 @@ func webConstants(t *testing.T) map[string]string {
 // nothing noticing, including `degraded` — the banner a half-configured install
 // shows first, which had no styling at all.
 //
-// `renderers` is every source that emits a class attribute, not only the .html
-// files: internal/web/qr.go writes `class="qr"` into an SVG it builds in Go,
-// and a rule that read templates alone would report the one styled hook nobody
-// renders from a template as dead and invite its deletion. The values come from
-// classRenderers: a template flattened, a Go file with its comments blanked.
+// The renderers are every source that emits a class attribute, not only the
+// .html files: internal/web/qr.go writes `class="qr"` into an SVG it builds in
+// Go, and a rule that read templates alone would report the one styled hook
+// nobody renders from a template as dead and invite its deletion. They arrive
+// as files and are read here, by classRenderers, so no caller — a plant least
+// of all — can hand the rule text it has read some other way.
 //
 // `consts` is internal/web's string constants, which is where a dynamic class
 // gets its vocabulary. Taking both as arguments rather than reading the disk is
 // what lets the test run this against planted inputs (zu5.6).
-func checkTemplateClassesAreStyled(t *testing.T, renderers map[string]string, css string, consts map[string]string) []problem {
+func checkTemplateClassesAreStyled(t *testing.T, templates, gocode []sourceFile, css string, consts map[string]string) []problem {
 	t.Helper()
+	renderers := classRenderers(t, templates, gocode)
 	classAttr := regexp.MustCompile(`class="([^"]*)"`)
 	// Comments first: this stylesheet cites source files, and `Color.kt` or
 	// `…-design.md` reads as a class selector to anything scanning raw text. A
@@ -5935,13 +5937,11 @@ func templateFiles(t *testing.T) []sourceFile {
 }
 
 // classRenderers is what checkTemplateClassesAreStyled reads, one entry per
-// file: a template flattened, a Go file as code. The real run and the plants
-// both come through here, so a plant exercises the reading, not a copy of it.
+// file: a template flattened, a Go file as code.
 //
 // readDefines, because a class inside a {{define}} renders like any other:
 // sending.html's authorisation block is one, and its `notice` had no rule from
 // the initial commit until `d46.30`, because this rule read the root tree alone.
-// The route rule's control plant is the one caller that passes skipDefines.
 //
 // A Go file is read as code, because `class="x"` in a comment renders nothing:
 // read raw, it counted as a use of x, which silenced "used by no template" for
@@ -5967,8 +5967,8 @@ func TestEveryTemplateClassIsStyled(t *testing.T) {
 			web = append(web, f)
 		}
 	}
-	renderers := classRenderers(t, templateFiles(t), web)
-	if len(renderers) == 0 {
+	templates := templateFiles(t)
+	if len(templates) == 0 || len(web) == 0 {
 		t.Fatal("no renderers were read; this rule would pass vacuously")
 	}
 	css, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal/web/static/style.css"))
@@ -5981,53 +5981,51 @@ func TestEveryTemplateClassIsStyled(t *testing.T) {
 			"would pass vacuously")
 	}
 
-	clean(t, checkTemplateClassesAreStyled(t, renderers, string(css), consts))
+	clean(t, checkTemplateClassesAreStyled(t, templates, web, string(css), consts))
 
-	template := func(body string) sourceFile {
-		return sourceFile{rel: "planted.html", path: "planted.html", src: []byte(body)}
-	}
-	plantedHTML := func(t *testing.T, body string) map[string]string {
-		t.Helper()
-		return classRenderers(t, []sourceFile{template(body)}, nil)
+	plantedHTML := func(body string) []sourceFile {
+		const dir = "internal/web/templates"
+		return []sourceFile{{rel: dir + "/planted.html", dir: dir, path: dir + "/planted.html", src: []byte(body)}}
 	}
 
 	// A class used only inside a {{define}}, which the parser lifts out of the
 	// root tree: sending.html's `notice` was exactly this, unstyled and unseen.
 	inDefine := `{{template "panel" .}}{{define "panel"}}<div class="ghost">x</div>{{end}}`
-	catches(t, checkTemplateClassesAreStyled(t, plantedHTML(t, inDefine),
+	catches(t, checkTemplateClassesAreStyled(t, plantedHTML(inDefine), nil,
 		`.real { color: red; }`, consts), `class "ghost" is used by a template and defined nowhere`)
 	// Control: the same class, styled, is clean — so the red above was the
 	// missing rule and not the define itself.
-	clean(t, checkTemplateClassesAreStyled(t, plantedHTML(t, inDefine),
+	clean(t, checkTemplateClassesAreStyled(t, plantedHTML(inDefine), nil,
 		`.ghost { color: red; }`, consts))
 
 	// A Go renderer whose only `class="orphan"` is prose. It must not count as a
 	// use: no rule is demanded for it, and a rule that exists for it is dead.
+	styled := plantedHTML(`<p class="real">x</p>`)
 	commented := planted("internal/web", "package web\n\n// Renders `class=\"orphan\"` one day.\nconst x = 1\n")
 	clean(t, checkTemplateClassesAreStyled(t,
-		classRenderers(t, []sourceFile{template(`<p class="real">x</p>`)}, []sourceFile{commented}),
+		styled, []sourceFile{commented},
 		`.real { color: red; }`, consts))
 	catches(t, checkTemplateClassesAreStyled(t,
-		classRenderers(t, []sourceFile{template(`<p class="real">x</p>`)}, []sourceFile{commented}),
+		styled, []sourceFile{commented},
 		`.real { color: red; } .orphan { color: blue; }`, consts), `class "orphan" is defined in the stylesheet and used by no template`)
 	// Control: the same string in code is a use, both ways round.
 	inCode := planted("internal/web", "package web\n\nconst svg = `<svg class=\"orphan\">`\n")
 	catches(t, checkTemplateClassesAreStyled(t,
-		classRenderers(t, []sourceFile{template(`<p class="real">x</p>`)}, []sourceFile{inCode}),
+		styled, []sourceFile{inCode},
 		`.real { color: red; }`, consts), `class "orphan" is used by a template and defined nowhere`)
 	clean(t, checkTemplateClassesAreStyled(t,
-		classRenderers(t, []sourceFile{template(`<p class="real">x</p>`)}, []sourceFile{inCode}),
+		styled, []sourceFile{inCode},
 		`.real { color: red; } .orphan { color: blue; }`, consts))
 
 	// A class a template asks for and the stylesheet never answers.
 	catches(t, checkTemplateClassesAreStyled(t,
-		plantedHTML(t, `<p class="ghost">x</p>`),
+		plantedHTML(`<p class="ghost">x</p>`), nil,
 		`.real { color: red; }`, consts), "defined nowhere in the stylesheet")
 
 	// And the reverse: a rule nobody renders any more, which is how a
 	// stylesheet accumulates dead weight that reads as intentional.
 	catches(t, checkTemplateClassesAreStyled(t,
-		plantedHTML(t, `<p class="real">x</p>`),
+		plantedHTML(`<p class="real">x</p>`), nil,
 		`.real { color: red; } .orphan { color: blue; }`, consts), "used by no template")
 
 	// A dynamic class whose vocabulary grew: the const block gains a state, the
@@ -6036,20 +6034,20 @@ func TestEveryTemplateClassIsStyled(t *testing.T) {
 	// because it carried the three receipt states as a literal.
 	grown := map[string]string{"ReceiptPublished": "published", "ReceiptDisputed": "disputed"}
 	catches(t, checkTemplateClassesAreStyled(t,
-		plantedHTML(t, `<p class="receipt-{{.Receipt}}">x</p>`),
+		plantedHTML(`<p class="receipt-{{.Receipt}}">x</p>`), nil,
 		`.receipt-published { color: red; }`, grown), `class "receipt-disputed" is used`)
 
 	// And a dynamic class reading a field that names no vocabulary at all: the
 	// rule must say so rather than silently checking nothing.
 	catches(t, checkTemplateClassesAreStyled(t,
-		plantedHTML(t, `<p class="thing-{{.Nothing}}">x</p>`),
+		plantedHTML(`<p class="thing-{{.Nothing}}">x</p>`), nil,
 		`.thing-one { color: red; }`, consts), "declares no Nothing* string constants")
 
 	// Both arms of a conditional class list are used, whatever the condition is
 	// spelled like — including one with a quoted argument, which is what the
 	// regex this replaced could not read.
 	clean(t, checkTemplateClassesAreStyled(t,
-		plantedHTML(t, `<p class="state {{if eq .State "expired"}}state-bad{{else}}state-waiting{{end}}">x</p>`),
+		plantedHTML(`<p class="state {{if eq .State "expired"}}state-bad{{else}}state-waiting{{end}}">x</p>`), nil,
 		`.state {} .state-bad {} .state-waiting {}`, consts))
 }
 
