@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/lnd/lnrpc"
@@ -64,20 +65,42 @@ func (c *Client) RunInvoiceStream(ctx context.Context, resume SettleIndexStore, 
 		// elapsed time is the only proof available on a quiet one, where a
 		// month of clean uptime would otherwise leave the delay where the last
 		// bad night put it.
-		if received || time.Since(started) >= c.maxBackoff {
+		worked := received || time.Since(started) >= c.maxBackoff
+		if worked {
 			attempt = 0
 		}
 		if err != nil {
 			// The connection is dropped rather than reused so the next attempt
 			// re-reads tls.cert, which LND regenerates on expiry.
 			c.reconnect()
-			c.log.Warn("invoice stream dropped; reconnecting",
-				"error", err.Error(), "attempt", attempt+1, "state", string(c.State()))
+			c.logRetry(ctx, err, attempt+1, worked)
 		}
 		if err := c.waitBeforeRetry(ctx, backoffDelay(attempt, c.minBackoff, c.maxBackoff)); err != nil {
 			return err
 		}
 	}
+}
+
+// logRetry says why the stream is about to wait, at the level that reason
+// deserves.
+//
+// A stream that never came up because the guard has not written the credential
+// is the EXPECTED condition on every first start and every update, and at WARN
+// it was four or five lines an operator learned to ignore (20i.7). So that one
+// case is Info and says what it waits for; a drop of a stream that worked, or a
+// failure in any other state, stays WARN.
+//
+// Decided by STATE, never by the error: once the connection is cached, an absent
+// credential arrives as a stringified Unauthenticated status rather than
+// ErrNotLinked (see recordState), so a match on the sentinel would hold on the
+// first start and silently stop on the second.
+func (c *Client) logRetry(ctx context.Context, err error, attempt int, worked bool) {
+	state := c.State()
+	level, msg := slog.LevelWarn, "invoice stream dropped; reconnecting"
+	if state == StateNotLinked && !worked {
+		level, msg = slog.LevelInfo, "waiting for the guard's credential before opening the invoice stream"
+	}
+	c.log.Log(ctx, level, msg, "error", err.Error(), "attempt", attempt, "state", string(state))
 }
 
 // streamOnce opens the stream and pumps it until it ends, reporting whether it
