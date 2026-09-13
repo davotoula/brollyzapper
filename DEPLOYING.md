@@ -288,14 +288,22 @@ Two below the line are worth setting now rather than after the first start:
   tunnel in front of the app. If you are, read [§Trusted proxies](#trusted-proxies) below now,
   so you set it once rather than after a restart.
 
-**Then pick the uid, and let the two files decide it.** The containers must be able to *read*
-what step 1 named, and LND usually writes those `0600` to its own user. A guard that cannot
-read them does not crash — it stays up, answers the admin UI, and logs `could not copy tls.cert
-into the credential volume` and `could not bake the receive macaroon yet`, with the node tile
-never going ready. Getting the uid right now is cheaper than reading that back later:
+**Then the uid, and let the guard tell you it.** The containers must be able to *read* what
+step 1 named, and LND writes `admin.macaroon` readable only by its own user and group. You do not
+have to work out who that is: the guard opens both files as it starts, and if it cannot read one
+it does not crash — it stays up, answers the admin UI, and its first `"error"` line names the
+file's owner and the two settings that fix it:
+
+```json
+{"level":"ERROR","msg":"cannot read a file mounted from LND",
+ "error":"guard: cannot read /lnd/admin.macaroon: open /lnd/admin.macaroon: permission denied. admin.macaroon is owned by uid 998:998 and this process runs as 1000:1000; set RUN_AS_UID=998 and RUN_AS_GID=998, or make the file readable by the group RUN_AS_GID names"}
+```
+
+So start with the template's `1000:1000`, and change it only if step 5 shows you that line. First
+check the two files exist and create the data directories — in a shell holding the values you just
+put in `.env`:
 
 ```bash
-# the same values you just put in .env, so the two commands below can use them.
 # Do not `source .env` for this: it is a compose file, not a shell script, and
 # ADMIN_PASSWORD is in it.
 LND_DIR=/home/lnd/.lnd
@@ -303,41 +311,39 @@ LND_NETWORK=mainnet
 DATA_DIR=/home/YOU/brollyzapper/data     # absolute, and somewhere you own
 
 ls -l "$LND_DIR/tls.cert" "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
-```
-
-This is also the check that both paths exist at all: a missing bind-mount source is not an
-error to Docker, it is a root-owned **directory** it creates at that path for you. The guard
-refuses to start on that and names the path to remove, but not finding out is quicker.
-
-Whatever `uid:gid` owns those two files is what `RUN_AS_UID`/`RUN_AS_GID` should say —
-`RUN_AS_UID`'s comment in `.env.example` has the other way out, a group both can read through.
-Read both numbers off `admin.macaroon` — the file the guard actually has to open, and the one
-LND writes `0600` — create the directories, and **`chown` only if they do not already have that
-owner**. Same shell as the block above, which set `$LND_DIR`, `$LND_NETWORK` and `$DATA_DIR`:
-
-```bash
-MAC="$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"
-read -r RUN_AS_UID RUN_AS_GID <<<"$(stat -c '%u %g' "$MAC")"
 
 mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server || \
   sudo mkdir -p "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server
+```
 
+The `ls` is also the check that both paths exist at all: a missing bind-mount source is not an
+error to Docker, it is a root-owned **directory** it creates at that path for you. The guard
+refuses to start on that and names the path to remove, but not finding out is quicker.
+
+The directories must be owned by the same `uid:gid` the containers run as. Run this with the pair
+`.env` says — `1000 1000` while `RUN_AS_UID`/`RUN_AS_GID` are commented out. If step 5 sends you
+back here, run it again with the guard's two numbers, which you have also put into `.env`:
+
+```bash
+RUN_AS_UID=1000 RUN_AS_GID=1000    # or the pair the guard named
 for d in "$DATA_DIR"/guard "$DATA_DIR"/credentials "$DATA_DIR"/server; do
   [ "$(stat -c '%u %g' "$d")" = "$RUN_AS_UID $RUN_AS_GID" ] ||
     sudo chown -R "$RUN_AS_UID:$RUN_AS_GID" "$d"
 done
-
-echo "RUN_AS_UID=$RUN_AS_UID"    # put both of these
-echo "RUN_AS_GID=$RUN_AS_GID"    # into .env
 ```
 
-**If those print `0`, stop and pick a different uid.** An LND running as root in Docker owns its
-files `0:0`, and this template deliberately does not run the containers as root — see
-`RUN_AS_UID` in `.env.example` for the other way out, a group both can read through, which is
-the answer whenever the owning uid is one you do not want the app to be.
+To skip the round trip, read the pair up front instead:
+`stat -c '%u %g' "$LND_DIR/data/chain/bitcoin/$LND_NETWORK/admin.macaroon"` — the file the guard
+has to open, and the one LND writes most tightly.
+
+**If the owner is root, do not use it.** An LND running as root in Docker owns its files `0:0`,
+and this template deliberately does not run the containers as root; the guard's line says so
+rather than offering `RUN_AS_UID=0`. See `RUN_AS_UID` in `.env.example` for the other way out, a
+group both can read through, which is the answer whenever the owning uid is one you do not want the
+app to be.
 
 **The `chown` is conditional because on many hosts it is both unnecessary and impossible.** If
-LND's files belong to the uid you are logged in as — the case on umbrelOS, where they are
+you are logged in as the pair the containers run as — the case on umbrelOS, where LND's files are
 `1000:1000` and so are you — `mkdir` has already produced the right ownership and there is
 nothing to change. And `sudo` may not be reachable at all: where it prompts for a password, a
 non-interactive SSH session cannot answer, so an unconditional `sudo` is a step that **stalls**
@@ -351,8 +357,8 @@ the state the group route above produces.
 
 `stat -c` is GNU coreutils — this section already assumes a Linux host, which step 1 says.
 
-**If you regenerate `tls.cert` at step 4, check these numbers again**: LND writes the new file
-itself, and nothing guarantees the owner is the one you just read.
+**If you regenerate `tls.cert` at step 4**, LND writes the new file itself and nothing guarantees
+its owner; the guard checks both files again on every start, so the same line is what tells you.
 
 ### 4. The two `lnd.conf` edits a host LND needs
 
@@ -535,7 +541,9 @@ INFO, on a widening gap capped at a minute; a WARN `invoice stream dropped; reco
 part of that wait, and means a stream that had worked dropped or something else failed — its
 `error` says what. The **guard** has no equivalent retry — it bakes at startup and then hourly —
 so if its log shows a failure rather than a bake, fix the cause and `docker compose restart
-guard` rather than waiting it out.
+guard` rather than waiting it out. **If the failure is `cannot read a file mounted from LND`**,
+the cause is the uid: put the pair it names into `.env`, re-run step 3's `chown` block with it,
+and `docker compose up -d`.
 
 Then work through **First run** in [`README.md`](README.md#first-run): the public domain and
 address name are settings, not deployment values, and they live in the app.

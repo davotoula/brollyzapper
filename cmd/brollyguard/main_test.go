@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,5 +172,41 @@ func TestAMountThatIsADirectoryFailsWithAnActionableMessage(t *testing.T) {
 	}
 	if !strings.Contains(out, "rm -rf") {
 		t.Errorf("the log does not tell the operator how to recover: %s", out)
+	}
+}
+
+// 20i.14: a mount the guard cannot READ is named with its owner at startup, and
+// the guard stays up.
+//
+// THE MACAROON, NOT THE CERTIFICATE, is the file this is about. LND writes
+// tls.cert 0644 and admin.macaroon 0640 (cert.WriteCertPair; lnd.go's
+// adminMacaroonFilePermissions), so a guard running as the wrong uid copies the
+// certificate without complaint and fails on the macaroon — inside a gRPC
+// credential, where the raw error carries no owner. A hint on the certificate
+// copy alone would almost never fire on a stock node.
+//
+// NOT FATAL, and the exit code is the assertion: the socket still answers
+// Status, so the admin UI shows what is wrong rather than the tile going dead
+// (§11) — the same reason the certificate copy was never fatal.
+func TestAnUnreadableMountIsNamedWithItsOwnerAndTheGuardStaysUp(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("SKIPPED: running as root, which reads a mode-0000 file anyway")
+	}
+	e := validEnv(t)
+	macaroonPath := e["LND_ADMIN_MACAROON"]
+	if err := os.Chmod(macaroonPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run(serveCtx(t), nil, env(e), &stdout, &stderr); code != 0 {
+		t.Fatalf("run with an unreadable macaroon = %d, want 0: the guard stays up (stderr: %s)",
+			code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{macaroonPath, fmt.Sprintf("uid %d:%d", os.Getuid(), os.Getgid())} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the log does not contain %q: %s", want, out)
+		}
 	}
 }
