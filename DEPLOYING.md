@@ -505,9 +505,8 @@ Three signs, in the order they arrive:
     "caveats":"time-before 2026-09-16T20:07:42Z, ipaddr 10.61.7.20","permissions":"5"}
    ```
 
-   Do not read `baking the receive macaroon` as this: that line is logged *before* the attempt
-   and appears in a failed loop just as it does in a good one. `receive macaroon baked` is the
-   one that means it worked, and the `ipaddr` caveat in it is the server's fixed address.
+   `asking the node for a receive macaroon` is the attempt; `receive macaroon baked` is the one
+   that means it worked, and the `ipaddr` caveat in it is the server's fixed address.
 
 2. **The server is listening.** `{"msg":"listening","addr":"[::]:8080"}` from the server —
    that is the port *inside* the container, always 8080. From the host it is the port you set
@@ -530,17 +529,11 @@ Three signs, in the order they arrive:
    Once in, **Settings** offers a password change. It does not on umbrelOS, where the platform
    supplies the password and displays it itself; here it is yours.
 
-**While it settles.** `depends_on` orders **startup**, not readiness, so the server can come up
-before the guard has baked anything. While that lasts the server logs
-
-```json
-{"level":"WARN","msg":"invoice stream dropped; reconnecting",
- "error":"lnd: node credentials are not present yet","attempt":1,"state":"not_linked"}
-```
-
-with a widening gap — a second, then two, four, eight, capped at a minute. They stop of their
-own accord once `receive macaroon baked` appears in the guard's log and the stream connects.
-The **guard** has no equivalent retry — it bakes at startup and then hourly — so if its log
+**While it settles.** `depends_on` orders **startup**, not readiness, so until the guard has
+baked the server logs `waiting for the guard's credential before opening the invoice stream` at
+INFO, on a widening gap capped at a minute; a WARN `invoice stream dropped; reconnecting` is not
+part of that wait, and means a stream that had worked dropped or the node could not be reached
+or used. The **guard** has no equivalent retry — it bakes at startup and then hourly — so if its log
 shows a failure rather than a bake, fix the cause and `docker compose restart guard` rather
 than waiting it out.
 
