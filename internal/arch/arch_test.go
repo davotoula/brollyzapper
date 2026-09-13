@@ -1686,6 +1686,14 @@ func checkPreimageRevealsAreTheProtocolOnes(t *testing.T, files []sourceFile) []
 	return found
 }
 
+// revealsIn counts needs in f's CODE. Raw source let a comment stand in for the
+// call: delete a listed reveal, keep a comment naming it, and the count stayed
+// at exactly one (`44b`).
+func revealsIn(t *testing.T, f sourceFile, needs string) int {
+	t.Helper()
+	return strings.Count(strings.Join(codeLines(t, f), "\n"), needs)
+}
+
 func TestThePreimageLeavesTheTypeOnlyWhereAProtocolDemandsIt(t *testing.T) {
 	clean(t, checkPreimageRevealsAreTheProtocolOnes(t, sourceFiles(t)))
 
@@ -1709,13 +1717,8 @@ func (s *Store) settle(preimage secret.String) {
 		{"internal/nwc/service.go", "Preimage.Reveal()"},
 	} {
 		t.Run(c.file, func(t *testing.T) {
-			var src string
-			for _, f := range sourceFiles(t) {
-				if f.rel == c.file {
-					src = string(f.src)
-				}
-			}
-			if src == "" {
+			i := slices.IndexFunc(sourceFiles(t), func(f sourceFile) bool { return f.rel == c.file })
+			if i < 0 {
 				t.Fatalf("%s is not in the module any more; this rule's list is stale", c.file)
 			}
 			// COUNTED, not merely present. The list bounds FILES; the rule's own
@@ -1723,12 +1726,31 @@ func (s *Store) settle(preimage secret.String) {
 			// inside internal/nwc/service.go — the likeliest place, since it
 			// already handles preimages — would be invisible to a Contains. This
 			// is what makes the two claims the same claim.
-			if got := strings.Count(src, c.needs); got != 1 {
+			if got := revealsIn(t, sourceFiles(t)[i], c.needs); got != 1 {
 				t.Errorf("%s contains %d %s, want exactly 1. The allowed list bounds files; "+
 					"this is what bounds exits, and a second reveal in an allowed file is "+
 					"still a fourth exit", c.file, got, c.needs)
 			}
 		})
+	}
+
+	// THE COUNT IS OF CODE (`44b`): the listed reveal deleted and a comment
+	// naming it left behind is zero reveals, not one — the stale exemption the
+	// count exists to catch, dressed as the call.
+	if got := revealsIn(t, planted("internal/zap", `package zap
+
+// The receipt carries z.Preimage.Reveal() when the payer supplied one.
+func (z *Zap) tags() [][]string { return nil }
+`), "Preimage.Reveal()"); got != 0 {
+		t.Errorf("a comment naming Preimage.Reveal() counted as %d reveals, want 0; a deleted "+
+			"exit would still read as present", got)
+	}
+	// And the control: the call itself is counted.
+	if got := revealsIn(t, planted("internal/zap", `package zap
+
+func (z *Zap) preimage() string { return z.Preimage.Reveal() }
+`), "Preimage.Reveal()"); got != 1 {
+		t.Errorf("the call z.Preimage.Reveal() counted as %d reveals, want 1", got)
 	}
 }
 
