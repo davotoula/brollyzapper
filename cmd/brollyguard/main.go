@@ -95,7 +95,11 @@ func run(ctx context.Context, args []string, env config.Lookup, stdout, stderr i
 	// indefinitely, and its presence is supposed to mean a live code exists.
 	broker.SweepExpiredAuthorisation(ctx)
 	if err := broker.EnsureReceiveMacaroon(ctx); err != nil {
-		log.Warn("could not bake the receive macaroon yet; the server will ask again",
+		// Not "the server will ask again": a server with no credential is
+		// not_linked, and that state never requests a re-bake. What retries is
+		// the renewal tick below, and the operator's Re-link.
+		log.Warn("could not bake the receive macaroon yet; the guard tries again at its hourly "+
+			"renewal, or at once on Re-link",
 			"error", err.Error())
 	}
 	// And the spend credential, which before tna.1 was only ever touched by the

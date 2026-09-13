@@ -422,8 +422,8 @@ The guard tries to bake at startup and then **once an hour** — there is no fas
 `lnd.conf` fix made while it is running otherwise looks like it did nothing for up to an hour.
 
 **What each one looks like when it is missing.** Both arrive in `docker compose logs guard`, on
-the guard's `could not bake the receive macaroon yet; the server will ask again` line. The logs
-are JSON; what follows is the value of that line's `error` field, which is the part worth
+the guard's `could not bake the receive macaroon yet; the guard tries again at its hourly renewal,
+or at once on Re-link` line. The logs are JSON; what follows is the value of that line's `error` field, which is the part worth
 reading. Reproduced against this repository's regtest node, with the guard on a Docker bridge
 the node's certificate predates:
 
