@@ -124,7 +124,7 @@ func withOwnerAdvice(path string, err error) error {
 // operator hits — a different owner — is testable without a second user.
 func unreadableAdvice(name string, info fs.FileInfo, uid, gid int) string {
 	ownerUID, ownerGID, ok := fileOwner(info)
-	return ownershipAdvice(name, ownerUID, ownerGID, ok, uid, gid)
+	return ownershipAdvice(name, info.Mode().Perm(), ownerUID, ownerGID, ok, uid, gid)
 }
 
 // ownershipAdvice is the sentence itself.
@@ -133,8 +133,27 @@ func unreadableAdvice(name string, info fs.FileInfo, uid, gid int) string {
 // containers' user, not settings this binary reads; they are named because they
 // are what the operator edits. On umbrelOS LND's files and the containers
 // normally share 1000:1000, which is why this is a plain-Docker message.
-func ownershipAdvice(name string, ownerUID, ownerGID uint32, ok bool, uid, gid int) string {
+//
+// IT READS THE BITS THAT APPLY BEFORE BLAMING OWNERSHIP OR MODE. The kernel
+// checks exactly one class — owner if the uid matches, else group if the gid
+// does, else other — and a class whose read bit is SET that was still refused
+// was refused by something else: SELinux or AppArmor labels, an ACL, the mount.
+// Telling that operator to chown or chmod sends them away from the cause.
+// Supplementary groups are not considered: `user: uid:gid` in compose gives the
+// containers none.
+func ownershipAdvice(name string, perm fs.FileMode, ownerUID, ownerGID uint32, ok bool, uid, gid int) string {
+	readBit := fs.FileMode(0o004)
 	switch {
+	case ok && int64(ownerUID) == int64(uid):
+		readBit = 0o400
+	case ok && int64(ownerGID) == int64(gid):
+		readBit = 0o040
+	}
+	switch {
+	case ok && perm&readBit != 0:
+		return fmt.Sprintf("%s is owned by uid %d:%d and its mode %s already lets this process (%d:%d) "+
+			"read it, so neither ownership nor mode is what refuses it; look at the mount, an ACL, or "+
+			"SELinux/AppArmor labels", name, ownerUID, ownerGID, perm, uid, gid)
 	case !ok:
 		return fmt.Sprintf("%s is not readable by the user this process runs as; set RUN_AS_UID and "+
 			"RUN_AS_GID to the file's owner, or make it readable by the group RUN_AS_GID names", name)

@@ -885,12 +885,16 @@ func TestTheExampleShowsEachSettingAtTheTemplatesDefault(t *testing.T) {
 }
 
 // envValue is an .env.example right-hand side as compose's .env reader yields
-// it: trimmed, one pair of matching surrounding quotes removed. An unquoted
-// ` #` starts a comment there, so it ends the value here.
+// it: trimmed, and a quoted value is what lies between its quotes, whatever
+// follows the closing one. An unquoted ` #` starts a comment there, so it ends
+// the value here. QUOTES FIRST: cutting at ` #` first left `"./data" # note`
+// with its quotes on, and a quoted `"a #b"` cut in half.
 func envValue(rhs string) string {
 	value := strings.TrimSpace(rhs)
-	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
-		return value[1 : len(value)-1]
+	if value != "" && (value[0] == '"' || value[0] == '\'') {
+		if end := strings.IndexByte(value[1:], value[0]); end >= 0 {
+			return value[1 : end+1]
+		}
 	}
 	if before, _, found := strings.Cut(value, " #"); found {
 		value = strings.TrimSpace(before)
@@ -1133,13 +1137,16 @@ func TestInterpolatedDefaultsReadsOnlyARealDefault(t *testing.T) {
 // depends on, so that "trim both sides" cannot quietly become a byte compare.
 func TestEnvValueIsTheValueComposeReads(t *testing.T) {
 	for rhs, want := range map[string]string{
-		"8080":         "8080",
-		" 100000000 ":  "100000000",
-		`"./data"`:     "./data",
-		`'INFO'`:       "INFO",
-		"":             "",
-		"8080  # port": "8080",
-		`"`:            `"`,
+		"8080":            "8080",
+		" 100000000 ":     "100000000",
+		`"./data"`:        "./data",
+		`'INFO'`:          "INFO",
+		"":                "",
+		"8080  # port":    "8080",
+		`"`:               `"`,
+		`"./data" # note`: "./data",
+		`"a #b"`:          "a #b",
+		`"a" # "b"`:       "a",
 	} {
 		if got := envValue(rhs); got != want {
 			t.Errorf("envValue(%q) = %q, want %q", rhs, got, want)

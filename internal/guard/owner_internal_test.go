@@ -59,7 +59,7 @@ func TestUnreadableAdviceNamesTheOwnerAndTheSettings(t *testing.T) {
 // and a message that typed the root uid into .env for the operator would undo
 // that in one copy-paste.
 func TestUnreadableAdviceNeverSuggestsRunningAsRoot(t *testing.T) {
-	got := ownershipAdvice("admin.macaroon", 0, 0, true, 1000, 1000)
+	got := ownershipAdvice("admin.macaroon", 0o640, 0, 0, true, 1000, 1000)
 	if strings.Contains(got, "RUN_AS_UID=0") {
 		t.Errorf("advice = %q, which tells the operator to run the app as root", got)
 	}
@@ -72,7 +72,7 @@ func TestUnreadableAdviceNeverSuggestsRunningAsRoot(t *testing.T) {
 
 // The same uid cannot be fixed by RUN_AS_UID, so the advice must not offer it.
 func TestUnreadableAdviceForTheProcessesOwnFileBlamesTheMode(t *testing.T) {
-	got := ownershipAdvice("tls.cert", 1000, 1000, true, 1000, 1000)
+	got := ownershipAdvice("tls.cert", 0o000, 1000, 1000, true, 1000, 1000)
 	if strings.Contains(got, "RUN_AS_UID=") {
 		t.Errorf("advice = %q, but changing RUN_AS_UID cannot help a file this uid already owns", got)
 	}
@@ -83,7 +83,7 @@ func TestUnreadableAdviceForTheProcessesOwnFileBlamesTheMode(t *testing.T) {
 
 // Where the platform gives no owner, say what is known and invent no numbers.
 func TestUnreadableAdviceWithNoOwnerInventsNoNumbers(t *testing.T) {
-	got := ownershipAdvice("tls.cert", 0, 0, false, 1000, 1000)
+	got := ownershipAdvice("tls.cert", 0o000, 0, 0, false, 1000, 1000)
 	if strings.ContainsAny(got, "0123456789") {
 		t.Errorf("advice = %q, which carries numbers the platform never gave", got)
 	}
@@ -108,5 +108,31 @@ func TestCopyCertificateNamesTheOwnerOfAnUnreadableCertificate(t *testing.T) {
 	}
 	if want := fmt.Sprintf("uid %d:%d", os.Getuid(), os.Getgid()); !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %q, want it to name the owner %q", err, want)
+	}
+}
+
+// A REFUSAL THE BITS DO NOT EXPLAIN IS NOT BLAMED ON THE BITS (go-review,
+// 20i.14). A file whose applicable read bit is set and was refused anyway was
+// refused by a label, an ACL or the mount; chown and chmod advice would send the
+// operator away from it. One row per class the kernel can check.
+func TestUnreadableAdviceBlamesNeitherOwnershipNorModeWhenTheBitsAllowIt(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		perm               fs.FileMode
+		ownerUID, ownerGID uint32
+	}{
+		{"owner class, owner-readable", 0o600, 1000, 1000},
+		{"group class, group-readable", 0o640, 998, 1000},
+		{"other class, world-readable", 0o644, 998, 998},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ownershipAdvice("admin.macaroon", tc.perm, tc.ownerUID, tc.ownerGID, true, 1000, 1000)
+			if strings.Contains(got, "RUN_AS_UID=") || strings.Contains(got, "give its owner read") {
+				t.Errorf("advice = %q, which blames ownership or mode for a file the bits let this process read", got)
+			}
+			if !strings.Contains(got, "SELinux") {
+				t.Errorf("advice = %q, want it to point past ownership and mode", got)
+			}
+		})
 	}
 }
