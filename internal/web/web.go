@@ -555,6 +555,13 @@ type NodeView struct {
 	// A VALUE, not a sentence. The copy lives in the template where it can be
 	// read and reviewed; what crosses from the guard is a token and an address.
 	MismatchedAddress string
+	// ServerCheckedAt is when the SERVER's own credential last got an answer
+	// from the node, and ServerReachable what that answer was (`20i.21`). Zero
+	// means not asked yet, and the page says so rather than "no". The guard's
+	// line above is the guard's view; this one is the credential the server
+	// actually presents.
+	ServerCheckedAt time.Time
+	ServerReachable bool
 }
 
 // SecurityView drives the security page.

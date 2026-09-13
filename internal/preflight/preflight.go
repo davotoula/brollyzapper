@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/config"
+	"github.com/davotoula/brollyzapper/internal/guard"
 	"github.com/davotoula/brollyzapper/internal/lnd"
 )
 
@@ -37,6 +38,11 @@ const (
 	// BlocksReceiving exists to be asserted against. Nothing in Tier 2 may
 	// produce it: §11 is explicit that receiving continues.
 	BlocksReceiving Capability = "receiving"
+	// BlocksRelink: the Node page's Re-link is withdrawn, and POST /node/relink
+	// refuses (`20i.11`). Set only when a re-bake provably cannot help — the
+	// node refusing the credential for the ADDRESS it sees, which a fresh
+	// credential carries unchanged.
+	BlocksRelink Capability = "re-link"
 )
 
 // Check IDs, stable so the page and the tests can name one.
@@ -54,6 +60,11 @@ const (
 	CheckUnresolvedSpend  = "wallet.unresolved_payments"
 	CheckLightningAddress = "address.reachable"
 	CheckDataDirMode      = "datadir.mode"
+	// `20i.11`: the two operator hints that used to reach one surface each.
+	CheckCertificateName   = "lnd.certificate_name"
+	CheckCredentialAddress = "node.credential_address"
+	// `20i.21`: the server's own credential, put to the node.
+	CheckServerCredential = "node.server_credential"
 )
 
 // TierOneChecks is the whole of Tier 1. §11: exactly one condition, and it
@@ -135,6 +146,16 @@ type Report struct {
 	// when the trail could not be read; zero-with-a-window is a real answer and
 	// says so.
 	Rejections *RejectionBurst
+	// MismatchedAddress is the address the credential is locked to, set ONLY
+	// when the credential-address check failed (`20i.11`). The Node page's
+	// explanation needs the value, and it travels with the verdict so no page
+	// can name an address for a refusal that is not happening.
+	MismatchedAddress string
+	// ServerCredential is the last answer the server's own credential got from
+	// the node, with its time (`20i.21`). Nil when no probe is wired; a zero At
+	// means not asked yet. A MEASUREMENT beside its check, like Spend: the Node
+	// page states it as "yes/no, as of", and the check is the verdict on it.
+	ServerCredential *ProbeResult
 }
 
 // SpendWindow is a MEASUREMENT, not a verdict, and that is why it is a field
@@ -326,7 +347,16 @@ type Inputs struct {
 	// this deployment is behind a proxy at all, so the honest statement is
 	// "we cannot verify this", not a tick or a cross (d46.19).
 	ProxiesDeclared func() bool
-	Now             func() time.Time
+	// CertificateName reports whether LND's certificate names the address the
+	// server dials: nil, or the typed mismatch (`20i.11`). The same decision
+	// lnd.Client makes before it dials, read here for the panel. A POINTER, not
+	// an error, so a passing certificate cannot arrive as a non-nil interface.
+	CertificateName func() *lnd.CertificateNameError
+	// ServerCredential is the server's own credential's last answer from the
+	// node — a CredentialProbe's Result, which never waits on the node and asks
+	// it at most once per ServerCredentialInterval (`20i.21`).
+	ServerCredential func() ProbeResult
+	Now              func() time.Time
 }
 
 // Run evaluates every Tier-2 check.
@@ -339,8 +369,16 @@ func Run(ctx context.Context, in Inputs) Report {
 	}
 	broker := askBroker(ctx, in)
 	report := Report{BlindSpots: blindSpots(in)}
+	state := nodeState(in)
+	mismatch, mismatchedAddress := credentialAddressCheck(state, broker)
+	report.MismatchedAddress = mismatchedAddress
+	serverCredential, probed := serverCredentialCheck(in)
+	report.ServerCredential = probed
 	report.Checks = append(report.Checks,
-		nodeCheck(in),
+		nodeCheck(state, mismatchedAddress != ""),
+		mismatch,
+		certificateNameCheck(in, state),
+		serverCredential,
 		guardCheck(broker),
 		addressCheck(ctx, in),
 		reconciliationCheck(ctx, in),
@@ -428,7 +466,18 @@ func rejectionBurst(ctx context.Context, in Inputs) *RejectionBurst {
 	return &RejectionBurst{Count: count, Within: RejectionWindow}
 }
 
-func nodeCheck(in Inputs) Check {
+// nodeState is the connection state, read ONCE per report: three checks
+// consult it, and three reads could straddle a transition and describe a
+// connection that was never in any one state. The empty state means no
+// NodeState was wired, which every check below treats as nothing to report.
+func nodeState(in Inputs) lnd.State {
+	if in.NodeState == nil {
+		return ""
+	}
+	return in.NodeState()
+}
+
+func nodeCheck(state lnd.State, addressRefused bool) Check {
 	c := Check{
 		ID:     CheckNodeLinked,
 		Title:  "Connected to your Lightning node",
@@ -436,26 +485,94 @@ func nodeCheck(in Inputs) Check {
 		OK:     true,
 		Blocks: BlocksNothing,
 	}
-	if in.NodeState == nil {
-		return c
-	}
-	switch state := in.NodeState(); state {
-	case lnd.StateReady:
+	switch state {
+	case "", lnd.StateReady:
 	case lnd.StateNotLinked:
 		c.OK, c.Detail = false, "No credentials for your Lightning node yet — the guard writes them once it can reach LND."
 	case lnd.StateRelink:
-		// IT DOES NOT ASSERT A CAUSE, since `20i.3`. This used to say the
-		// macaroon "has most likely been rotated" — which is usually true, and
-		// is exactly wrong for the case that bead is about: a node refusing the
-		// credential for the ADDRESS it observes produces this same state, and
-		// the Node page now says so and hides the Re-link button. Two pages
-		// naming different causes for one state is the drift this package's own
-		// doc warns about, so this one names the state and sends the operator
-		// to the page that has the other half.
+		// IT NAMES A CAUSE ONLY WHEN ONE WAS COMPUTED. Before `20i.3` this said
+		// the macaroon "has most likely been rotated", which is exactly wrong
+		// for a node refusing the credential for the ADDRESS it observes — the
+		// same state. `20i.3` stopped it guessing; `20i.11` gave it the answer,
+		// from the same check the Node page reads, so the two cannot differ.
+		if addressRefused {
+			c.OK, c.Detail = false, "Your node is refusing the app's credential for the address it sees the connection arrive from, so re-linking will not help. The Node page says what to fix."
+			break
+		}
 		c.OK, c.Detail = false, "Your node rejected the macaroon. A rotation is the usual cause and the guard repairs it by itself; if this persists, the Node page says what else it can be."
 	default:
 		c.OK, c.Detail = false, "Connecting to your Lightning node."
 	}
+	return c
+}
+
+// credentialAddressCheck is `20i.3`'s condition, computed once for both pages.
+//
+// TWO FACTS, AND NEITHER IS ENOUGH ALONE. The guard's kind means "a re-bake
+// would change nothing" — equally true of an operator who pressed Re-link twice
+// on a healthy install inside MinBakeInterval, and measuring that is what caught
+// the first version: a working deployment was told its address was wrong, with
+// its only recovery button removed, until the next renewal days later. The other
+// half is the node ACTUALLY rejecting the credential, which the guard never
+// observes and the server does. Together they are the condition; apart they are
+// a guess.
+//
+// It returns the address with the verdict, and only with it.
+func credentialAddressCheck(state lnd.State, broker brokerState) (Check, string) {
+	c := Check{
+		ID:     CheckCredentialAddress,
+		Title:  "Your node accepts the app's credential from this container's address",
+		Threat: "Credential exfiltrated — the ipaddr caveat is what makes a stolen copy useless elsewhere, and the same lock refuses this container when the address it connects from is not the one the credential names.",
+		OK:     true,
+		Blocks: BlocksRelink,
+	}
+	address := broker.status.CredentialAddress
+	// The address is part of the condition, not decoration: with none, the Node
+	// page has nothing to explain and keeps its Re-link button, and a verdict that
+	// still blocked re-linking would have the handler refuse the button it shows.
+	// The guard relays the address it locks credentials to, so an empty one means
+	// no lock is configured — a state in which it refuses to bake at all.
+	if !broker.answered() || broker.status.RefusalKind != guard.KindAddressMismatch ||
+		state != lnd.StateRelink || address == "" {
+		return c, ""
+	}
+	c.OK = false
+	c.Detail = fmt.Sprintf("The credential is locked to %s and your node sees this app's connection "+
+		"arrive from a different address. Re-linking will not change this — a fresh credential "+
+		"carries the same address. Fix the address or the network, then restart the guard.", address)
+	return c, address
+}
+
+// certificateNameCheck puts `20i.3`'s certificate hint where an operator reads
+// it (`20i.11`); it used to reach only the logs.
+//
+// NOT READ WHILE THE NODE IS READY. A connection the node accepted has passed
+// gRPC's own verification of this certificate against this address, so the
+// question is answered — and this report is built before every payment as well
+// as per render, which is no place for a file read and an x509 parse that can
+// only agree.
+//
+// THE DETAIL IS THE APP'S. It names the edit and the address the app dials, and
+// never the names inside the certificate — Error() carries those, for the log.
+func certificateNameCheck(in Inputs, state lnd.State) Check {
+	c := Check{
+		ID:     CheckCertificateName,
+		Title:  "Your node's certificate names the address this app dials",
+		Threat: "Not a security threat but a silent failure: gRPC refuses a certificate that does not name the dial address, so the app never connects, and the handshake error names TLS rather than the two-line fix.",
+		OK:     true,
+		Blocks: BlocksNothing,
+	}
+	if in.CertificateName == nil || state == lnd.StateReady {
+		return c
+	}
+	mismatch := in.CertificateName()
+	if mismatch == nil {
+		return c
+	}
+	c.OK = false
+	c.Detail = fmt.Sprintf("Your node's certificate does not name %s, the address this app dials. "+
+		"Add %s to lnd.conf, delete tls.cert and tls.key so LND regenerates them, restart LND, "+
+		"then restart the guard.", mismatch.Dialled, mismatch.Directive())
 	return c
 }
 

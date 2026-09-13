@@ -239,9 +239,8 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// measured cost of doing so is ~1 ms per call on a local unix socket.
 	guardSocket := guard.NewSocketClient(cfg.GuardSocket, relayGuardEvents)
 	broker := api.NewCachedBroker(guardSocket, api.NodeStatusTTL, time.Now)
-	node := lnd.New(cfg.LNDAddress,
-		lnd.VolumeCredentials(cfg.CredentialsDir, lnd.ReceiveMacaroon),
-		lnd.Options{Log: log, Broker: broker})
+	receiveCredentials := lnd.VolumeCredentials(cfg.CredentialsDir, lnd.ReceiveMacaroon)
+	node := lnd.New(cfg.LNDAddress, receiveCredentials, lnd.Options{Log: log, Broker: broker})
 	defer node.Close()
 
 	// A SECOND client, for the payment path only (d24.2).
@@ -329,6 +328,19 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// forward reference is safe. It exists so §11's panel and the admin
 	// limiter read ONE trusted-proxy list rather than two that drift (d46.19).
 	var handler *api.Server
+	// The SERVER's own credential, put to the node (`20i.21`): nothing else
+	// exercises it until a lightning address is configured and a payer calls
+	// back. ONE probe for both reports below, so the page and the ladder share
+	// one rate limit rather than each asking the node on its own.
+	//
+	// THE RECEIVE CLIENT, and GetInfo on it: read-only, in ReceivePermissions,
+	// and never the client that holds the spend macaroon. A seam test holds this
+	// by watching which macaroon the node is sent.
+	serverCredential := preflight.NewCredentialProbe(ctx,
+		serverCredentialProbe(node, receiveCredentials), preflight.ProbeOptions{})
+	// Deferred AFTER node.Close, so it runs BEFORE it: a probe a render started
+	// is joined before the client it calls through is closed.
+	defer serverCredential.Close()
 	// ONE report, built from one set of inputs, differing in a single argument:
 	// where the guard's status comes from. The UI reads the cache; the ladder
 	// reads the socket. Two closures over one construction, so the policy cannot
@@ -364,6 +376,13 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 					return db.CountAuditEventsSince(ctx, logging.EventGuardReject, since)
 				},
 				ProxiesDeclared: func() bool { return handler != nil && handler.ProxiesDeclared() },
+				// The certificate the receive client dials with, against the
+				// address it dials: the same decision lnd.Client makes before it
+				// dials, read for the panel (`20i.11`).
+				CertificateName: func() *lnd.CertificateNameError {
+					return lnd.CertificateNamesMatch(receiveCredentials.CertPath(), cfg.LNDAddress)
+				},
+				ServerCredential: serverCredential.Result,
 				Repair: func(what string) {
 					if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
 						logging.EventPreflightRepair, slog.String("detail", what)); err != nil {
@@ -527,6 +546,25 @@ const guardEventInterval = 5 * time.Minute
 // response's events to the relay. Polling once before the first tick is
 // deliberate — a bake raised at install time should be on the Security page
 // when the operator first opens it, not five minutes later.
+// serverCredentialProbe is the call behind the Node page's server line: GetInfo
+// on the receive client (`20i.21`).
+//
+// A FAILURE WITH NO CREDENTIAL ON DISK IS "NOT LINKED", whatever code it came
+// back with. Once the connection is cached, grpc-go stringifies the per-RPC
+// credential's ErrNotLinked into an Unauthenticated status — the code the row
+// reads as the node refusing the credential — which is why lnd's recordState asks
+// the credential source rather than the error. Measured: without this, deleting
+// recv.macaroon after one good probe reported a refusal.
+func serverCredentialProbe(node *lnd.Client, creds lnd.CredentialSource) func(context.Context) error {
+	return func(ctx context.Context) error {
+		_, err := node.GetInfo(ctx)
+		if err != nil && !creds.Ready() {
+			return lnd.ErrNotLinked
+		}
+		return err
+	}
+}
+
 func runGuardEvents(ctx context.Context, broker *api.CachedBroker, log *slog.Logger) {
 	poll := func() {
 		if _, err := broker.Status(ctx); err != nil && ctx.Err() == nil {

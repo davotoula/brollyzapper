@@ -565,6 +565,10 @@ var flashMessages = map[string]string{
 	"incomplete_form": "That save was missing some of the Settings form's fields, so nothing " +
 		"was changed. Reload this page and save again — saving a partial form would have " +
 		"emptied the fields it left out.",
+	// `20i.11`: the Node page's own explanation is below this, so the flash
+	// says only what did not happen and why.
+	"relink_blocked": "Nothing was re-linked: your node is refusing the credential for the " +
+		"address it sees, and a fresh credential carries the same address.",
 	"signed-out": "Signed out. That ended every session, on every device — " +
 		"anyone still signed in elsewhere has to sign in again.",
 
