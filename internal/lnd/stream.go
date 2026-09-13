@@ -90,18 +90,27 @@ func (c *Client) RunInvoiceStream(ctx context.Context, resume SettleIndexStore, 
 // case is Info and says what it waits for; a drop of a stream that worked, or a
 // failure in any other state, stays WARN.
 //
-// Decided by STATE, never by the error: once the connection is cached, an absent
-// credential arrives as a stringified Unauthenticated status rather than
+// Decided by STATE, never by the error text: once the connection is cached, an
+// absent credential arrives as a stringified Unauthenticated status rather than
 // ErrNotLinked (see recordState), so a match on the sentinel would hold on the
-// first start and silently stop on the second.
+// first start and silently stop on the second. A localFailure is excluded
+// because it never reached observeStream, so the state it would be read against
+// is left over from an earlier attempt.
 func (c *Client) logRetry(ctx context.Context, err error, attempt int, worked bool) {
 	state := c.State()
 	level, msg := slog.LevelWarn, "invoice stream dropped; reconnecting"
-	if state == StateNotLinked && !worked {
+	var local localFailure
+	if state == StateNotLinked && !worked && !errors.As(err, &local) {
 		level, msg = slog.LevelInfo, "waiting for the guard's credential before opening the invoice stream"
 	}
 	c.log.Log(ctx, level, msg, "error", err.Error(), "attempt", attempt, "state", string(state))
 }
+
+// localFailure is a stream failure of this process's own — the resume point, the
+// handler — rather than an answer from the node, so it moved no state.
+type localFailure struct{ error }
+
+func (f localFailure) Unwrap() error { return f.error }
 
 // streamOnce opens the stream and pumps it until it ends, reporting whether it
 // received anything — which is what tells the caller the stream was working
@@ -109,7 +118,7 @@ func (c *Client) logRetry(ctx context.Context, err error, attempt int, worked bo
 func (c *Client) streamOnce(ctx context.Context, resume SettleIndexStore, handle InvoiceHandler) (bool, error) {
 	last, err := resume.LastSettleIndex(ctx)
 	if err != nil {
-		return false, fmt.Errorf("reading the resume point: %w", err)
+		return false, localFailure{fmt.Errorf("reading the resume point: %w", err)}
 	}
 	client, err := c.lightning()
 	if err != nil {
@@ -138,12 +147,12 @@ func (c *Client) streamOnce(ctx context.Context, resume SettleIndexStore, handle
 			continue
 		}
 		if err := handle(ctx, invoice); err != nil {
-			return received, fmt.Errorf("handling settlement at index %d: %w",
-				invoice.SettleIndex, err)
+			return received, localFailure{fmt.Errorf("handling settlement at index %d: %w",
+				invoice.SettleIndex, err)}
 		}
 		if invoice.SettleIndex > 0 {
 			if err := resume.SetLastSettleIndex(ctx, invoice.SettleIndex); err != nil {
-				return received, fmt.Errorf("persisting the resume point: %w", err)
+				return received, localFailure{fmt.Errorf("persisting the resume point: %w", err)}
 			}
 		}
 	}

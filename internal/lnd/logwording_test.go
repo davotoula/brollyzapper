@@ -75,11 +75,11 @@ func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
 }
 
 // runStream runs the invoice stream until the test ends.
-func runStream(t *testing.T, client *lnd.Client, handle lnd.InvoiceHandler) {
+func runStream(t *testing.T, client *lnd.Client, resume lnd.SettleIndexStore, handle lnd.InvoiceHandler) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- client.RunInvoiceStream(ctx, &memoryResume{}, handle) }()
+	go func() { done <- client.RunInvoiceStream(ctx, resume, handle) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
@@ -106,6 +106,8 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 		setup     func(t *testing.T, node *lndtest.Node, dir string) lnd.InvoiceHandler
 		// prime runs against the client before the stream starts, when set.
 		prime func(t *testing.T, client *lnd.Client, dir string)
+		// resume is the settle-index store, memoryResume when unset.
+		resume lnd.SettleIndexStore
 	}{{
 		// The first start: the guard has not written the credential yet.
 		name: "not linked, never up", state: lnd.StateNotLinked, wasUp: false,
@@ -130,6 +132,15 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+	}, {
+		// Not linked, but the failure is this process's own: the resume point
+		// could not be read, before the node or the credential was consulted.
+		// The stored state still says not_linked, and "waiting for the guard"
+		// would hide a database failure at INFO.
+		name: "not linked, never up, resume point unreadable", state: lnd.StateNotLinked, wasUp: false,
+		wantLevel: "WARN", wantMsg: streamDropped,
+		setup:  func(*testing.T, *lndtest.Node, string) lnd.InvoiceHandler { return nil },
+		resume: unreadableResume{},
 	}, {
 		// A stream that delivered, and then lost its credential underneath it.
 		// A drop of something that was up is a drop, whatever the state after.
@@ -180,7 +191,11 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 			if tc.prime != nil {
 				tc.prime(t, client, dir)
 			}
-			runStream(t, client, handle)
+			resume := tc.resume
+			if resume == nil {
+				resume = &memoryResume{}
+			}
+			runStream(t, client, resume, handle)
 
 			var got logRecord
 			lndtest.WaitFor(t, "the first retry line", func() bool {
@@ -232,7 +247,7 @@ func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 			opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
 			client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
 			defer client.Close()
-			runStream(t, client, func(context.Context, *lnrpc.Invoice) error { return nil })
+			runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
 
 			// The line is written before the request, so a request means the line exists.
 			lndtest.WaitFor(t, "a re-bake request", func() bool { return broker.Bakes() > 0 })
@@ -253,3 +268,11 @@ func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 		})
 	}
 }
+
+// unreadableResume fails the way a locked or unreadable database would.
+type unreadableResume struct{}
+
+func (unreadableResume) LastSettleIndex(context.Context) (uint64, error) {
+	return 0, errors.New("database is locked")
+}
+func (unreadableResume) SetLastSettleIndex(context.Context, uint64) error { return nil }
