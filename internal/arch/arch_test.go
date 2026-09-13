@@ -6946,3 +6946,85 @@ func (g *Guard) sweep(ctx context.Context) {
 }
 `)}))
 }
+
+// grantSnapshotReaders are the functions allowed to read a stored grant from a
+// state they loaded without the store's lock, each with the reason it is safe.
+var grantSnapshotReaders = map[string]string{
+	// Display only: it tells the page a grant exists and when it dies, and
+	// decides nothing the guard then acts on.
+	"internal/guard/guard.go:Status": "display",
+	// The cheap skip before taking the lock. Everything it acts on is judged
+	// again inside the closure, against what is really stored.
+	"internal/guard/operator.go:sweepExpired": "re-judged under the lock",
+}
+
+// checkGrantsAreJudgedUnderTheLock reports a read of a stored grant outside a
+// state-store closure, anywhere but grantSnapshotReaders, and which of those
+// still read one.
+func checkGrantsAreJudgedUnderTheLock(t *testing.T, files []sourceFile) (found []problem, readers map[string]bool) {
+	readers = map[string]bool{}
+	walkGuardUnderStateLock(t, files, func(f sourceFile, pos token.Position, fn *ast.FuncDecl, n ast.Node, locked int) {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Authorisation" || locked > 0 {
+			return
+		}
+		key := f.rel + ":" + fn.Name.Name
+		if _, allowed := grantSnapshotReaders[key]; allowed {
+			readers[key] = true
+			return
+		}
+		found = append(found, problem{f.rel, pos.Line,
+			fmt.Sprintf("%s reads the stored grant outside the state store's lock. A state "+
+				"loaded before the lock is a snapshot another connection can have redeemed, "+
+				"swept or superseded since, and a grant judged on it has been the same defect "+
+				"three times: a sweep clearing a replacement (`0vk.54`), a supersede row for a "+
+				"consumed grant (`0vk.56`), and a redeem writing a superseded grant back over "+
+				"its replacement (`rvw`). Judge it inside the updateIf closure", fn.Name.Name)})
+	})
+	return found, readers
+}
+
+// A stored grant is JUDGED under the store's lock (`rvw`).
+//
+// TestTheGrantHasOneWriter holds the writes, and that is not enough on its own:
+// every stale-snapshot defect this code has had began with a READ — a grant taken
+// from a state loaded before the lock and acted on after it. The one-writer rule
+// would have caught the half of redeem's defect that wrote the old grant back,
+// and not the half that consumed a replacement it had never seen. This is the
+// rule on the read, which is where the class starts.
+func TestTheGrantIsJudgedUnderTheLock(t *testing.T) {
+	found, readers := checkGrantsAreJudgedUnderTheLock(t, sourceFiles(t))
+	clean(t, found)
+	// An allowance nothing uses any more is one a later function could inherit by
+	// taking the name.
+	for key := range grantSnapshotReaders {
+		if !readers[key] {
+			t.Errorf("%s is allowed to read a grant snapshot and no longer does; remove it from "+
+				"grantSnapshotReaders", key)
+		}
+	}
+
+	// redeem as it was before `rvw`: the grant taken from ApplyChange's load.
+	found, _ = checkGrantsAreJudgedUnderTheLock(t, []sourceFile{planted("internal/guard", `package guard
+
+func (g *Guard) redeem(ctx context.Context, state State, change Change, code string) error {
+	grant := state.Authorisation
+	if grant == nil {
+		return errAuthorisationRequired
+	}
+	return g.state.update(func(st *State) { replaceAuthorisation(st, nil) })
+}
+`)})
+	catches(t, found, "redeem reads the stored grant outside the state store's lock")
+
+	// The compliant form.
+	found, _ = checkGrantsAreJudgedUnderTheLock(t, []sourceFile{planted("internal/guard", `package guard
+
+func (g *Guard) redeem() error {
+	return g.state.updateIf(func(st *State) bool {
+		return st.Authorisation != nil
+	})
+}
+`)})
+	clean(t, found)
+}
