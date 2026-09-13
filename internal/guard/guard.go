@@ -578,7 +578,10 @@ func (g *Guard) EnsureReceiveMacaroon(ctx context.Context) error {
 		g.log.Info("receive macaroon already present and within policy")
 		return nil
 	}
-	g.log.Info("baking the receive macaroon", "reason", why.Error())
+	// Worded as an attempt, so a failing loop cannot read as progress beside
+	// "receive macaroon baked" (20i.7). Info, not Debug: when the attempt fails
+	// this is the only line with the reason — the callers' WARNs carry the error.
+	g.log.Info("asking the node for a receive macaroon", "reason", why.Error())
 	return g.bake(ctx, receiveCredential, why.Error())
 }
 

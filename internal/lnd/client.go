@@ -345,7 +345,14 @@ func (c *Client) requestReBake(ctx context.Context, cause error) {
 			"error", cause.Error(), "interval", ReBakeInterval.String())
 		return
 	}
-	c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
+	// The request below is broad; the sentence takes recordState's narrow test,
+	// so the log says re-link exactly when the Node page does (20i.22).
+	if IsAuthFailure(cause) {
+		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
+	} else {
+		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
+			"code", status.Code(cause).String(), "error", cause.Error())
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, reBakeTimeout)
 	defer cancel()

@@ -386,7 +386,9 @@ func (g *Guard) EnsureSpendMacaroon(ctx context.Context) error {
 	if why == nil {
 		return nil
 	}
-	g.log.Info("baking the spend macaroon", "reason", why.Error())
+	// Worded as an attempt, for the receive line's reason (see
+	// EnsureReceiveMacaroon).
+	g.log.Info("asking the node for a spend macaroon", "reason", why.Error())
 	return g.bake(ctx, spendCredential, why.Error())
 }
 
