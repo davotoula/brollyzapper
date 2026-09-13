@@ -30,13 +30,13 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	// FROM THE REPORT, NOT COMPUTED HERE (`20i.11`). This page used to hold the
 	// address verdict itself, so the Security panel could only point at it;
 	// preflight's credential-address check now computes it once, from both
-	// halves, for both pages — and the handler below asks the same one.
-	if report.Blocked(preflight.BlocksRelink) {
-		view.MismatchedAddress = report.MismatchedAddress
-	}
+	// halves, for both pages — and the handler below asks the same one. The
+	// address is set exactly when that check blocks re-linking, so it is the
+	// verdict as well as the value.
+	view.MismatchedAddress = report.MismatchedAddress
 	// The server's own credential, from the same report the Security panel
-	// renders its check from (`20i.21`) — a cached answer with its time, never a
-	// node call made by this render.
+	// renders its check from (`20i.21`) — a cached answer with its time. A render
+	// may START a probe when one is due; it never waits on the node.
 	if probe := report.ServerCredential; probe != nil {
 		view.ServerCheckedAt = probe.At
 		view.ServerReachable = !probe.At.IsZero() && probe.Err == nil
