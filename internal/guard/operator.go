@@ -388,7 +388,7 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// be one slot, unsplittable and crash-atomic — and would make "how did this
 	// grant end" two questions rather than one. Filed rather than folded in.
 	if superseded != nil {
-		g.auditDiscardedGrant(ctx, *superseded, "superseded by a new request")
+		g.auditDiscardedGrant(ctx, *superseded, discardSuperseded)
 	}
 	// Audited: an authorisation request is the app asking for more authority
 	// than it has, which is worth a durable row whether or not it is redeemed.
@@ -404,7 +404,8 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 // The first version of this fix carried the word alone and recovered the
 // direction with `outcome == "tightening"` — which reads as safe and is not: the
 // outcome vocabulary is OPEN. Seven words reached auditAuthorisation then,
-// including free-form text composed by the discard path, so every word but
+// including free text passed in by the discard path (closed since: see
+// discardReason), so every word but
 // one defaulted to RAISE. The next outcome added on a non-loosening path would
 // have reproduced BrollyZap-66t exactly, one word later, with no compile error
 // and no failing test — and RAISE is the wrong way for that default to fall,
@@ -426,10 +427,34 @@ var (
 	outcomeWrongCode  = outcome{word: "wrong code"}
 )
 
-// discarded is the one outcome whose word is composed rather than chosen, and it
-// is always a loosening: a grant only ever exists for one, because
-// RequestAuthorisation refuses to issue for anything else.
-func discarded(why string) outcome { return outcome{word: why} }
+// discardReason is why a grant ended without being honoured, and it is the
+// discard outcome's word.
+//
+// A CLOSED SET, for the reason ErrorKind is one (`ic9`, folded into `rvw`). These
+// words reach the durable outcome column, and while the parameter was a string
+// the set grew by whatever a call site typed: four routes, four literals, and the
+// fourth the first written on a path that is not a failure — which is how a
+// vocabulary stops being "the ways this went wrong" and becomes an ontology.
+// A struct rather than a string type so that an untyped literal at a call site
+// does not compile. A fifth reason is a decision about how §12 reads; the test
+// that pins discardReasons is where it gets made.
+type discardReason struct{ word string }
+
+var (
+	discardExpired        = discardReason{"expired"}
+	discardOfferedAgainst = discardReason{"offered against a different change"}
+	discardTooManyWrong   = discardReason{"too many wrong codes"}
+	discardSuperseded     = discardReason{"superseded by a new request"}
+)
+
+// discardReasons is the whole set.
+var discardReasons = []discardReason{discardExpired, discardOfferedAgainst, discardTooManyWrong,
+	discardSuperseded}
+
+// discarded is the outcome for a grant that ended unhonoured, and it is always a
+// loosening: a grant only ever exists for one, because RequestAuthorisation
+// refuses to issue for anything else.
+func discarded(why discardReason) outcome { return outcome{word: why.word} }
 
 // ApplyChange is the one site that changes an operator control.
 //
@@ -578,9 +603,9 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 	now := g.rotation.clock()
 	var (
-		refusal   error  // what the caller is told; nil when the code redeems
-		discarded string // the grant ended unhonoured, and this is why
-		wrongCode bool   // a wrong code the grant survives
+		refusal   error          // what the caller is told; nil when the code redeems
+		ended     *discardReason // the grant ended unhonoured, and this is why
+		wrongCode bool           // a wrong code the grant survives
 	)
 	err := g.state.updateIf(func(st *State) bool {
 		grant := st.Authorisation
@@ -589,14 +614,14 @@ func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 			refusal = errAuthorisationRequired
 			return false
 		case grant.expired(now):
-			discarded = "expired"
+			ended = &discardExpired
 			refusal = fmt.Errorf("guard: that authorisation expired; ask for a new one")
 		case grant.Change != change:
 			// NOT counted as an attempt, and consumed outright. A code offered for
 			// a change other than the one the operator was shown is not a typo —
 			// it is the server spending an answer on a question it was not asked,
 			// which is the attack this file exists to stop.
-			discarded = "offered against a different change"
+			ended = &discardOfferedAgainst
 			refusal = fmt.Errorf("guard: the outstanding authorisation is for a different change; " +
 				"ask for a new one")
 		case !grant.matches(code):
@@ -609,7 +634,7 @@ func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 					maxAuthorisationAttempts-grant.Attempts)
 				return true
 			}
-			discarded = "too many wrong codes"
+			ended = &discardTooManyWrong
 			refusal = fmt.Errorf("guard: that code is wrong, and this authorisation is now spent; " +
 				"ask for a new one")
 		}
@@ -632,11 +657,11 @@ func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 		return true
 	})
 	switch {
-	case discarded != "":
+	case ended != nil:
 		if err != nil {
 			g.log.Warn("could not clear a spent authorisation", "error", err.Error())
 		}
-		g.auditDiscardedGrant(ctx, change, discarded)
+		g.auditDiscardedGrant(ctx, change, *ended)
 		return refusal
 	case err != nil:
 		return err
@@ -734,7 +759,7 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		// Nothing was discarded here, so nothing is said about it.
 		return state
 	}
-	g.auditDiscardedGrant(ctx, swept.Change, "expired")
+	g.auditDiscardedGrant(ctx, swept.Change, discardExpired)
 	// The caller's copy, brought into line with what was just written. Through
 	// the writer as well, so there is still one assignment to point a rule at;
 	// what it displaces from a snapshot is nobody's business.
@@ -752,7 +777,7 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 // the shape of the outcome — and those had drifted into three copies, where a
 // fourth route could have reworded §12's one "a grant ended" row and passed every
 // per-site test.
-func (g *Guard) auditDiscardedGrant(ctx context.Context, change Change, why string) {
+func (g *Guard) auditDiscardedGrant(ctx context.Context, change Change, why discardReason) {
 	g.auditAuthorisation(ctx, slog.LevelWarn, "an authorisation was discarded", change, discarded(why))
 }
 
