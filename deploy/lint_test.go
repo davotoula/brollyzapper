@@ -28,6 +28,7 @@
 package deploy
 
 import (
+	"cmp"
 	"errors"
 	"maps"
 	"net/netip"
@@ -848,10 +849,11 @@ func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 // interimCandidates is every line of path an INTERIM note could be on, in file
 // order, each with its line number.
 //
-// THE COMPOSE GIVES ITS COMMENTS, NOT ITS TEXT. A note about the template lives
-// in its prose by design, so this is the one check whose subject is a comment —
-// and the document places each comment on its own line (composelint's
-// Comments), so nothing needs the file as lines. The other two files are prose
+// THE COMPOSE GIVES ITS COMMENTS AND ITS SCALARS, NOT ITS TEXT — both, because
+// the line scan this replaced read every line, and a malformed marker inside a
+// value was caught by it. Comments alone was measured missing exactly that
+// (go-review, 20i.18): red on main, green here. The document places each on its
+// line, so nothing needs the file as lines. The other two files are prose
 // throughout, and are read as lines.
 func interimCandidates(t *testing.T, path string, compose *composelint.Document) []numberedLine {
 	t.Helper()
@@ -860,6 +862,10 @@ func interimCandidates(t *testing.T, path string, compose *composelint.Document)
 		for _, c := range compose.Comments() {
 			out = append(out, numberedLine{Text: c.Text, Line: c.Line})
 		}
+		for _, s := range compose.Scalars() {
+			out = append(out, numberedLine{Text: s.Value, Line: s.Line})
+		}
+		slices.SortStableFunc(out, func(a, b numberedLine) int { return cmp.Compare(a.Line, b.Line) })
 		return out
 	}
 	raw, err := os.ReadFile(path)

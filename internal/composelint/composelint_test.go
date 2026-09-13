@@ -133,3 +133,32 @@ func TestKeyCarriesTheCommentAboveIt(t *testing.T) {
 		t.Error("a key under a service that does not exist was found")
 	}
 }
+
+// A KEY INHERITED THROUGH A MERGE IS THE SERVICE'S KEY (go-review, 20i.18). A
+// lookup that walked only the literal keys reported a service whose networks come
+// from `<<: *common` as having none — silently, the form Networks documents as
+// "no networks: at all". Folding shared settings into an x- anchor is the obvious
+// next tidy of regtest's stack, so this is the shape that would meet it.
+func TestLookupsFollowMergeKeys(t *testing.T) {
+	doc := composelint.Parse(t, "fixture", []byte(
+		"x-common: &common\n"+
+			"  networks:\n"+
+			"    brolly:\n"+
+			"      aliases: [a.example]\n"+
+			"  ports: [\"8080:8080\"]\n"+
+			"services:\n"+
+			"  a:\n"+
+			"    <<: *common\n"+
+			"    image: x\n"), nil)
+
+	networks, err := doc.Networks("a")
+	if err != nil || len(networks["brolly"].Aliases) != 1 {
+		t.Errorf("Networks(a) = %+v, %v; want the merged brolly network", networks, err)
+	}
+	if ports, err := doc.Ports("a"); err != nil || !slices.Equal(ports, []string{"8080:8080"}) {
+		t.Errorf("Ports(a) = %q, %v; want the merged mapping", ports, err)
+	}
+	if _, ok := doc.Key("services", "a", "image"); !ok {
+		t.Error("a literal key beside a merge key was not found")
+	}
+}

@@ -50,16 +50,48 @@ func (d *Document) entry(path []string) (key, value *yaml.Node, ok bool) {
 
 // mappingEntry is one key of a mapping node and its value; nil for a nil or
 // non-mapping node, so a chain of lookups fails once, at the end.
+//
+// MERGE KEYS ARE FOLLOWED (go-review, 20i.18). `<<: *common` gives a mapping the
+// keys of the one it names, and compose — like yaml.v3's own Decode — reads them
+// as the service's. A lookup over the literal keys alone reported a service whose
+// networks come through a merge as having none: silently, the form Networks
+// documents as "no networks: at all". A key set literally wins over a merged one,
+// as it does in YAML; `<<:` may name one alias or a sequence of them, earlier
+// entries winning.
 func mappingEntry(node *yaml.Node, key string) (k, v *yaml.Node) {
+	node = resolveAlias(node)
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil, nil
 	}
+	var merges []*yaml.Node
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
+		switch node.Content[i].Value {
+		case key:
 			return node.Content[i], node.Content[i+1]
+		case "<<":
+			merges = append(merges, node.Content[i+1])
+		}
+	}
+	for _, merge := range merges {
+		sources := []*yaml.Node{merge}
+		if merge.Kind == yaml.SequenceNode {
+			sources = merge.Content
+		}
+		for _, source := range sources {
+			if k, v := mappingEntry(source, key); k != nil {
+				return k, v
+			}
 		}
 	}
 	return nil, nil
+}
+
+// resolveAlias is the node an alias names, or the node itself.
+func resolveAlias(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
 }
 
 // Between is what sits between two keys of one mapping.
@@ -84,6 +116,9 @@ type Between struct {
 // the caller's message for that case names both lines.
 func (d *Document) KeysBetween(mapping []string, first, second string) (Between, error) {
 	_, node, ok := d.entry(mapping)
+	node = resolveAlias(node)
+	// LITERAL KEYS ONLY below: a merged key has no position in this mapping, and
+	// the question is about order.
 	if !ok || node.Kind != yaml.MappingNode {
 		return Between{}, fmt.Errorf("%s has no mapping at %s", d.path, strings.Join(mapping, "."))
 	}
@@ -128,7 +163,7 @@ func (d *Document) Networks(service string) (map[string]NetworkSettings, error) 
 		return nil, nil
 	}
 	var out map[string]NetworkSettings
-	if err := node.Decode(&out); err != nil {
+	if err := resolveAlias(node).Decode(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -142,7 +177,7 @@ func (d *Document) Ports(service string) ([]string, error) {
 		return nil, nil
 	}
 	var out []string
-	if err := node.Decode(&out); err != nil {
+	if err := resolveAlias(node).Decode(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
