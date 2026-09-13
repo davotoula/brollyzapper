@@ -34,6 +34,13 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	if report.Blocked(preflight.BlocksRelink) {
 		view.MismatchedAddress = report.MismatchedAddress
 	}
+	// The server's own credential, from the same report the Security panel
+	// renders its check from (`20i.21`) — a cached answer with its time, never a
+	// node call made by this render.
+	if probe := report.ServerCredential; probe != nil {
+		view.ServerCheckedAt = probe.At
+		view.ServerReachable = !probe.At.IsZero() && probe.Err == nil
+	}
 	data.Node = view
 	data.Flash = flashFrom(r)
 	s.render(w, "node", data)

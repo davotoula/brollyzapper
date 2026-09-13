@@ -328,6 +328,18 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// forward reference is safe. It exists so §11's panel and the admin
 	// limiter read ONE trusted-proxy list rather than two that drift (d46.19).
 	var handler *api.Server
+	// The SERVER's own credential, put to the node (`20i.21`): nothing else
+	// exercises it until a lightning address is configured and a payer calls
+	// back. ONE probe for both reports below, so the page and the ladder share
+	// one rate limit rather than each asking the node on its own.
+	//
+	// THE RECEIVE CLIENT, and GetInfo on it: read-only, in ReceivePermissions,
+	// and never the client that holds the spend macaroon. A seam test holds this
+	// by watching which macaroon the node is sent.
+	serverCredential := preflight.NewCredentialProbe(ctx, func(ctx context.Context) error {
+		_, err := node.GetInfo(ctx)
+		return err
+	}, preflight.ProbeOptions{})
 	// ONE report, built from one set of inputs, differing in a single argument:
 	// where the guard's status comes from. The UI reads the cache; the ladder
 	// reads the socket. Two closures over one construction, so the policy cannot
@@ -369,6 +381,7 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 				CertificateName: func() *lnd.CertificateNameError {
 					return lnd.CertificateNamesMatch(receiveCredentials.CertPath(), cfg.LNDAddress)
 				},
+				ServerCredential: serverCredential.Result,
 				Repair: func(what string) {
 					if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
 						logging.EventPreflightRepair, slog.String("detail", what)); err != nil {

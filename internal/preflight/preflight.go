@@ -63,6 +63,8 @@ const (
 	// `20i.11`: the two operator hints that used to reach one surface each.
 	CheckCertificateName   = "lnd.certificate_name"
 	CheckCredentialAddress = "node.credential_address"
+	// `20i.21`: the server's own credential, put to the node.
+	CheckServerCredential = "node.server_credential"
 )
 
 // TierOneChecks is the whole of Tier 1. §11: exactly one condition, and it
@@ -149,6 +151,11 @@ type Report struct {
 	// explanation needs the value, and it travels with the verdict so no page
 	// can name an address for a refusal that is not happening.
 	MismatchedAddress string
+	// ServerCredential is the last answer the server's own credential got from
+	// the node, with its time (`20i.21`). Nil when no probe is wired; a zero At
+	// means not asked yet. A MEASUREMENT beside its check, like Spend: the Node
+	// page states it as "yes/no, as of", and the check is the verdict on it.
+	ServerCredential *ProbeResult
 }
 
 // SpendWindow is a MEASUREMENT, not a verdict, and that is why it is a field
@@ -345,7 +352,11 @@ type Inputs struct {
 	// lnd.Client makes before it dials, read here for the panel. A POINTER, not
 	// an error, so a passing certificate cannot arrive as a non-nil interface.
 	CertificateName func() *lnd.CertificateNameError
-	Now             func() time.Time
+	// ServerCredential is the server's own credential's last answer from the
+	// node — a CredentialProbe's Result, which never waits on the node and asks
+	// it at most once per ServerCredentialInterval (`20i.21`).
+	ServerCredential func() ProbeResult
+	Now              func() time.Time
 }
 
 // Run evaluates every Tier-2 check.
@@ -361,10 +372,13 @@ func Run(ctx context.Context, in Inputs) Report {
 	state := nodeState(in)
 	mismatch, mismatchedAddress := credentialAddressCheck(state, broker)
 	report.MismatchedAddress = mismatchedAddress
+	serverCredential, probed := serverCredentialCheck(in)
+	report.ServerCredential = probed
 	report.Checks = append(report.Checks,
 		nodeCheck(state, mismatchedAddress != ""),
 		mismatch,
 		certificateNameCheck(in, state),
+		serverCredential,
 		guardCheck(broker),
 		addressCheck(ctx, in),
 		reconciliationCheck(ctx, in),
