@@ -6711,3 +6711,242 @@ func (g *Guard) sweep() error {
 }
 `)}))
 }
+
+// grantWriter is the one function permitted to assign State.Authorisation, and
+// the file it lives in. Both, so a second function borrowing the name in another
+// guard file is not exempt.
+const (
+	grantWriter     = "replaceAuthorisation"
+	grantWriterFile = "internal/guard/operator.go"
+)
+
+// checkTheGrantHasOneWriter reports an assignment to a stored grant anywhere in
+// internal/guard but replaceAuthorisation, and the number of assignments it found
+// inside replaceAuthorisation itself.
+//
+// BY FIELD NAME, NOT BY TYPE: nothing here is type-checked, so `x.Authorisation =`
+// is flagged whatever x is. That is exact today — State is the only guard type
+// with a field of that name — and a second one would be a naming collision worth
+// being told about. A keyed composite literal (`State{Authorisation: g}`) is a
+// write too, and is flagged the same way. A whole-struct assignment (`*st =
+// other`) is not, and cannot be without types; it is also not a shape anything in
+// the guard writes.
+func checkTheGrantHasOneWriter(t *testing.T, files []sourceFile) (found []problem, inWriter int) {
+	fset := token.NewFileSet()
+	for _, f := range files {
+		if f.dir != "internal/guard" {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, f.path, f.src, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			exempt := fn.Name.Name == grantWriter && f.rel == grantWriterFile
+			report := func(pos token.Pos) {
+				if exempt {
+					inWriter++
+					return
+				}
+				found = append(found, problem{f.rel, fset.Position(pos).Line,
+					fmt.Sprintf("%s assigns the stored grant directly. Only %s may: it "+
+						"returns the grant it displaced, and that return value is the only "+
+						"record of what a write ended. A second writer compiles, passes every "+
+						"test in the package, and removes a grant from §12's account without "+
+						"a word (`rvw`, after `0vk.54` and `0vk.56` each learned it by hand)",
+						fn.Name.Name, grantWriter)})
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.AssignStmt:
+					for _, lhs := range n.Lhs {
+						if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Authorisation" {
+							report(lhs.Pos())
+						}
+					}
+				case *ast.KeyValueExpr:
+					if key, ok := n.Key.(*ast.Ident); ok && key.Name == "Authorisation" {
+						report(n.Pos())
+					}
+				}
+				return true
+			})
+		}
+	}
+	return found, inWriter
+}
+
+// The guard's stored grant is assigned at ONE site, which reports what it
+// displaced (`rvw`).
+//
+// Every way a grant ends — superseded, swept, redeemed, spent on wrong codes —
+// owes §12 a row, and the row has to name the grant that was really stored at the
+// lock rather than what some caller's snapshot held. Five sites used to assign
+// the field, each remembering both halves by hand; the stale-snapshot half was
+// learned twice (`0vk.54`, `0vk.56`). With one writer that returns the displaced
+// grant, "what did this write end?" has exactly one answer, and a sixth writer is
+// a build failure rather than a trail that quietly says nothing.
+func TestTheGrantHasOneWriter(t *testing.T) {
+	found, inWriter := checkTheGrantHasOneWriter(t, sourceFiles(t))
+	clean(t, found)
+	// THE EXEMPTION IS NOT ALLOWED TO BECOME UNIVERSAL: renaming the writer, or
+	// moving it out of operator.go, must fail here rather than leave a rule that
+	// exempts nothing and flags nothing.
+	if inWriter != 1 {
+		t.Errorf("%s in %s assigns the grant %d time(s), want exactly 1; the rule's exemption "+
+			"no longer points at the one writer", grantWriter, grantWriterFile, inWriter)
+	}
+
+	// The plausible sixth writer: a new way for a grant to end, written the short
+	// way, in the file where one would appear.
+	sixth := planted("internal/guard", `package guard
+
+func (g *Guard) forgetGrant() error {
+	return g.state.update(func(st *State) {
+		g.clearAuthorisationFile()
+		st.Authorisation = nil
+	})
+}
+`)
+	found, _ = checkTheGrantHasOneWriter(t, []sourceFile{sixth})
+	catches(t, found, "forgetGrant assigns the stored grant directly")
+
+	// And a keyed literal, which is the same write with no `=` to grep for.
+	found, _ = checkTheGrantHasOneWriter(t, []sourceFile{planted("internal/guard", `package guard
+
+func reset(st *State) { *st = State{Authorisation: nil} }
+`)})
+	catches(t, found, "reset assigns the stored grant directly")
+
+	// The exemption is by file AND name: the writer's name borrowed elsewhere is
+	// not the writer.
+	found, _ = checkTheGrantHasOneWriter(t, []sourceFile{planted("internal/guard", `package guard
+
+func replaceAuthorisation(st *State) { st.Authorisation = nil }
+`)})
+	catches(t, found, "replaceAuthorisation assigns the stored grant directly")
+}
+
+// auditCalls are the guard's durable-trail entry points, every one of which ends
+// in a state-store update of its own.
+var auditCalls = map[string]bool{
+	"audit": true, "auditAuthorisation": true, "auditDiscardedGrant": true, "auditReject": true,
+}
+
+// checkNoAuditUnderTheStateLock reports an audit call made while stateStore.mu is
+// held — lexically inside a closure passed to update/updateIf — or from inside
+// the grant's one writer, which is only ever called under that lock.
+func checkNoAuditUnderTheStateLock(t *testing.T, files []sourceFile) []problem {
+	fset := token.NewFileSet()
+	var found []problem
+	for _, f := range files {
+		if f.dir != "internal/guard" {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, f.path, f.src, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", f.rel, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			locked := 0
+			if fn.Name.Name == grantWriter {
+				locked = 1
+			}
+			var walk func(ast.Node) bool
+			walk = func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == "update" || sel.Sel.Name == "updateIf" {
+					for _, arg := range call.Args {
+						if lit, ok := arg.(*ast.FuncLit); ok {
+							locked++
+							ast.Inspect(lit.Body, walk)
+							locked--
+							return false
+						}
+					}
+				}
+				if auditCalls[sel.Sel.Name] && locked > 0 {
+					found = append(found, problem{f.rel, fset.Position(call.Pos()).Line,
+						fmt.Sprintf("%s calls %s while the state store's lock is held. Every "+
+							"audit call ends in g.state.update, a second acquisition of a "+
+							"non-reentrant mutex, so this deadlocks the guard outright; and a "+
+							"row raised inside the closure is raised before the write it "+
+							"describes has succeeded — what TestASweepThatCannotWriteClaimsNothing "+
+							"exists to forbid. Capture under the lock, audit after it (`eif`, in `rvw`)",
+							fn.Name.Name, sel.Sel.Name)})
+				}
+				return true
+			}
+			ast.Inspect(fn.Body, walk)
+		}
+	}
+	return found
+}
+
+// No audit call runs under the state store's lock (`eif`, built in `rvw`).
+//
+// It held only because every author happened to write the audit after the unlock.
+// Two things break the other way. The guard deadlocks: audit's own record is a
+// g.state.update, and stateStore.mu is a plain sync.Mutex. And a row is raised for
+// a write that may then fail, which on the polled sweep is a row every five
+// minutes for a grant that was never cleared. RequestAuthorisation's EXPIRY
+// CONDITION also rests on it — the payment path's cap check waits behind this
+// lock, and one recorded audit row was measured at ~5ms and 382 allocations.
+//
+// The grant's one writer is covered as if it were a closure, because it is only
+// ever called inside one: a writer that "helpfully" audited its own displacement
+// is the wrong mechanism `rvw`'s brief named, and it is this rule that stops it.
+func TestNoAuditUnderTheStateLock(t *testing.T) {
+	clean(t, checkNoAuditUnderTheStateLock(t, sourceFiles(t)))
+
+	// The sweep that says so from inside its own closure.
+	catches(t, checkNoAuditUnderTheStateLock(t, []sourceFile{planted("internal/guard", `package guard
+
+func (g *Guard) sweep(ctx context.Context) error {
+	return g.state.updateIf(func(st *State) bool {
+		g.auditDiscardedGrant(ctx, st.Authorisation.Change, "expired")
+		return true
+	})
+}
+`)}), "sweep calls auditDiscardedGrant while the state store's lock is held")
+
+	// The writer that audits what it displaced.
+	catches(t, checkNoAuditUnderTheStateLock(t, []sourceFile{planted("internal/guard", `package guard
+
+func replaceAuthorisation(st *State, next *Authorisation) *Authorisation {
+	g.audit(context.Background(), slog.LevelWarn, "x", "", nil)
+	st.Authorisation = next
+	return nil
+}
+`)}), "replaceAuthorisation calls audit while the state store's lock is held")
+
+	// The compliant form: capture inside, speak after.
+	clean(t, checkNoAuditUnderTheStateLock(t, []sourceFile{planted("internal/guard", `package guard
+
+func (g *Guard) sweep(ctx context.Context) {
+	var swept *Authorisation
+	_ = g.state.updateIf(func(st *State) bool {
+		swept = replaceAuthorisation(st, nil)
+		return swept != nil
+	})
+	if swept != nil {
+		g.auditDiscardedGrant(ctx, swept.Change, "expired")
+	}
+}
+`)}))
+}

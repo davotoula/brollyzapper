@@ -328,12 +328,8 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 	// credential-sized write or a network call in here, this is the line to move
 	// back out and solve differently.
 	//
-	// superseded is the grant this request displaces, captured INSIDE the lock
-	// for the same reason sweepExpired captures its own: the row has to name
-	// what was actually overwritten, not what this call's snapshot happened to
-	// hold. Another connection can redeem or sweep the old grant between the
-	// load above and this lock, and then there is nothing to supersede and
-	// nothing to say (`0vk.54`'s stale-snapshot HIGH, in a second coat).
+	// superseded is what replaceAuthorisation says this install displaced — see
+	// its note for why that, and not this call's snapshot, is the only source.
 	//
 	// NOT EXPIRED, because the sweep above has already recorded those as
 	// `expired` and a second row here would report one discard twice.
@@ -343,19 +339,17 @@ func (g *Guard) RequestAuthorisation(ctx context.Context, change Change) error {
 		if wrote = g.writeAuthorisationFile(grant, now); wrote != nil {
 			return false
 		}
-		if current := st.Authorisation; current != nil && !current.expired(now) {
-			// displaced, NOT `change`: this function's own parameter is called
-			// change and means the INCOMING one, and confusing the two is the
-			// exact bug TestSupersedingALiveGrantWritesItsDiscardRow's
-			// control-name assertion exists to catch.
-			displaced := current.Change
-			superseded = &displaced
-		}
 		// The overwrite IS the clear: one grant, one file, and
 		// writeAuthorisationFile above has already replaced the old code with
 		// the new one. clearAuthorisationFile here would delete the file this
 		// closure just wrote.
-		st.Authorisation = grant
+		if displaced := replaceAuthorisation(st, grant); displaced != nil && !displaced.expired(now) {
+			// displaced, NOT `change`: this function's own parameter is called
+			// change and means the INCOMING one, and confusing the two is the
+			// exact bug TestSupersedingALiveGrantWritesItsDiscardRow's
+			// control-name assertion exists to catch.
+			superseded = &displaced.Change
+		}
 		return true
 	}); err != nil {
 		return err
@@ -596,7 +590,7 @@ func (g *Guard) redeem(ctx context.Context, state State, change Change, code str
 			return fmt.Errorf("guard: that code is wrong, and this authorisation is now spent; " +
 				"ask for a new one")
 		}
-		if err := g.state.update(func(st *State) { st.Authorisation = grant }); err != nil {
+		if err := g.state.update(func(st *State) { replaceAuthorisation(st, grant) }); err != nil {
 			return err
 		}
 		g.auditAuthorisation(ctx, slog.LevelWarn, "a wrong authorisation code was offered",
@@ -682,23 +676,19 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 	if grant := state.Authorisation; grant == nil || !grant.expired(g.rotation.clock()) {
 		return state
 	}
-	// swept is the CURRENT grant's change, captured inside the lock, because the
-	// row has to name what was actually discarded rather than what the caller's
-	// snapshot happened to hold.
-	var swept *Change
+	// swept is what replaceAuthorisation says this clear displaced — see its
+	// note for why that, and not the caller's snapshot, is the only source.
+	var swept *Authorisation
 	err := g.state.updateIf(func(st *State) bool {
-		current := st.Authorisation
-		if current == nil || !current.expired(g.rotation.clock()) {
+		if current := st.Authorisation; current == nil || !current.expired(g.rotation.clock()) {
 			return false
 		}
-		change := current.Change
-		swept = &change
 		// Inside the lock, beside the row it belongs to — see
 		// consumeAuthorisation, which this deliberately mirrors rather than
 		// calls: that one clears unconditionally, and this one has just decided,
 		// under this same lock, that the grant it is looking at is expired.
 		g.clearAuthorisationFile()
-		st.Authorisation = nil
+		swept = replaceAuthorisation(st, nil)
 		return true
 	})
 	if err != nil {
@@ -710,8 +700,11 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		// Nothing was discarded here, so nothing is said about it.
 		return state
 	}
-	g.auditDiscardedGrant(ctx, *swept, "expired")
-	state.Authorisation = nil
+	g.auditDiscardedGrant(ctx, swept.Change, "expired")
+	// The caller's copy, brought into line with what was just written. Through
+	// the writer as well, so there is still one assignment to point a rule at;
+	// what it displaces from a snapshot is nobody's business.
+	replaceAuthorisation(&state, nil)
 	return state
 }
 
@@ -757,8 +750,46 @@ func (g *Guard) auditDiscardedGrant(ctx context.Context, change Change, why stri
 func (g *Guard) consumeAuthorisation() error {
 	return g.state.update(func(st *State) {
 		g.clearAuthorisationFile()
-		st.Authorisation = nil
+		replaceAuthorisation(st, nil)
 	})
+}
+
+// replaceAuthorisation installs next as the stored grant and returns the grant it
+// displaced: the one that was stored, unless that is next itself. It is the only
+// assignment to State.Authorisation, and internal/arch's TestTheGrantHasOneWriter
+// holds it there.
+//
+// THE RETURN VALUE IS THE ONLY RECORD OF WHAT A WRITE ENDED, and that is the rule
+// this repo learned twice by hand. A caller that loaded state and then took the
+// lock is holding a snapshot, and another connection — the guard serves one
+// goroutine per socket connection — can redeem, sweep or replace the grant in
+// between. A row composed from the snapshot names a grant that is no longer
+// there: `0vk.54`'s sweep cleared a replacement it had never seen, and `0vk.56`'s
+// first supersede would have recorded a discard for a grant already consumed.
+// Called inside the closure, this sees what is really stored, so the row a caller
+// raises from its answer names what was really overwritten.
+//
+// IT DECIDES NOTHING AND SAYS NOTHING. Whether a displaced grant deserves a row,
+// and which word, is the caller's: the sweep has already judged its grant expired
+// under this lock, RequestAuthorisation must not call an expired grant superseded,
+// and consumeAuthorisation's caller speaks for the redeem. So it takes no clock —
+// the one caller that tests liveness does it on the grant returned, still under
+// the lock. And it never audits: it runs with stateStore.mu held, every audit is a
+// state update of its own on that same non-reentrant mutex, and the callers audit
+// only once the write has succeeded — TestASweepThatCannotWriteClaimsNothing and
+// internal/arch's TestNoAuditUnderTheStateLock each hold a half of that.
+//
+// THE SAME GRANT IS NOT DISPLACED, which is redeem's attempt bump putting its
+// grant back with one more wrong code on it. Same means the fields that make a
+// grant — change, code, expiry — and not Attempts, the one that moves.
+func replaceAuthorisation(st *State, next *Authorisation) (displaced *Authorisation) {
+	old := st.Authorisation
+	st.Authorisation = next
+	if old == nil || (next != nil && old.Change == next.Change && old.Code == next.Code &&
+		old.ExpiresAt.Equal(next.ExpiresAt)) {
+		return nil
+	}
+	return old
 }
 
 // auditAuthorisationBound is how much of the guard's 32-slot ring one burst of
