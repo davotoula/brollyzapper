@@ -25,6 +25,13 @@ services:
   # in the shared credential volume (spec §3, §6).
   guard:
     image: ghcr.io/davotoula/brollyzapper-guard:0.1.21@sha256:ef30751da667901970f09853b30df317af8ca36d2e32d400ea92dd1e5d2faad7
+    # The images run as uid 65532 (distroless/static:nonroot) by default, and
+    # this line overrides that. umbrelOS creates ${APP_DATA_DIR} owned by
+    # 1000:1000, and the guard WRITES there: guard-state.json into data/guard,
+    # recv.macaroon and its socket into data/credentials. Leave it at the image
+    # default and the guard cannot write the macaroon on first run, which reads
+    # like a bake failure and is not. The server's user: line below is the same
+    # decision and must stay equal to this one.
     user: "1000:1000"
     volumes:
       - ${APP_DATA_DIR}/data/guard:/guard

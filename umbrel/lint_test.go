@@ -8,6 +8,7 @@
 package umbrel
 
 import (
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ type composeFile struct {
 		Ports         []string          `yaml:"ports"`
 		Restart       string            `yaml:"restart"`
 		DependsOn     []string          `yaml:"depends_on"`
+		// A yaml.Node because compose takes a string or a list, and the only
+		// question asked of it is whether it is there at all.
+		EnvFile yaml.Node `yaml:"env_file"`
 		// A yaml.Node because the two services spell this differently — the
 		// server needs the mapping form to carry ipv4_address, the guard names
 		// the network and nothing else — and because a missing block must be a
@@ -183,7 +187,13 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 // that stopped matching cannot quietly satisfy a comparison.
 func lineOf(t *testing.T, lines []string, needle string) int {
 	t.Helper()
-	return lineOfAfter(t, lines, needle, 0)
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), needle) {
+			return i + 1
+		}
+	}
+	t.Fatalf("no line in the package compose sets %q", needle)
+	return 0
 }
 
 // Box-verified 2026-08-21: PROXY_TRUST_UPSTREAM=true makes app_proxy forward a
@@ -191,14 +201,45 @@ func lineOf(t *testing.T, lines []string, needle string) int {
 // source address past the §7 rate limiter. It is undocumented in app-proxy's
 // own README, so nothing warns an author who adds it.
 func TestProxyTrustUpstreamAppearsNowhere(t *testing.T) {
-	_, raw := loadCompose(t)
-	if strings.Contains(raw, "PROXY_TRUST_UPSTREAM") {
-		for i, line := range strings.Split(raw, "\n") {
-			if strings.Contains(line, "PROXY_TRUST_UPSTREAM") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
-				t.Errorf("docker-compose.yml:%d sets PROXY_TRUST_UPSTREAM: %s", i+1, strings.TrimSpace(line))
-			}
+	compose, _ := loadCompose(t)
+	for _, finding := range proxyTrustUpstreamFindings(compose) {
+		t.Error(finding)
+	}
+}
+
+// proxyTrustUpstreamFindings reads the PARSED environments, never the text
+// (`20i.20`). The raw-line version exempted a line whose first character was
+// `#`, so a trailing comment on a correct line —
+//
+//	PROXY_AUTH_WHITELIST: "/x" # never set PROXY_TRUST_UPSTREAM here
+//
+// — failed a correct package. A lint that fails on the comment explaining it is
+// a lint people delete (deploy/lint_test.go says the same of its own scan).
+//
+// EVERY SERVICE'S ENVIRONMENT, AND NO FILE-WIDE HALF. The old rule also refused
+// the name anywhere in the file, but a key that is in no environment map sets
+// nothing: a variable reaches a container through `environment:` or through
+// `env_file:`, and this refuses both. app_proxy is the only service that reads
+// it today; every service is checked because the next image to read it will
+// not announce that it does. What would reopen the file-wide half: compose
+// gaining a third route into a container's environment.
+func proxyTrustUpstreamFindings(compose composeFile) []string {
+	const key = "PROXY_TRUST_UPSTREAM"
+	var findings []string
+	for _, name := range slices.Sorted(maps.Keys(compose.Services)) {
+		service := compose.Services[name]
+		if _, ok := service.Environment[key]; ok {
+			findings = append(findings, "service "+name+" sets "+key+"; app_proxy would then "+
+				"forward a client-supplied X-Forwarded-For verbatim, which hands any caller a "+
+				"spoofed source address past the rate limiter (spec §7)")
+		}
+		if !service.EnvFile.IsZero() {
+			findings = append(findings, "service "+name+" reads an env_file; "+key+" and every "+
+				"other setting could arrive through it where this lint cannot read, and the "+
+				"package has no reason to take settings from a file")
 		}
 	}
+	return findings
 }
 
 // §11: the whitelist and the public mux are two expressions of one list, in two
@@ -364,70 +405,130 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 		}
 	}
 	// THE EXPLANATION HAS TO SIT ON THE LINE IT EXPLAINS, which a whole-file
-	// scan cannot say. ON THE SERVER'S LINE, which is where it sits: the guard's
-	// user: at the top of the file carries no comment at all, so applying this
-	// to both would be red on the package as it stands, and the brief forbids
-	// editing the package. Filed rather than widened — the general rule is what
-	// this says, and the file satisfies it once. `strings.Contains(raw, "65532")` was satisfied by prose
+	// scan cannot say. `strings.Contains(raw, "65532")` was satisfied by prose
 	// anywhere in the file — and 65532 is valid hex, so one of the two image
 	// digests this file re-pins every release could satisfy it with no comment
 	// present at all. Worse, a live `user: "65532"` line would satisfy the check
-	// that exists to warn about that value. The adjacency idiom 200 lines up is
-	// what this check meant: the comment block immediately above the server's
-	// user: line names the uid the images default to.
-	lines := strings.Split(raw, "\n")
-	userLine := lineOfAfter(t, lines, "user:", lineOf(t, lines, "server:"))
-	if !strings.Contains(commentBlockAbove(lines, userLine), "65532") {
-		t.Errorf("the comment above the server's user: at line %d does not name 65532; the "+
-			"next person to touch user: will not know why 1000 matters, and an explanation "+
-			"somewhere else in the file is not one they will find", userLine)
+	// that exists to warn about that value.
+	//
+	// ON BOTH user: LINES since `20i.17`. It covered the server's alone, because
+	// the guard's had no comment and widening the rule would have been red on
+	// the package; the guard's line now carries one, and the two lines are one
+	// decision, so either can be the one somebody changes.
+	//
+	// THE PARSER SAYS WHICH COMMENT BELONGS TO WHICH LINE. yaml.v3 attaches the
+	// comment block immediately above a key to that key's HeadComment, so this
+	// asks the user: key of the named service — not the first `user:` line found
+	// below a `guard:` somewhere in the text, which reads the server's comment
+	// the day the guard's user: line is deleted.
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("parsing the package compose as a document: %v", err)
 	}
-}
-
-// lineOfAfter is lineOf from a given 1-based line rather than from the top, and
-// lineOf is the after=0 case of it — one loop, because the three things that
-// make it safe (1-based, a trimmed PREFIX rather than a substring, and Fatalf
-// rather than a sentinel) have to stay true of both.
-//
-// The package sets `user:` twice and the uid is explained above the second;
-// searching from the top finds the guard's and asserts against the wrong line.
-func lineOfAfter(t *testing.T, lines []string, needle string, after int) int {
-	t.Helper()
-	for i := after; i < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), needle) {
-			return i + 1
+	for _, name := range []string{"guard", "server"} {
+		user := serviceKey(&doc, name, "user")
+		if user == nil {
+			continue // already reported above, by value
+		}
+		if !strings.Contains(user.HeadComment, "65532") {
+			t.Errorf("the comment above the %s's user: at line %d does not name 65532; the "+
+				"next person to touch user: will not know why 1000 matters, and an explanation "+
+				"somewhere else in the file is not one they will find", name, user.Line)
 		}
 	}
-	t.Fatalf("no line below %d sets %q in the package compose", after, needle)
-	return 0
 }
 
-// commentBlockAbove is the run of comment lines immediately above the 1-based
-// line n, in file order. It stops at the first line that is not a comment, so a
-// comment attached to some other setting cannot be read as this one's — which
-// is the whole difference between "the file explains it" and "this line is
-// explained".
-func commentBlockAbove(lines []string, n int) string {
-	first := n - 1
-	for first > 0 && strings.HasPrefix(strings.TrimSpace(lines[first-1]), "#") {
-		first--
+// serviceKey is the KEY node of one setting on one service — the node that
+// carries the setting's line and the comment block written above it — or nil.
+func serviceKey(doc *yaml.Node, service, key string) *yaml.Node {
+	if len(doc.Content) == 0 {
+		return nil
 	}
-	return strings.Join(lines[first:n-1], "\n")
+	_, services := mappingEntry(doc.Content[0], "services")
+	_, svc := mappingEntry(services, service)
+	k, _ := mappingEntry(svc, key)
+	return k
+}
+
+// mappingEntry is one key of a yaml mapping node and its value. A nil or
+// non-mapping node has no keys, so a chain of lookups fails once, at the end.
+func mappingEntry(node *yaml.Node, key string) (k, v *yaml.Node) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i], node.Content[i+1]
+		}
+	}
+	return nil, nil
 }
 
 // The framework already defaults app_proxy auth on, and setting it explicitly
 // is called out as wrong by umbrel-package-app.
 func TestProxyAuthIsLeftAtTheFrameworkDefault(t *testing.T) {
-	_, raw := loadCompose(t)
-	for i, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.Contains(trimmed, "PROXY_AUTH_ADD") {
-			t.Errorf("docker-compose.yml:%d sets PROXY_AUTH_ADD; it is already the framework "+
-				"default and umbrel-package-app says not to set it", i+1)
-		}
+	compose, _ := loadCompose(t)
+	for _, finding := range proxyAuthAddFindings(compose) {
+		t.Error(finding)
+	}
+}
+
+// proxyAuthAddFindings reads app_proxy's parsed environment, for the reason
+// proxyTrustUpstreamFindings gives (`20i.20`). app_proxy's only: the setting is
+// the framework's, and on any other service it is an unread variable.
+func proxyAuthAddFindings(compose composeFile) []string {
+	if _, ok := compose.Services["app_proxy"].Environment["PROXY_AUTH_ADD"]; ok {
+		return []string{"app_proxy sets PROXY_AUTH_ADD; it is already the framework default " +
+			"and umbrel-package-app says not to set it"}
+	}
+	return nil
+}
+
+// TestTheProxyRulesReadSettingsNotProse holds `20i.20`'s three plants as rows,
+// so reverting either rule to a line scan goes red here rather than only on the
+// day a trailing comment lands in the package.
+func TestTheProxyRulesReadSettingsNotProse(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		doc           string
+		wantTrust     int
+		wantAuthAdded int
+	}{{
+		name: "a trailing comment naming both settings is prose",
+		doc: "services:\n  app_proxy:\n    environment:\n" +
+			"      PROXY_AUTH_WHITELIST: \"/x\" # never set PROXY_TRUST_UPSTREAM or PROXY_AUTH_ADD here\n",
+	}, {
+		name: "PROXY_TRUST_UPSTREAM on app_proxy",
+		doc: "services:\n  app_proxy:\n    environment:\n" +
+			"      PROXY_TRUST_UPSTREAM: \"true\"\n",
+		wantTrust: 1,
+	}, {
+		name: "PROXY_TRUST_UPSTREAM on the server",
+		doc: "services:\n  app_proxy:\n    environment:\n      APP_PORT: 8080\n" +
+			"  server:\n    environment:\n      PROXY_TRUST_UPSTREAM: \"true\"\n",
+		wantTrust: 1,
+	}, {
+		name:      "an env_file, which this lint cannot read",
+		doc:       "services:\n  app_proxy:\n    env_file: [proxy.env]\n",
+		wantTrust: 1,
+	}, {
+		name: "PROXY_AUTH_ADD on app_proxy",
+		doc: "services:\n  app_proxy:\n    environment:\n" +
+			"      PROXY_AUTH_ADD: \"true\"\n",
+		wantAuthAdded: 1,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var compose composeFile
+			if err := yaml.Unmarshal([]byte(tc.doc), &compose); err != nil {
+				t.Fatalf("parsing the row's document: %v", err)
+			}
+			if got := proxyTrustUpstreamFindings(compose); len(got) != tc.wantTrust {
+				t.Errorf("PROXY_TRUST_UPSTREAM findings = %q, want %d", got, tc.wantTrust)
+			}
+			if got := proxyAuthAddFindings(compose); len(got) != tc.wantAuthAdded {
+				t.Errorf("PROXY_AUTH_ADD findings = %q, want %d", got, tc.wantAuthAdded)
+			}
+		})
 	}
 }
 
