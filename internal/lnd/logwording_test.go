@@ -21,12 +21,15 @@ import (
 	"github.com/davotoula/brollyzapper/internal/logging"
 )
 
-// The two sentences the invoice stream logs before it waits to retry. Spelled out here rather
+// The two sentences the invoice stream logs before it waits to retry, and the
+// two requestReBake logs before it asks the guard. Spelled out here rather
 // than exported, so a change of wording has to be made twice — once where an
 // operator reads it and once where it is asserted.
 const (
-	streamDropped = "invoice stream dropped; reconnecting"
-	streamWaiting = "waiting for the guard's credential before opening the invoice stream"
+	streamDropped     = "invoice stream dropped; reconnecting"
+	streamWaiting     = "waiting for the guard's credential before opening the invoice stream"
+	relinkNeeded      = "lnd rejected our macaroon; re-link needed"
+	reBakeInCaseStale = "the node answered with an error; asking the guard to re-bake in case the credential is stale"
 )
 
 // logRecord is one JSON line, as an operator's grep sees it.
@@ -34,6 +37,7 @@ type logRecord struct {
 	Level string `json:"level"`
 	Msg   string `json:"msg"`
 	State string `json:"state"`
+	Code  string `json:"code"`
 }
 
 // syncBuffer is a bytes.Buffer a test may read while the stream goroutine is
@@ -170,6 +174,64 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 			if got.Level != tc.wantLevel || got.Msg != tc.wantMsg {
 				t.Errorf("state=%s wasUp=%v logged %s %q, want %s %q",
 					tc.state, tc.wasUp, got.Level, got.Msg, tc.wantLevel, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// 20i.22. On the 0.1.21 box trip, LND booting through a core-app update was
+// logged as WARN "lnd rejected our macaroon; re-link needed", with errors
+// saying "waiting to start" and "wallet locked". The state code takes the
+// narrow test on purpose and said "connecting"; the log took the broad one, and
+// an operator who believed the log would re-link for nothing.
+//
+// The request to the guard is broad and stays broad. Only the sentence follows
+// the narrow test.
+func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cause     error
+		wantLevel string
+		wantMsg   string
+		wantCode  string
+	}{
+		{"unauthenticated", status.Error(codes.Unauthenticated, "verification failed: signature mismatch"),
+			"WARN", relinkNeeded, ""},
+		{"permission denied", status.Error(codes.PermissionDenied, "permission denied"),
+			"WARN", relinkNeeded, ""},
+		{"a node that is starting", status.Error(codes.Unknown, "waiting to start, RPC services not available"),
+			"INFO", reBakeInCaseStale, "Unknown"},
+		{"a locked wallet", status.Error(codes.Unknown, "wallet locked, unlock it to enable full RPC access"),
+			"INFO", reBakeInCaseStale, "Unknown"},
+		{"a macaroon the parser refused", status.Error(codes.Unknown, "cannot determine data format of binary-encoded macaroon"),
+			"INFO", reBakeInCaseStale, "Unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := lndtest.Start(t)
+			dir := t.TempDir()
+			node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+			node.SetRejectWith(tc.cause)
+
+			var logged syncBuffer
+			broker := &lndtest.Broker{}
+			opts := testOptions(broker)
+			opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
+			client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
+			defer client.Close()
+			runStream(t, client, func(context.Context, *lnrpc.Invoice) error { return nil })
+
+			// The line is written before the request, so a request means the line exists.
+			lndtest.WaitFor(t, "a re-bake request", func() bool { return broker.Bakes() > 0 })
+			got, ok := logged.first(t, relinkNeeded, reBakeInCaseStale)
+			if !ok {
+				t.Fatal("the guard was asked to re-bake and nothing said so")
+			}
+			if got.Level != tc.wantLevel || got.Msg != tc.wantMsg || got.Code != tc.wantCode {
+				t.Errorf("%v logged %s %q code=%q, want %s %q code=%q",
+					tc.cause, got.Level, got.Msg, got.Code, tc.wantLevel, tc.wantMsg, tc.wantCode)
+			}
+			if tc.wantMsg != relinkNeeded && strings.Contains(got.Msg, "re-link") {
+				t.Errorf("%q claims a re-link for a cause the state does not call Relink", got.Msg)
 			}
 		})
 	}

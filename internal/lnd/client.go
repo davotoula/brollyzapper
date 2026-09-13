@@ -345,7 +345,17 @@ func (c *Client) requestReBake(ctx context.Context, cause error) {
 			"error", cause.Error(), "interval", ReBakeInterval.String())
 		return
 	}
-	c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
+	// The request below is broad and the sentence is narrow, for recordState's
+	// reason: "re-link needed" claims the node verified our macaroon and refused
+	// it, and LND answers codes.Unknown while it is merely booting — "waiting to
+	// start", "wallet locked" on the 0.1.21 trip, where this line said re-link
+	// while the Node page, correctly, said connecting (20i.22).
+	if IsAuthFailure(cause) {
+		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
+	} else {
+		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
+			"code", status.Code(cause).String(), "error", cause.Error())
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, reBakeTimeout)
 	defer cancel()
