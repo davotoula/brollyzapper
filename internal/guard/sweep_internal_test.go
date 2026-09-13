@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -347,45 +348,35 @@ func redeemAgainstAReplacement(t *testing.T, offer func(a *Authorisation) string
 		}
 	}
 	if stored != readable {
-		t.Errorf("the stored grant (code set: %t, control %v) is not the one in the operator's "+
-			"file (code set: %t). Either the operator reads a code the guard does not hold, or "+
-			"the guard holds one nobody can read (ApplyChange said: %v)",
-			stored != "", controlOf(after.Authorisation), readable != "", applyErr)
+		t.Errorf("the stored grant (code set: %t) is not the one in the operator's file (code "+
+			"set: %t). Either the operator reads a code the guard does not hold, or the guard "+
+			"holds one nobody can read (ApplyChange said: %v)",
+			stored != "", readable != "", applyErr)
 	}
 
 	// Every grant issued has either ended with a row or is still stored.
-	var issued, ended int
+	endings := []string{outcomeAuthorised.word}
+	for _, why := range discardReasons {
+		endings = append(endings, why.word)
+	}
+	var issued, ended, live int
 	for _, event := range g.recentAuditEvents() {
-		if event.Event != logging.EventGuardAuthorise {
-			continue
-		}
-		switch event.Attrs["outcome"] {
-		case "issued":
+		switch outcome := event.Attrs["outcome"]; {
+		case event.Event != logging.EventGuardAuthorise:
+		case outcome == outcomeIssued.word:
 			issued++
-		case "authorised", "expired", "offered against a different change",
-			"too many wrong codes", "superseded by a new request":
+		case slices.Contains(endings, outcome):
 			ended++
 		}
 	}
-	if live := btoi(after.Authorisation != nil); issued != ended+live {
+	if after.Authorisation != nil {
+		live = 1
+	}
+	if issued != ended+live {
 		t.Errorf("%d grant(s) issued, %d ended with a row, %d still stored: a grant left the "+
 			"state and §12 has no account of it", issued, ended, live)
 	}
 	return g, after, applyErr
-}
-
-func controlOf(a *Authorisation) Control {
-	if a == nil {
-		return ""
-	}
-	return a.Change.Control
-}
-
-func btoi(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // A wrong code against a grant superseded mid-redeem must not put that grant back

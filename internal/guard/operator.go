@@ -436,8 +436,8 @@ var (
 // fourth the first written on a path that is not a failure — which is how a
 // vocabulary stops being "the ways this went wrong" and becomes an ontology.
 // A struct rather than a string type so that an untyped literal at a call site
-// does not compile. A fifth reason is a decision about how §12 reads; the test
-// that pins discardReasons is where it gets made.
+// does not compile. A fifth reason is a decision about how §12 reads;
+// TestTheDiscardReasonsArePinned is where it gets made.
 type discardReason struct{ word string }
 
 var (
@@ -446,10 +446,6 @@ var (
 	discardTooManyWrong   = discardReason{"too many wrong codes"}
 	discardSuperseded     = discardReason{"superseded by a new request"}
 )
-
-// discardReasons is the whole set.
-var discardReasons = []discardReason{discardExpired, discardOfferedAgainst, discardTooManyWrong,
-	discardSuperseded}
 
 // discarded is the outcome for a grant that ended unhonoured, and it is always a
 // loosening: a grant only ever exists for one, because RequestAuthorisation
@@ -739,8 +735,12 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		return state
 	}
 	// swept is what replaceAuthorisation says this clear displaced — see its
-	// note for why that, and not the caller's snapshot, is the only source.
-	var swept *Authorisation
+	// note for why that, and not the caller's snapshot, is the only source —
+	// and saved is the state as this write left it, which is what goes back.
+	var (
+		swept *Authorisation
+		saved State
+	)
 	err := g.state.updateIf(func(st *State) bool {
 		if current := st.Authorisation; current == nil || !current.expired(g.rotation.clock()) {
 			return false
@@ -749,6 +749,7 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		// redeem's note on its own clear says why both halves of that matter.
 		g.clearAuthorisationFile()
 		swept = replaceAuthorisation(st, nil)
+		saved = *st
 		return true
 	})
 	if err != nil {
@@ -761,11 +762,7 @@ func (g *Guard) sweepExpired(ctx context.Context, state State) State {
 		return state
 	}
 	g.auditDiscardedGrant(ctx, swept.Change, discardExpired)
-	// The caller's copy, brought into line with what was just written. Through
-	// the writer as well, so there is still one assignment to point a rule at;
-	// what it displaces from a snapshot is nobody's business.
-	replaceAuthorisation(&state, nil)
-	return state
+	return saved
 }
 
 // auditDiscardedGrant raises the one row that says a grant ended, for every

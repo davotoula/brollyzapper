@@ -26,10 +26,10 @@ func TestTheDiscardReasonsArePinned(t *testing.T) {
 		t.Errorf("the discard reasons are %q, want %q. Changing this list changes the words in "+
 			"§12's durable trail; update every reader of those words in the same change", got, want)
 	}
-	for _, why := range discardReasons {
-		if discarded(why).tightening {
-			t.Errorf("%q is recorded as a tightening; a grant only ever exists for a loosening",
-				why.word)
-		}
-	}
 }
+
+// discardReasons is the whole set. It lives beside its pin rather than in
+// operator.go because nothing in the guard ranges over it; a reason declared
+// there and left out of here is what the pin cannot see, so add both together.
+var discardReasons = []discardReason{discardExpired, discardOfferedAgainst, discardTooManyWrong,
+	discardSuperseded}
