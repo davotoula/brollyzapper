@@ -853,20 +853,29 @@ func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 // and the document places each comment on its own line (composelint's
 // Comments), so nothing needs the file as lines. The other two files are prose
 // throughout, and are read as lines.
-func interimCandidates(t *testing.T, path string, compose *composelint.Document) []composelint.Comment {
+func interimCandidates(t *testing.T, path string, compose *composelint.Document) []numberedLine {
 	t.Helper()
+	var out []numberedLine
 	if path == composePath {
-		return compose.Comments()
+		for _, c := range compose.Comments() {
+			out = append(out, numberedLine{Text: c.Text, Line: c.Line})
+		}
+		return out
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	var out []composelint.Comment
 	for i, line := range strings.Split(string(raw), "\n") {
-		out = append(out, composelint.Comment{Text: line, Line: i + 1})
+		out = append(out, numberedLine{Text: line, Line: i + 1})
 	}
 	return out
+}
+
+// numberedLine is a line of text and its 1-based number.
+type numberedLine struct {
+	Text string
+	Line int
 }
 
 // imageTag is the tag out of a pinned reference, without the digest.

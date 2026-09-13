@@ -79,20 +79,24 @@ func Load(t testing.TB, path string, into any) *Document {
 // path only labels messages.
 func Parse(t testing.TB, path string, src []byte, into any) *Document {
 	t.Helper()
+	var root yaml.Node
+	if err := yaml.Unmarshal(src, &root); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
 	if into != nil {
-		if err := yaml.Unmarshal(src, into); err != nil {
+		if err := root.Decode(into); err != nil {
 			t.Fatalf("parsing %s: %v", path, err)
 		}
 	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(src, &root); err != nil {
-		t.Fatalf("parsing %s as a document: %v", path, err)
+	comments, unplaced := locateComments(&root, src)
+	if unplaced != "" {
+		// NEVER SILENTLY SHORT. A comment the parser reported and this could not
+		// put on a line would be a note no check sees — the direction that
+		// passes. So a document whose comments do not all place is not a document.
+		t.Fatalf("parsing %s: the comment %q could not be placed on a line", path, unplaced)
 	}
-	return &Document{path: path, root: &root, comments: locateComments(&root, src)}
+	return &Document{path: path, root: &root, comments: comments}
 }
-
-// Path is the file this document was read from.
-func (d *Document) Path() string { return d.path }
 
 // Scalars is every scalar in the document, keys included, in document order.
 //
@@ -151,33 +155,18 @@ func (d *Document) unescapedScalars() []Scalar {
 	return scalars
 }
 
-// Interpolation is one variable reference and the scalar it is in.
-type Interpolation struct {
-	Name   string
-	Scalar Scalar
-}
-
-// Interpolations is every variable the document reads, in either spelling —
-// `${NAME}`, `${NAME:-default}` and bare `$NAME` — with the scalar each is in.
+// InterpolatedNames is every variable the document reads, in either spelling —
+// `${NAME}`, `${NAME:-default}` and bare `$NAME`.
 //
 // BOTH SPELLINGS, because a brace-only pattern never collected `$LND_DIR`
 // (BrollyZap-20i.19), and the Umbrel package writes bare interpolations on its
 // most copy-pasted line.
-func (d *Document) Interpolations() []Interpolation {
-	var out []Interpolation
-	for _, scalar := range d.unescapedScalars() {
-		for _, m := range interpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
-			out = append(out, Interpolation{Name: m[1], Scalar: scalar})
-		}
-	}
-	return out
-}
-
-// InterpolatedNames is the set of names Interpolations finds.
 func (d *Document) InterpolatedNames() map[string]bool {
 	out := map[string]bool{}
-	for _, i := range d.Interpolations() {
-		out[i.Name] = true
+	for _, scalar := range d.unescapedScalars() {
+		for _, m := range interpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
+			out[m[1]] = true
+		}
 	}
 	return out
 }

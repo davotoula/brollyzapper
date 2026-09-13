@@ -175,6 +175,9 @@ func load(t *testing.T) (compose, *composelint.Document) {
 func TestComposeNamesNothingUmbrelSpecific(t *testing.T) {
 	_, doc := load(t)
 	umbrelFamilies := []string{"APP_LIGHTNING", "APP_DATA_DIR", "APP_BITCOIN", "APP_PASSWORD", "APP_BROLLYZAPPER"}
+	// LOCAL, not composelint's InterpolatedNames, which removes `$$` escapes
+	// first: that is the right reading, and it would change what this check has
+	// always flagged (`$$APP_…`). BrollyZap-20i.18 changed no check.
 	interpolation := regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
 	// Not variables, so they are matched as text — in a scalar, which is still
 	// not the raw file: a path in a comment explaining what is absent must not

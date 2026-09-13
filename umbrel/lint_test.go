@@ -164,15 +164,9 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 	//
 	// The SERVER'S environment, by path. The raw-line version took the first line
 	// anywhere in the file starting `ADMIN_PASSWORD:`.
-	environment := []string{"services", "server", "environment"}
-	for _, needle := range []string{"ADMIN_PASSWORD", managed} {
-		if _, ok := doc.Key(slices.Concat(environment, []string{needle})...); !ok {
-			t.Fatalf("no line in the package compose sets %q", needle+":")
-		}
-	}
-	between, err := doc.KeysBetween(environment, "ADMIN_PASSWORD", managed)
+	between, err := doc.KeysBetween([]string{"services", "server", "environment"}, "ADMIN_PASSWORD", managed)
 	if err != nil {
-		t.Fatalf("reading the server's environment in order: %v", err)
+		t.Fatalf("the adjacency of ADMIN_PASSWORD and %s cannot be read: %v", managed, err)
 	}
 	pwLine, managedLine := between.First, between.Second
 	if managedLine < pwLine {

@@ -2,8 +2,10 @@ package composelint
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -94,13 +96,11 @@ func (d *Document) KeysBetween(mapping []string, first, second string) (Between,
 			secondAt = i
 		}
 	}
-	for _, missing := range []struct {
-		at   int
-		name string
-	}{{firstAt, first}, {secondAt, second}} {
-		if missing.at < 0 {
-			return Between{}, fmt.Errorf("no key in %s at %s sets %q", d.path, strings.Join(mapping, "."), missing.name)
-		}
+	if firstAt < 0 {
+		return Between{}, fmt.Errorf("no key in %s at %s sets %q", d.path, strings.Join(mapping, "."), first)
+	}
+	if secondAt < 0 {
+		return Between{}, fmt.Errorf("no key in %s at %s sets %q", d.path, strings.Join(mapping, "."), second)
 	}
 	out := Between{First: node.Content[firstAt].Line, Second: node.Content[secondAt].Line}
 	for i := firstAt + 2; i < secondAt; i += 2 {
@@ -210,10 +210,12 @@ func (c *CommandLine) UnmarshalYAML(value *yaml.Node) error {
 // in order, starting from the node it is attached to. Only text the parser
 // already classified as a comment is placed, so a `#` inside a quoted value
 // cannot become one. The source is read here and not kept.
-func locateComments(root *yaml.Node, src []byte) []Comment {
+//
+// unplaced is the first comment that matched no line, or "": the caller refuses
+// the document rather than hand out a list that is quietly short.
+func locateComments(root *yaml.Node, src []byte) (out []Comment, unplaced string) {
 	lines := strings.Split(string(bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))), "\n")
 	used := make([]bool, len(lines))
-	var out []Comment
 	place := func(text string, from int, step int) {
 		for i := from; i >= 0 && i < len(lines); i += step {
 			if !used[i] && isCommentLine(lines[i], text) {
@@ -221,6 +223,9 @@ func locateComments(root *yaml.Node, src []byte) []Comment {
 				out = append(out, Comment{Text: text, Line: i + 1})
 				return
 			}
+		}
+		if unplaced == "" {
+			unplaced = text
 		}
 	}
 	walk(root, func(n *yaml.Node) {
@@ -238,8 +243,8 @@ func locateComments(root *yaml.Node, src []byte) []Comment {
 			place(text, start, +1)
 		}
 	})
-	sortComments(out)
-	return out
+	slices.SortFunc(out, func(a, b Comment) int { return cmp.Compare(a.Line, b.Line) })
+	return out, unplaced
 }
 
 // commentLines splits one of yaml.v3's comment fields into its non-blank lines.
@@ -257,12 +262,4 @@ func commentLines(block string) []string {
 // line, or its tail after code.
 func isCommentLine(line, text string) bool {
 	return strings.HasSuffix(strings.TrimRight(line, " \t"), text)
-}
-
-func sortComments(c []Comment) {
-	for i := 1; i < len(c); i++ {
-		for j := i; j > 0 && c[j].Line < c[j-1].Line; j-- {
-			c[j], c[j-1] = c[j-1], c[j]
-		}
-	}
 }
