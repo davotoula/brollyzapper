@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -66,10 +67,8 @@ func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("a log line is not JSON: %q", line)
 		}
-		for _, m := range msgs {
-			if r.Msg == m {
-				return r, true
-			}
+		if slices.Contains(msgs, r.Msg) {
+			return r, true
 		}
 	}
 	return logRecord{}, false
@@ -94,11 +93,9 @@ func runStream(t *testing.T, client *lnd.Client, handle lnd.InvoiceHandler) {
 // guard had baked anything — which is the expected condition, not a drop. A
 // WARN that is normal on every start is one an operator learns to ignore.
 //
-// The discriminator is the state the record already carries, together with
-// whether the stream had been working. NOT the error text: once the connection
-// is cached, an absent credential arrives as a stringified Unauthenticated
-// status rather than ErrNotLinked (recordState's comment), so a match on the
-// sentinel works on the first start and silently stops on the second.
+// Decided by state and whether the stream had worked, never by the error text;
+// logRetry says why, and the cached-connection row is the one that tells them
+// apart.
 func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -213,22 +210,15 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 // the narrow test.
 func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		cause     error
-		wantLevel string
-		wantMsg   string
-		wantCode  string
+		name   string
+		cause  error
+		relink bool
 	}{
-		{"unauthenticated", status.Error(codes.Unauthenticated, "verification failed: signature mismatch"),
-			"WARN", relinkNeeded, ""},
-		{"permission denied", status.Error(codes.PermissionDenied, "permission denied"),
-			"WARN", relinkNeeded, ""},
-		{"a node that is starting", status.Error(codes.Unknown, "waiting to start, RPC services not available"),
-			"INFO", reBakeInCaseStale, "Unknown"},
-		{"a locked wallet", status.Error(codes.Unknown, "wallet locked, unlock it to enable full RPC access"),
-			"INFO", reBakeInCaseStale, "Unknown"},
-		{"a macaroon the parser refused", status.Error(codes.Unknown, "cannot determine data format of binary-encoded macaroon"),
-			"INFO", reBakeInCaseStale, "Unknown"},
+		{"unauthenticated", status.Error(codes.Unauthenticated, "verification failed: signature mismatch"), true},
+		{"permission denied", status.Error(codes.PermissionDenied, "permission denied"), true},
+		{"a node that is starting", status.Error(codes.Unknown, "waiting to start, RPC services not available"), false},
+		{"a locked wallet", status.Error(codes.Unknown, "wallet locked, unlock it to enable full RPC access"), false},
+		{"a macaroon the parser refused", status.Error(codes.Unknown, "cannot determine data format of binary-encoded macaroon"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
@@ -250,12 +240,15 @@ func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 			if !ok {
 				t.Fatal("the guard was asked to re-bake and nothing said so")
 			}
-			if got.Level != tc.wantLevel || got.Msg != tc.wantMsg || got.Code != tc.wantCode {
-				t.Errorf("%v logged %s %q code=%q, want %s %q code=%q",
-					tc.cause, got.Level, got.Msg, got.Code, tc.wantLevel, tc.wantMsg, tc.wantCode)
+			// Only a cause the state calls Relink may say re-link; anything else
+			// names the code the node answered with.
+			wantLevel, wantMsg, wantCode := "INFO", reBakeInCaseStale, status.Code(tc.cause).String()
+			if tc.relink {
+				wantLevel, wantMsg, wantCode = "WARN", relinkNeeded, ""
 			}
-			if tc.wantMsg != relinkNeeded && strings.Contains(got.Msg, "re-link") {
-				t.Errorf("%q claims a re-link for a cause the state does not call Relink", got.Msg)
+			if got.Level != wantLevel || got.Msg != wantMsg || got.Code != wantCode {
+				t.Errorf("%v logged %s %q code=%q, want %s %q code=%q",
+					tc.cause, got.Level, got.Msg, got.Code, wantLevel, wantMsg, wantCode)
 			}
 		})
 	}

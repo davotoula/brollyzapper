@@ -25,12 +25,11 @@ func TestTheBakeAttemptLineCannotBeReadAsTheSuccessLine(t *testing.T) {
 		success = "receive macaroon baked"
 	)
 	for _, tc := range []struct {
-		name        string
-		refuse      bool
-		wantSuccess bool
+		name   string
+		refuse bool
 	}{
-		{"the node bakes", false, true},
-		{"the node refuses", true, false},
+		{"the node bakes", false},
+		{"the node refuses", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
@@ -43,7 +42,7 @@ func TestTheBakeAttemptLineCannotBeReadAsTheSuccessLine(t *testing.T) {
 			node.SetReject(tc.refuse)
 
 			err := g.EnsureReceiveMacaroon(t.Context())
-			if (err == nil) != tc.wantSuccess {
+			if (err != nil) != tc.refuse {
 				t.Fatalf("EnsureReceiveMacaroon = %v; this row is about %s", err, tc.name)
 			}
 
@@ -78,7 +77,11 @@ func TestTheBakeAttemptLineCannotBeReadAsTheSuccessLine(t *testing.T) {
 			if attempts != 1 {
 				t.Errorf("the attempt was logged %d times, want 1:\n%s", attempts, logged.String())
 			}
-			if want := map[bool]int{true: 1, false: 0}[tc.wantSuccess]; baked != want {
+			want := 1
+			if tc.refuse {
+				want = 0
+			}
+			if baked != want {
 				t.Errorf("%d lines read as a bake, want %d:\n%s", baked, want, logged.String())
 			}
 		})

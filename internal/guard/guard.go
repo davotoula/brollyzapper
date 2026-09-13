@@ -578,11 +578,9 @@ func (g *Guard) EnsureReceiveMacaroon(ctx context.Context) error {
 		g.log.Info("receive macaroon already present and within policy")
 		return nil
 	}
-	// Worded as an ATTEMPT, because it is logged before one. "baking the receive
-	// macaroon" appeared once per restart in a failing loop and read as progress
-	// beside the success line, "receive macaroon baked" (20i.7). Info rather than
-	// Debug: when the attempt fails, this is the only line that says why a bake
-	// was needed — the callers' failure WARNs carry the error, not the reason.
+	// Worded as an attempt, so a failing loop cannot read as progress beside
+	// "receive macaroon baked" (20i.7). Info, not Debug: when the attempt fails
+	// this is the only line with the reason — the callers' WARNs carry the error.
 	g.log.Info("asking the node for a receive macaroon", "reason", why.Error())
 	return g.bake(ctx, receiveCredential, why.Error())
 }
