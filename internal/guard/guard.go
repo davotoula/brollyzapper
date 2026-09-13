@@ -489,14 +489,8 @@ func (g *Guard) lastRefusalKind() ErrorKind {
 
 // ipCaveatValue is the address this build locks credentials to.
 func (g *Guard) ipCaveatValue() string {
-	switch {
-	case g.serverIP.IsValid():
-		return g.serverIP.String()
-	case g.networkCIDR.IsValid():
-		return g.networkCIDR.String()
-	default:
-		return ""
-	}
+	_, value := g.ipLock()
+	return value
 }
 
 // sweepPending revokes every orphaned root key and returns the ones that are

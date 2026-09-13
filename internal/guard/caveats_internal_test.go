@@ -14,7 +14,7 @@ import (
 //
 // deploy/docker-compose.yml and DEPLOYING.md both tell the operator that
 // NETWORK_CIDR is not read while SERVER_IP is set. That is true only because of
-// the ORDER of two cases in credentialCaveats' switch, and before this test
+// the ORDER of two cases in ipLock's switch, and before this test
 // nothing held the order: TestBakeSpendRefusesWhenThereIsNoAddressToLockTo
 // asserts "never neither" and assertHardened allows either caveat, so swapping
 // the cases left every guard test green and both documents false.
@@ -56,9 +56,6 @@ func TestCredentialCaveatsPrefersServerIPOverNetworkCIDR(t *testing.T) {
 					if err == nil {
 						t.Fatalf("baked with no address to lock to: %q", caveats)
 					}
-					if got := g.ipCaveatValue(); got != "" {
-						t.Errorf("ipCaveatValue() = %q with no address configured, want empty", got)
-					}
 					return
 				}
 				if err != nil {
@@ -73,12 +70,6 @@ func TestCredentialCaveatsPrefersServerIPOverNetworkCIDR(t *testing.T) {
 				}
 				if len(ipLocks) != 1 || ipLocks[0] != row.want {
 					t.Errorf("IP caveats = %q, want exactly [%q]", ipLocks, row.want)
-				}
-				// The refusal message names this value, so it must agree with the
-				// caveat the bake actually carries.
-				_, wantValue, _ := strings.Cut(row.want, " ")
-				if got := g.ipCaveatValue(); got != wantValue {
-					t.Errorf("ipCaveatValue() = %q, want %q — the value the caveat carries", got, wantValue)
 				}
 			})
 		}

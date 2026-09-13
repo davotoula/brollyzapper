@@ -840,15 +840,10 @@ func TestTheExampleShowsEachSettingAtTheTemplatesDefault(t *testing.T) {
 
 	compared := 0
 	for _, name := range slices.Sorted(maps.Keys(defaults)) {
-		var want []string
-		for _, d := range defaults[name] {
-			want = append(want, strings.TrimSpace(d))
-		}
-		slices.Sort(want)
-		want = slices.Compact(want)
-		if len(want) > 1 {
-			t.Errorf("%s gives ${%s} %d different defaults %q; an operator leaving it unset "+
-				"gets a different value depending on which line reads it", composePath, name, len(want), want)
+		want := strings.TrimSpace(defaults[name][0])
+		if i := slices.IndexFunc(defaults[name], func(d string) bool { return strings.TrimSpace(d) != want }); i >= 0 {
+			t.Errorf("%s gives ${%s} two different defaults, %q and %q; an operator leaving it unset "+
+				"gets a different value depending on which line reads it", composePath, name, want, defaults[name][i])
 			continue
 		}
 		shown := assigned[name]
@@ -858,7 +853,7 @@ func TestTheExampleShowsEachSettingAtTheTemplatesDefault(t *testing.T) {
 		for _, value := range shown {
 			got := envValue(value)
 			if reason, ok := exempt[name]; ok {
-				if got == want[0] {
+				if got == want {
 					t.Errorf("%s now shows %s=%s, which IS the template's default — the exemption "+
 						"(%s) no longer describes the files. If the default moved, that is a change "+
 						"to what the app trusts; decide it, then remove the exemption", envPath, name, got, reason)
@@ -866,10 +861,10 @@ func TestTheExampleShowsEachSettingAtTheTemplatesDefault(t *testing.T) {
 				continue
 			}
 			compared++
-			if got != want[0] {
+			if got != want {
 				t.Errorf("%s shows %s=%s, but %s defaults it to %q — an operator who leaves the line "+
 					"commented gets the template's value, not the one they were shown",
-					envPath, name, got, composePath, want[0])
+					envPath, name, got, composePath, want)
 			}
 		}
 	}

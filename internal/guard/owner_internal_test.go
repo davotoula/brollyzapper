@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -38,9 +37,6 @@ func unreadableFile(t *testing.T) (string, fs.FileInfo) {
 // here without the test needing a second user.
 func TestUnreadableAdviceNamesTheOwnerAndTheSettings(t *testing.T) {
 	_, info := unreadableFile(t)
-	if runtime.GOOS == "windows" {
-		t.Skip("SKIPPED: no uid on this platform")
-	}
 	owner, group := os.Getuid(), os.Getgid()
 	self := owner + 1
 

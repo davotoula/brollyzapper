@@ -53,12 +53,8 @@ func (g *Guard) credentialCaveats(c credential, expiry time.Time) ([]string, err
 	if c.guardCaveat {
 		caveats = append(caveats, lnd.GuardCaveat(secret.RandomToken(8)))
 	}
-	switch {
-	case g.serverIP.IsValid():
-		caveats = append(caveats, lnd.CaveatIPAddr+" "+g.serverIP.String())
-	case g.networkCIDR.IsValid():
-		caveats = append(caveats, lnd.CaveatIPRange+" "+g.networkCIDR.String())
-	default:
+	condition, value := g.ipLock()
+	if condition == "" {
 		// Refusing beats baking a credential that constrains nothing. SERVER_IP
 		// is a required setting, so this cannot fire on a configured install —
 		// it fires for an embedder who skipped it, at the moment they would
@@ -66,7 +62,26 @@ func (g *Guard) credentialCaveats(c credential, expiry time.Time) ([]string, err
 		return nil, errors.New("guard: no SERVER_IP and no NETWORK_CIDR, so a baked credential " +
 			"could not be locked to any source address (§6)")
 	}
-	return caveats, nil
+	return append(caveats, condition+" "+value), nil
+}
+
+// ipLock is the one IP caveat this build bakes: its condition and its value,
+// or two empty strings when there is nothing to lock to.
+//
+// SERVER_IP WINS, and NETWORK_CIDR is not read while it is set — which
+// deploy/docker-compose.yml and DEPLOYING.md both tell the operator. It is ONE
+// function because the order used to be written twice, here and in
+// ipCaveatValue, and only the order in the bake was what those documents
+// described (20i.14).
+func (g *Guard) ipLock() (condition, value string) {
+	switch {
+	case g.serverIP.IsValid():
+		return lnd.CaveatIPAddr, g.serverIP.String()
+	case g.networkCIDR.IsValid():
+		return lnd.CaveatIPRange, g.networkCIDR.String()
+	default:
+		return "", ""
+	}
 }
 
 // MinBakeInterval is the shortest gap between two bakes that would produce the
