@@ -338,6 +338,9 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// by watching which macaroon the node is sent.
 	serverCredential := preflight.NewCredentialProbe(ctx,
 		serverCredentialProbe(node, receiveCredentials), preflight.ProbeOptions{})
+	// Deferred AFTER node.Close, so it runs BEFORE it: a probe a render started
+	// is joined before the client it calls through is closed.
+	defer serverCredential.Close()
 	// ONE report, built from one set of inputs, differing in a single argument:
 	// where the guard's status comes from. The UI reads the cache; the ladder
 	// reads the socket. Two closures over one construction, so the policy cannot

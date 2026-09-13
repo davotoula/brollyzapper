@@ -156,6 +156,10 @@ func TestARefusedServerCredentialFailsWithItsTime(t *testing.T) {
 		{"refused", status.Error(codes.Unauthenticated, nodeText), "refused"},
 		{"not linked", lnd.ErrNotLinked, "no credential"},
 		{"certificate", &lnd.CertificateNameError{Dialled: "10.61.7.1"}, "certificate"},
+		// The node ANSWERED, with a code that is not an auth failure — d46.20's
+		// malformed macaroon arrives as Unknown. "Could not reach" would be the
+		// wrong sentence for a node that plainly did.
+		{"answered but not accepted", status.Error(codes.Unknown, nodeText), "would not accept"},
 		{"unreachable", status.Error(codes.Unavailable, nodeText), "could not reach"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -189,5 +193,44 @@ func TestAWorkingServerCredentialPassesWithItsTime(t *testing.T) {
 	got := check(t, preflight.Run(t.Context(), in), preflight.CheckServerCredential)
 	if !got.OK || !strings.Contains(got.Detail, "as of 14:05:09 UTC") {
 		t.Errorf("a working credential = %+v, want a pass carrying its time", got)
+	}
+}
+
+// SHUTDOWN JOINS A PROBE IN FLIGHT (go-review, `20i.21`). serve() waits for every
+// background goroutine before it closes the node client; a probe started by a
+// render was the one it did not, so the client could close under a GetInfo. And
+// once closed, a late render must not start another.
+func TestCloseWaitsForAProbeInFlightAndStartsNoMore(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	probe := preflight.NewCredentialProbe(t.Context(), func(context.Context) error {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return nil
+	}, preflight.ProbeOptions{Interval: time.Nanosecond})
+
+	probe.Result()
+	<-started
+	closed := make(chan struct{})
+	go func() { probe.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a probe was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the probe finished")
+	}
+
+	probe.Result()
+	select {
+	case <-started:
+		t.Error("a probe started after Close")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

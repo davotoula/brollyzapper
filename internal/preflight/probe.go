@@ -64,6 +64,10 @@ type CredentialProbe struct {
 	last      ProbeResult
 	attempted time.Time
 	running   bool
+	closed    bool
+	// inFlight is joined by Close. Added to only under mu and only while not
+	// closed, so no Add can race the Wait.
+	inFlight sync.WaitGroup
 }
 
 // NewCredentialProbe builds a probe over probe, which the caller wires to the
@@ -86,9 +90,10 @@ func NewCredentialProbe(ctx context.Context, probe func(context.Context) error, 
 func (p *CredentialProbe) Result() ProbeResult {
 	p.mu.Lock()
 	now := p.now()
-	due := !p.running && (p.attempted.IsZero() || now.Sub(p.attempted) >= p.interval)
+	due := !p.closed && !p.running && (p.attempted.IsZero() || now.Sub(p.attempted) >= p.interval)
 	if due {
 		p.running, p.attempted = true, now
+		p.inFlight.Add(1)
 	}
 	p.mu.Unlock()
 
@@ -100,7 +105,21 @@ func (p *CredentialProbe) Result() ProbeResult {
 	return p.last
 }
 
+// Close starts no further probes and waits for one in flight.
+//
+// serve() closes the node client when it returns, and joins every background
+// goroutine first so none is mid-call when that happens. A probe is started by
+// a render rather than by serve(), so it is joined here instead (go-review,
+// `20i.21`).
+func (p *CredentialProbe) Close() {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+	p.inFlight.Wait()
+}
+
 func (p *CredentialProbe) refresh() {
+	defer p.inFlight.Done()
 	ctx, cancel := context.WithTimeout(p.ctx, serverCredentialTimeout)
 	defer cancel()
 	err := p.probe(ctx)
@@ -151,6 +170,12 @@ func serverCredentialCheck(in Inputs) (Check, *ProbeResult) {
 		c.Detail = "The app could not connect: your node's certificate does not name the address it dials — the certificate row says what to add"
 	case lnd.IsAuthFailure(result.Err):
 		c.Detail = "Your node refused the app's own credential"
+	case lnd.IsCredentialRejected(result.Err):
+		// The node ANSWERED, with a code that is neither an auth failure nor one
+		// of the benign ones — d46.20's malformed macaroon arrives as Unknown, and
+		// so does a node that is restarting. Not "refused", which claims the node
+		// verified the credential; not "could not reach", which it plainly did.
+		c.Detail = "Your node answered but would not accept the request made with the app's own credential"
 	default:
 		c.Detail = "The app could not reach your node with its own credential"
 	}
