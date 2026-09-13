@@ -107,11 +107,32 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 		wantLevel string
 		wantMsg   string
 		setup     func(t *testing.T, node *lndtest.Node, dir string) lnd.InvoiceHandler
+		// prime runs against the client before the stream starts, when set.
+		prime func(t *testing.T, client *lnd.Client, dir string)
 	}{{
 		// The first start: the guard has not written the credential yet.
 		name: "not linked, never up", state: lnd.StateNotLinked, wasUp: false,
 		wantLevel: "INFO", wantMsg: streamWaiting,
 		setup: func(*testing.T, *lndtest.Node, string) lnd.InvoiceHandler { return nil },
+	}, {
+		// The same condition with the connection already cached — by an earlier
+		// call, as the admin pages make — so the absent credential arrives as a
+		// stringified status rather than ErrNotLinked. The row that tells state
+		// from error text: decided by the sentinel, the other rows still pass.
+		name: "not linked, never up, connection cached", state: lnd.StateNotLinked, wasUp: false,
+		wantLevel: "INFO", wantMsg: streamWaiting,
+		setup: func(t *testing.T, node *lndtest.Node, dir string) lnd.InvoiceHandler {
+			node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+			return nil
+		},
+		prime: func(t *testing.T, client *lnd.Client, dir string) {
+			if _, err := client.GetInfo(t.Context()); err != nil {
+				t.Fatalf("caching the connection: %v", err)
+			}
+			if err := os.Remove(filepath.Join(dir, lnd.ReceiveMacaroon)); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}, {
 		// A stream that delivered, and then lost its credential underneath it.
 		// A drop of something that was up is a drop, whatever the state after.
@@ -159,6 +180,9 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 			opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
 			client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
 			defer client.Close()
+			if tc.prime != nil {
+				tc.prime(t, client, dir)
+			}
 			runStream(t, client, handle)
 
 			var got logRecord
