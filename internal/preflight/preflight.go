@@ -526,10 +526,16 @@ func credentialAddressCheck(state lnd.State, broker brokerState) (Check, string)
 		OK:     true,
 		Blocks: BlocksRelink,
 	}
-	if !broker.answered() || broker.status.RefusalKind != guard.KindAddressMismatch || state != lnd.StateRelink {
+	address := broker.status.CredentialAddress
+	// The address is part of the condition, not decoration: with none, the Node
+	// page has nothing to explain and keeps its Re-link button, and a verdict that
+	// still blocked re-linking would have the handler refuse the button it shows.
+	// The guard relays the address it locks credentials to, so an empty one means
+	// no lock is configured — a state in which it refuses to bake at all.
+	if !broker.answered() || broker.status.RefusalKind != guard.KindAddressMismatch ||
+		state != lnd.StateRelink || address == "" {
 		return c, ""
 	}
-	address := broker.status.CredentialAddress
 	c.OK = false
 	c.Detail = fmt.Sprintf("The credential is locked to %s and your node sees this app's connection "+
 		"arrive from a different address. Re-linking will not change this — a fresh credential "+

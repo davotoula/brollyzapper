@@ -99,6 +99,11 @@ func TestTheAddressMismatchNeedsTheGuardsKindAndTheNodesRejection(t *testing.T) 
 		{"kind and rejection: the condition", lnd.StateRelink, mismatch, true},
 		{"kind alone, node answering: two Re-link clicks", lnd.StateReady, mismatch, false},
 		{"rejection alone: a rotation", lnd.StateRelink, lnd.BrokerStatus{LNDReachable: true}, false},
+		// NO ADDRESS, NO VERDICT. The Node page cannot explain a mismatch it
+		// cannot name, so it keeps the Re-link button — and a verdict that blocked
+		// re-linking here would have the handler refuse the button the page shows.
+		{"kind and rejection, but no address to name", lnd.StateRelink,
+			lnd.BrokerStatus{LNDReachable: true, RefusalKind: guard.KindAddressMismatch}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := inputs(t)
