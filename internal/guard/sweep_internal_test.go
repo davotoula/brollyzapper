@@ -17,8 +17,9 @@ import (
 // point, so the polled Status does not read the file twice — and stateStore's
 // own doc names the hazard that creates: "the guard serves one goroutine per
 // socket connection, so a load() then save() composed by the caller is a lost
-// update waiting to happen". consumeAuthorisation writes `Authorisation = nil`
-// unconditionally, and deletes authorisation.txt with it.
+// update waiting to happen". The clear it composed with, consumeAuthorisation
+// as it then was, wrote `Authorisation = nil` unconditionally, and deleted
+// authorisation.txt with it.
 //
 // THE SEQUENCE THIS REPRODUCES, which two socket connections reach on their own:
 // a Status poll loads state holding an expired grant; before it acts, the
@@ -138,7 +139,7 @@ func TestASupersedeOnAStaleSnapshotClaimsNothing(t *testing.T) {
 		reads++
 		if reads == 1 {
 			// The other connection redeems A: row and file together, which is
-			// what consumeAuthorisation does.
+			// what redeem does.
 			if err := g.state.update(func(st *State) {
 				g.clearAuthorisationFile()
 				st.Authorisation = nil

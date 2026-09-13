@@ -934,8 +934,8 @@ func TestAnApplyTimeCapPairRefusalLeavesTheGrantAlone(t *testing.T) {
 // A sweep whose state write fails does not claim it discarded anything
 // (`0vk.54`).
 //
-// discardAuthorisation raises its row whether or not the write succeeded, which
-// is right for redeem — that is one operator action and it happened. The sweep
+// redeem raises its discard row whether or not the write succeeded, which is
+// right there — that is one operator action and it happened. The sweep
 // runs on the POLLED path, so the same behaviour turns one unwritable state file
 // into an attempt every five minutes, forever: auditAuthorisation draws on
 // authoriseBudget BEFORE it writes, so each attempt spends one of the eight
