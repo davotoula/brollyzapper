@@ -596,7 +596,12 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 // TestARedeemOnAStaleSnapshotDoesNotConsumeTheReplacement.
 //
 // THE DISCARD ROW IS RAISED WHETHER OR NOT THE WRITE SUCCEEDED, which is right
-// here and wrong for the sweep: this is one operator action, and it happened.
+// here and wrong for the sweep: this is one operator action, and it happened. A
+// state that cannot be READ is the exception, and not by choice: the closure never
+// runs, nothing was judged, and there is no grant this call knows to have ended —
+// so the caller gets the read error and the trail gets nothing. Before `rvw` the
+// judgement came from ApplyChange's earlier load, which is exactly the snapshot
+// this no longer trusts.
 func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 	now := g.rotation.clock()
 	var (

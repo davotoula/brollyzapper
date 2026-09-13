@@ -6621,6 +6621,34 @@ func checkOperatorFileWritesHoldTheStateLock(t *testing.T, files []sourceFile) [
 	return found
 }
 
+// guardFuncs is every function body in a file: declared functions and methods,
+// and package-level variables initialised to a function literal, the latter
+// dressed as a FuncDecl named after the variable.
+func guardFuncs(parsed *ast.File) []*ast.FuncDecl {
+	var fns []*ast.FuncDecl
+	for _, decl := range parsed.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body != nil {
+				fns = append(fns, d)
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, v := range vs.Values {
+					if lit, ok := v.(*ast.FuncLit); ok && i < len(vs.Names) {
+						fns = append(fns, &ast.FuncDecl{Name: vs.Names[i], Type: lit.Type, Body: lit.Body})
+					}
+				}
+			}
+		}
+	}
+	return fns
+}
+
 // walkGuardUnderStateLock calls visit for every node in every function body in
 // internal/guard, with the number of state-store closures open around it.
 //
@@ -6628,8 +6656,11 @@ func checkOperatorFileWritesHoldTheStateLock(t *testing.T, files []sourceFile) [
 // anything inside one is `locked > 0`. The grant's one writer counts as locked
 // from its first line: it is only ever called inside such a closure, and a rule
 // that treated its body as unlocked would forbid there exactly what it permits
-// one call up. Package-level function literals are not walked; the guard has none
-// that touch the state.
+// one call up. A package-level `var x = func(...)` is walked as a function named
+// x, so moving a closure to the top level does not take it out of the write and
+// read rules. It is walked as UNLOCKED even when x is later passed to update by
+// name — there is no call graph here — which errs toward flagging a read and
+// toward missing an audit; the latter deadlocks the first test that reaches it.
 func walkGuardUnderStateLock(t *testing.T, files []sourceFile,
 	visit func(f sourceFile, pos token.Position, fn *ast.FuncDecl, n ast.Node, locked int)) {
 	fset := token.NewFileSet()
@@ -6641,11 +6672,7 @@ func walkGuardUnderStateLock(t *testing.T, files []sourceFile,
 		if err != nil {
 			t.Fatalf("parsing %s: %v", f.rel, err)
 		}
-		for _, decl := range parsed.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
+		for _, fn := range guardFuncs(parsed) {
 			locked := 0
 			if isGrantWriter(f, fn) {
 				locked = 1
@@ -6762,51 +6789,37 @@ func isGrantWriter(f sourceFile, fn *ast.FuncDecl) bool {
 // other`) is not, and cannot be without types; it is also not a shape anything in
 // the guard writes.
 func checkTheGrantHasOneWriter(t *testing.T, files []sourceFile) (found []problem, inWriter int) {
-	fset := token.NewFileSet()
-	for _, f := range files {
-		if f.dir != "internal/guard" {
-			continue
-		}
-		parsed, err := parser.ParseFile(fset, f.path, f.src, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", f.rel, err)
-		}
-		for _, decl := range parsed.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+	walkGuardUnderStateLock(t, files, func(f sourceFile, pos token.Position, fn *ast.FuncDecl, n ast.Node, _ int) {
+		report := func(how string) {
+			if isGrantWriter(f, fn) {
+				inWriter++
+				return
 			}
-			exempt := isGrantWriter(f, fn)
-			report := func(pos token.Pos) {
-				if exempt {
-					inWriter++
-					return
-				}
-				found = append(found, problem{f.rel, fset.Position(pos).Line,
-					fmt.Sprintf("%s assigns the stored grant directly. Only %s may: it "+
-						"returns the grant it displaced, and that return value is the only "+
-						"record of what a write ended. A second writer compiles, passes every "+
-						"test in the package, and removes a grant from §12's account without "+
-						"a word (`rvw`, after `0vk.54` and `0vk.56` each learned it by hand)",
-						fn.Name.Name, grantWriter)})
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.AssignStmt:
-					for _, lhs := range n.Lhs {
-						if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Authorisation" {
-							report(lhs.Pos())
-						}
-					}
-				case *ast.KeyValueExpr:
-					if key, ok := n.Key.(*ast.Ident); ok && key.Name == "Authorisation" {
-						report(n.Pos())
-					}
-				}
-				return true
-			})
+			found = append(found, problem{f.rel, pos.Line,
+				fmt.Sprintf("%s %s. Only %s may write it: it returns the grant it "+
+					"displaced, and that return value is the only record of what a write "+
+					"ended. A second writer compiles, passes every test in the package, and "+
+					"removes a grant from §12's account without a word (`rvw`, after `0vk.54` "+
+					"and `0vk.56` each learned it by hand)", fn.Name.Name, how, grantWriter)})
 		}
-	}
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Authorisation" {
+					report("assigns the stored grant directly")
+				}
+			}
+		case *ast.KeyValueExpr:
+			if key, ok := n.Key.(*ast.Ident); ok && key.Name == "Authorisation" {
+				report("assigns the stored grant directly")
+			}
+		case *ast.UnaryExpr:
+			// &st.Authorisation is a writer one dereference away.
+			if sel, ok := n.X.(*ast.SelectorExpr); ok && n.Op == token.AND && sel.Sel.Name == "Authorisation" {
+				report("takes the address of the stored grant")
+			}
+		}
+	})
 	return found, inWriter
 }
 
@@ -6859,6 +6872,26 @@ func reset(st *State) { *st = State{Authorisation: nil} }
 func replaceAuthorisation(st *State) { st.Authorisation = nil }
 `)})
 	catches(t, found, "replaceAuthorisation assigns the stored grant directly")
+
+	// A write one dereference away.
+	found, _ = checkTheGrantHasOneWriter(t, []sourceFile{planted("internal/guard", `package guard
+
+func clear(st *State) {
+	p := &st.Authorisation
+	*p = nil
+}
+`)})
+	catches(t, found, "clear takes the address of the stored grant")
+
+	// And a closure moved to the top level.
+	found, _ = checkTheGrantHasOneWriter(t, []sourceFile{planted("internal/guard", `package guard
+
+var forget = func(st *State) bool {
+	st.Authorisation = nil
+	return true
+}
+`)})
+	catches(t, found, "forget assigns the stored grant directly")
 }
 
 // auditCalls are the guard's durable-trail entry points, every one of which ends

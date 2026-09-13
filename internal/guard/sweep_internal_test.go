@@ -292,7 +292,7 @@ func newAuthorisationTestGuard(t *testing.T, store *stateStore, data string,
 // correct ending with a row. What no serial order leaves is a stored grant whose
 // code is not the one in the operator's file, a grant gone with no row, or a
 // superseded grant authorised.
-func redeemAgainstAReplacement(t *testing.T, offer func(a *Authorisation) string) (*Guard, State, error) {
+func redeemAgainstAReplacement(t *testing.T, replacement Change, offer func(a *Authorisation) string) (*Guard, State, error) {
 	t.Helper()
 	dir := t.TempDir()
 	data := filepath.Join(dir, "guard-data")
@@ -306,7 +306,7 @@ func redeemAgainstAReplacement(t *testing.T, offer func(a *Authorisation) string
 	clock := func() time.Time {
 		if armed {
 			armed, fired = false, true
-			if err := g.RequestAuthorisation(t.Context(), Change{Control: ControlSpendCap, Msat: 200_000_000}); err != nil {
+			if err := g.RequestAuthorisation(t.Context(), replacement); err != nil {
 				t.Errorf("the other connection's request failed, so nothing was superseded: %v", err)
 			}
 		}
@@ -389,7 +389,7 @@ func redeemAgainstAReplacement(t *testing.T, offer func(a *Authorisation) string
 // operator types what they can read and is told it is wrong, and B has left the
 // state with no row at all.
 func TestAWrongCodeOnAStaleSnapshotDoesNotRestoreTheSupersededGrant(t *testing.T) {
-	_, _, err := redeemAgainstAReplacement(t, func(*Authorisation) string { return "0000-0000" })
+	_, _, err := redeemAgainstAReplacement(t, otherChange, func(*Authorisation) string { return "0000-0000" })
 	if err == nil {
 		t.Fatal("a wrong code was accepted")
 	}
@@ -404,7 +404,7 @@ func TestAWrongCodeOnAStaleSnapshotDoesNotRestoreTheSupersededGrant(t *testing.T
 // authorised. §12 then held A superseded AND authorised, and nothing at all
 // about B.
 func TestARedeemOnAStaleSnapshotDoesNotConsumeTheReplacement(t *testing.T) {
-	g, after, err := redeemAgainstAReplacement(t, func(a *Authorisation) string { return a.Code })
+	g, after, err := redeemAgainstAReplacement(t, otherChange, func(a *Authorisation) string { return a.Code })
 	if err == nil {
 		t.Error("a superseded code redeemed: the change was applied on a grant the trail had " +
 			"already recorded as superseded by a new request")
@@ -416,5 +416,42 @@ func TestARedeemOnAStaleSnapshotDoesNotConsumeTheReplacement(t *testing.T) {
 		if event.Event == logging.EventGuardAuthorise && event.Attrs["outcome"] == "authorised" {
 			t.Errorf("the trail records the superseded grant as authorised")
 		}
+	}
+}
+
+// otherChange is the replacement the stale-snapshot redeem tests race in: a
+// different control, so redeem meets it on the "offered against a different
+// change" arm.
+var otherChange = Change{Control: ControlSpendCap, Msat: 200_000_000}
+
+// The SAME change re-requested mid-redeem, which reaches the arms the
+// different-change replacement cannot: the stored grant matches the change, so
+// redeem is decided by the code (`rvw`, from the go-review).
+//
+// A's code against B is a wrong code for B, counted on B. Before `rvw` the bump
+// wrote A back over B with one attempt on it, and the right code consumed B and
+// applied the change on A's authority.
+func TestAStaleRedeemAgainstTheSameChangeIsJudgedOnTheReplacement(t *testing.T) {
+	same := Change{Control: ControlSending, On: true}
+	for _, tc := range []struct {
+		name  string
+		offer func(a *Authorisation) string
+	}{
+		{"a wrong code", func(*Authorisation) string { return "0000-0000" }},
+		{"the superseded grant's own code", func(a *Authorisation) string { return a.Code }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, after, err := redeemAgainstAReplacement(t, same, tc.offer)
+			if err == nil {
+				t.Error("a code for the superseded grant redeemed its replacement")
+			}
+			if after.SendingLatch {
+				t.Error("sending was turned on without the replacement's code")
+			}
+			if after.Authorisation == nil || after.Authorisation.Attempts != 1 {
+				t.Errorf("the offer was not counted as one wrong code on the replacement: %+v",
+					after.Authorisation != nil)
+			}
+		})
 	}
 }
