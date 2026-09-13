@@ -589,6 +589,7 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 // redeemable for five million. That is what operation-binding means, and
 // checking only the control would leave the operator's sentence true and the
 // applied change something else entirely.
+//
 // JUDGED UNDER THE STORE'S LOCK, against the grant stored THEN — see
 // replaceAuthorisation's note; this is that rule's third coat (`rvw`). ApplyChange
 // holds bakeMu, which neither RequestAuthorisation nor the sweep takes, so a
@@ -603,9 +604,9 @@ func (g *Guard) checkCapPair(state State, change Change) error {
 func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 	now := g.rotation.clock()
 	var (
-		refusal   error          // what the caller is told; nil when the code redeems
-		ended     *discardReason // the grant ended unhonoured, and this is why
-		wrongCode bool           // a wrong code the grant survives
+		refusal   error         // what the caller is told; nil when the code redeems
+		ended     discardReason // why the grant ended unhonoured; zero if it did not
+		wrongCode bool          // a wrong code the grant survives
 	)
 	err := g.state.updateIf(func(st *State) bool {
 		grant := st.Authorisation
@@ -614,14 +615,14 @@ func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 			refusal = errAuthorisationRequired
 			return false
 		case grant.expired(now):
-			ended = &discardExpired
+			ended = discardExpired
 			refusal = fmt.Errorf("guard: that authorisation expired; ask for a new one")
 		case grant.Change != change:
 			// NOT counted as an attempt, and consumed outright. A code offered for
 			// a change other than the one the operator was shown is not a typo —
 			// it is the server spending an answer on a question it was not asked,
 			// which is the attack this file exists to stop.
-			ended = &discardOfferedAgainst
+			ended = discardOfferedAgainst
 			refusal = fmt.Errorf("guard: the outstanding authorisation is for a different change; " +
 				"ask for a new one")
 		case !grant.matches(code):
@@ -634,7 +635,7 @@ func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 					maxAuthorisationAttempts-grant.Attempts)
 				return true
 			}
-			ended = &discardTooManyWrong
+			ended = discardTooManyWrong
 			refusal = fmt.Errorf("guard: that code is wrong, and this authorisation is now spent; " +
 				"ask for a new one")
 		}
@@ -657,11 +658,11 @@ func (g *Guard) redeem(ctx context.Context, change Change, code string) error {
 		return true
 	})
 	switch {
-	case ended != nil:
+	case ended != discardReason{}:
 		if err != nil {
 			g.log.Warn("could not clear a spent authorisation", "error", err.Error())
 		}
-		g.auditDiscardedGrant(ctx, change, *ended)
+		g.auditDiscardedGrant(ctx, change, ended)
 		return refusal
 	case err != nil:
 		return err
@@ -782,29 +783,32 @@ func (g *Guard) auditDiscardedGrant(ctx context.Context, change Change, why disc
 }
 
 // replaceAuthorisation installs next as the stored grant and returns the grant it
-// displaced, which is whatever was stored before. It is the only
-// assignment to State.Authorisation, and internal/arch's TestTheGrantHasOneWriter
-// holds it there.
+// displaced, which is whatever was stored before. It is the only assignment to
+// State.Authorisation, and internal/arch's TestTheGrantHasOneWriter holds it
+// there.
 //
-// THE RETURN VALUE IS THE ONLY RECORD OF WHAT A WRITE ENDED, and that is the rule
-// this repo learned twice by hand. A caller that loaded state and then took the
+// WHAT IT RETURNS IS WHAT THE WRITE REALLY ENDED, and a row about an ending
+// comes from that or from a judgement made under the same lock — never from a
+// snapshot. That is the rule this repo learned twice by hand. A caller that loaded state and then took the
 // lock is holding a snapshot, and another connection — the guard serves one
 // goroutine per socket connection — can redeem, sweep or replace the grant in
 // between. A row composed from the snapshot names a grant that is no longer
 // there: `0vk.54`'s sweep cleared a replacement it had never seen, and `0vk.56`'s
 // first supersede would have recorded a discard for a grant already consumed.
-// Called inside the closure, this sees what is really stored, so the row a caller
-// raises from its answer names what was really overwritten.
+// Called inside the closure, this sees what is really stored, so the supersede
+// and the sweep, which raise their rows from its answer, name what was really
+// overwritten.
 //
 // IT DECIDES NOTHING AND SAYS NOTHING. Whether a displaced grant deserves a row,
 // and which word, is the caller's: the sweep has already judged its grant expired
 // under this lock, RequestAuthorisation must not call an expired grant superseded,
-// and redeem names the change it was offered. So it takes no clock —
-// the one caller that tests liveness does it on the grant returned, still under
-// the lock. And it never audits: it runs with stateStore.mu held, every audit is a
-// state update of its own on that same non-reentrant mutex, and the callers audit
-// only once the write has succeeded — TestASweepThatCannotWriteClaimsNothing and
-// internal/arch's TestNoAuditUnderTheStateLock each hold a half of that.
+// and redeem, which judges the stored grant under this lock too, names the change
+// it was offered. So it takes no clock: the one caller that tests liveness does it
+// on the grant returned, still under the lock. And it never audits: it runs with
+// stateStore.mu held, and every audit is a state update of its own on that same
+// non-reentrant mutex. internal/arch's TestNoAuditUnderTheStateLock holds that;
+// whether a caller may speak when its write FAILED is the caller's own rule, and
+// TestASweepThatCannotWriteClaimsNothing holds the sweep's.
 //
 // A WRONG CODE IS NOT A REPLACEMENT: redeem counts it on the stored grant in
 // place, so the grant that was there is still there and nothing is displaced.

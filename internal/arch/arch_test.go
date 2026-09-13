@@ -6919,7 +6919,7 @@ func TestNoAuditUnderTheStateLock(t *testing.T) {
 
 func (g *Guard) sweep(ctx context.Context) error {
 	return g.state.updateIf(func(st *State) bool {
-		g.auditDiscardedGrant(ctx, st.Authorisation.Change, "expired")
+		g.auditDiscardedGrant(ctx, st.Authorisation.Change, discardExpired)
 		return true
 	})
 }
@@ -6945,7 +6945,7 @@ func (g *Guard) sweep(ctx context.Context) {
 		return swept != nil
 	})
 	if swept != nil {
-		g.auditDiscardedGrant(ctx, swept.Change, "expired")
+		g.auditDiscardedGrant(ctx, swept.Change, discardExpired)
 	}
 }
 `)}))
