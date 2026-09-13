@@ -496,7 +496,7 @@ func nodeCheck(state lnd.State, addressRefused bool) Check {
 		// same state. `20i.3` stopped it guessing; `20i.11` gave it the answer,
 		// from the same check the Node page reads, so the two cannot differ.
 		if addressRefused {
-			c.OK, c.Detail = false, "Your node is refusing the app's credential for the address it sees the connection arrive from, so re-linking will not help. The row about the credential's address says what to fix."
+			c.OK, c.Detail = false, "Your node is refusing the app's credential for the address it sees the connection arrive from, so re-linking will not help. The Node page says what to fix."
 			break
 		}
 		c.OK, c.Detail = false, "Your node rejected the macaroon. A rotation is the usual cause and the guard repairs it by itself; if this persists, the Node page says what else it can be."
