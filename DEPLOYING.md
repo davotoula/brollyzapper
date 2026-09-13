@@ -532,10 +532,10 @@ Three signs, in the order they arrive:
 **While it settles.** `depends_on` orders **startup**, not readiness, so until the guard has
 baked the server logs `waiting for the guard's credential before opening the invoice stream` at
 INFO, on a widening gap capped at a minute; a WARN `invoice stream dropped; reconnecting` is not
-part of that wait, and means a stream that had worked dropped or the node could not be reached
-or used. The **guard** has no equivalent retry — it bakes at startup and then hourly — so if its log
-shows a failure rather than a bake, fix the cause and `docker compose restart guard` rather
-than waiting it out.
+part of that wait, and means a stream that had worked dropped or something else failed — its
+`error` says what. The **guard** has no equivalent retry — it bakes at startup and then hourly —
+so if its log shows a failure rather than a bake, fix the cause and `docker compose restart
+guard` rather than waiting it out.
 
 Then work through **First run** in [`README.md`](README.md#first-run): the public domain and
 address name are settings, not deployment values, and they live in the app.
