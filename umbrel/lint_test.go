@@ -8,6 +8,7 @@
 package umbrel
 
 import (
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ type composeFile struct {
 		Ports         []string          `yaml:"ports"`
 		Restart       string            `yaml:"restart"`
 		DependsOn     []string          `yaml:"depends_on"`
+		// A yaml.Node because compose takes a string or a list, and the only
+		// question asked of it is whether it is there at all.
+		EnvFile yaml.Node `yaml:"env_file"`
 		// A yaml.Node because the two services spell this differently — the
 		// server needs the mapping form to carry ipv4_address, the guard names
 		// the network and nothing else — and because a missing block must be a
@@ -191,14 +195,45 @@ func lineOf(t *testing.T, lines []string, needle string) int {
 // source address past the §7 rate limiter. It is undocumented in app-proxy's
 // own README, so nothing warns an author who adds it.
 func TestProxyTrustUpstreamAppearsNowhere(t *testing.T) {
-	_, raw := loadCompose(t)
-	if strings.Contains(raw, "PROXY_TRUST_UPSTREAM") {
-		for i, line := range strings.Split(raw, "\n") {
-			if strings.Contains(line, "PROXY_TRUST_UPSTREAM") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
-				t.Errorf("docker-compose.yml:%d sets PROXY_TRUST_UPSTREAM: %s", i+1, strings.TrimSpace(line))
-			}
+	compose, _ := loadCompose(t)
+	for _, finding := range proxyTrustUpstreamFindings(compose) {
+		t.Error(finding)
+	}
+}
+
+// proxyTrustUpstreamFindings reads the PARSED environments, never the text
+// (`20i.20`). The raw-line version exempted a line whose first character was
+// `#`, so a trailing comment on a correct line —
+//
+//	PROXY_AUTH_WHITELIST: "/x" # never set PROXY_TRUST_UPSTREAM here
+//
+// — failed a correct package. A lint that fails on the comment explaining it is
+// a lint people delete (deploy/lint_test.go says the same of its own scan).
+//
+// EVERY SERVICE'S ENVIRONMENT, AND NO FILE-WIDE HALF. The old rule also refused
+// the name anywhere in the file, but a key that is in no environment map sets
+// nothing: a variable reaches a container through `environment:` or through
+// `env_file:`, and this refuses both. app_proxy is the only service that reads
+// it today; every service is checked because the next image to read it will
+// not announce that it does. What would reopen the file-wide half: compose
+// gaining a third route into a container's environment.
+func proxyTrustUpstreamFindings(compose composeFile) []string {
+	const key = "PROXY_TRUST_UPSTREAM"
+	var findings []string
+	for _, name := range slices.Sorted(maps.Keys(compose.Services)) {
+		service := compose.Services[name]
+		if _, ok := service.Environment[key]; ok {
+			findings = append(findings, "service "+name+" sets "+key+"; app_proxy would then "+
+				"forward a client-supplied X-Forwarded-For verbatim, which hands any caller a "+
+				"spoofed source address past the rate limiter (spec §7)")
+		}
+		if !service.EnvFile.IsZero() {
+			findings = append(findings, "service "+name+" reads an env_file; "+key+" and every "+
+				"other setting could arrive through it where this lint cannot read, and the "+
+				"package has no reason to take settings from a file")
 		}
 	}
+	return findings
 }
 
 // §11: the whitelist and the public mux are two expressions of one list, in two
@@ -418,16 +453,68 @@ func commentBlockAbove(lines []string, n int) string {
 // The framework already defaults app_proxy auth on, and setting it explicitly
 // is called out as wrong by umbrel-package-app.
 func TestProxyAuthIsLeftAtTheFrameworkDefault(t *testing.T) {
-	_, raw := loadCompose(t)
-	for i, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.Contains(trimmed, "PROXY_AUTH_ADD") {
-			t.Errorf("docker-compose.yml:%d sets PROXY_AUTH_ADD; it is already the framework "+
-				"default and umbrel-package-app says not to set it", i+1)
-		}
+	compose, _ := loadCompose(t)
+	for _, finding := range proxyAuthAddFindings(compose) {
+		t.Error(finding)
+	}
+}
+
+// proxyAuthAddFindings reads app_proxy's parsed environment, for the reason
+// proxyTrustUpstreamFindings gives (`20i.20`). app_proxy's only: the setting is
+// the framework's, and on any other service it is an unread variable.
+func proxyAuthAddFindings(compose composeFile) []string {
+	if _, ok := compose.Services["app_proxy"].Environment["PROXY_AUTH_ADD"]; ok {
+		return []string{"app_proxy sets PROXY_AUTH_ADD; it is already the framework default " +
+			"and umbrel-package-app says not to set it"}
+	}
+	return nil
+}
+
+// TestTheProxyRulesReadSettingsNotProse holds `20i.20`'s three plants as rows,
+// so reverting either rule to a line scan goes red here rather than only on the
+// day a trailing comment lands in the package.
+func TestTheProxyRulesReadSettingsNotProse(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		doc           string
+		wantTrust     int
+		wantAuthAdded int
+	}{{
+		name: "a trailing comment naming both settings is prose",
+		doc: "services:\n  app_proxy:\n    environment:\n" +
+			"      PROXY_AUTH_WHITELIST: \"/x\" # never set PROXY_TRUST_UPSTREAM or PROXY_AUTH_ADD here\n",
+	}, {
+		name: "PROXY_TRUST_UPSTREAM on app_proxy",
+		doc: "services:\n  app_proxy:\n    environment:\n" +
+			"      PROXY_TRUST_UPSTREAM: \"true\"\n",
+		wantTrust: 1,
+	}, {
+		name: "PROXY_TRUST_UPSTREAM on the server",
+		doc: "services:\n  app_proxy:\n    environment:\n      APP_PORT: 8080\n" +
+			"  server:\n    environment:\n      PROXY_TRUST_UPSTREAM: \"true\"\n",
+		wantTrust: 1,
+	}, {
+		name:      "an env_file, which this lint cannot read",
+		doc:       "services:\n  app_proxy:\n    env_file: [proxy.env]\n",
+		wantTrust: 1,
+	}, {
+		name: "PROXY_AUTH_ADD on app_proxy",
+		doc: "services:\n  app_proxy:\n    environment:\n" +
+			"      PROXY_AUTH_ADD: \"true\"\n",
+		wantAuthAdded: 1,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var compose composeFile
+			if err := yaml.Unmarshal([]byte(tc.doc), &compose); err != nil {
+				t.Fatalf("parsing the row's document: %v", err)
+			}
+			if got := proxyTrustUpstreamFindings(compose); len(got) != tc.wantTrust {
+				t.Errorf("PROXY_TRUST_UPSTREAM findings = %q, want %d", got, tc.wantTrust)
+			}
+			if got := proxyAuthAddFindings(compose); len(got) != tc.wantAuthAdded {
+				t.Errorf("PROXY_AUTH_ADD findings = %q, want %d", got, tc.wantAuthAdded)
+			}
+		})
 	}
 }
 
