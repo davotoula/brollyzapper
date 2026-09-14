@@ -242,7 +242,7 @@ deliberately not resolved on the callback path.
 `.env`, all optional:
 
 ```
-APP_PORT=8080          # host port AND container port — see the note below
+APP_PORT=8080          # host port only; must equal the app's listen port — see the note below
 RELAY_PORT=7777
 RELAY2_PORT=7778
 CHANNEL_SAT=5000000
