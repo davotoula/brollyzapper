@@ -106,9 +106,8 @@ vuln:
 # loaded as a dependency; it is only not reported on. A plant inside lnrpc is
 # green with the grep and red without it, and staticcheck's own leniency for
 # "Code generated" files does not cover it: a deprecated call there still
-# reports, so the grep is not redundant.
-# The pattern is anchored so a sibling package named lnrpc-something is still
-# linted.
+# reports, so the grep is not redundant. The pattern is anchored so a sibling
+# package named lnrpc-something is still linted.
 #
 # An empty package list fails the recipe on its own: the assignment takes grep's
 # status, and grep -v that selects nothing exits 1.
