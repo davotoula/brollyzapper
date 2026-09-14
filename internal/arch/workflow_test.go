@@ -92,6 +92,80 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 		"references a secret")
 }
 
+// zu5.12: scripts/vuln_tools.py's verdict, against a scanner whose output is
+// fixed, so the set difference and the three exits stay proven after the plants
+// that first proved them are reverted. The anchors above say the script is WIRED;
+// this says it still DECIDES. A copy of the script runs in a throwaway tree with
+// its own two modules and accepted list, so the real list is never the fixture and
+// the script needs no override that could double as an off switch.
+func TestTheToolModuleVulnVerdict(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join(moduleRoot(t), "scripts", "vuln_tools.py"))
+	if err != nil {
+		t.Fatalf("reading the script: %v", err)
+	}
+	config := `{"config":{"scan_level":"module"}}` + "\n"
+	finding := func(id string) string {
+		return `{"finding":{"osv":"` + id + `","trace":[{"module":"golang.org/x/crypto"}]}}` + "\n"
+	}
+	for _, c := range []struct {
+		name       string
+		out        map[string]string // module -> the scanner's stdout
+		exitOf     string            // a module whose scanner exits 1
+		wantExit   int
+		wantOutput string
+	}{
+		{"the accepted finding alone is green, and says so",
+			map[string]string{"a": config + finding("GO-1") + finding("GO-1"), "b": config}, "", 0, "GO-1 in golang.org/x/crypto accepted — planted reason"},
+		{"a new finding is red, named with its module",
+			map[string]string{"a": config + finding("GO-1") + finding("GO-2"), "b": config}, "", 1, "a: GO-2 in golang.org/x/crypto is NEW"},
+		{"an acceptance the scan no longer finds is red",
+			map[string]string{"a": config, "b": config}, "", 1, "GO-1 is accepted in regtest/tools/vuln-accepted.txt but the scan no longer finds it"},
+		{"a scanner that printed nothing could not check",
+			map[string]string{"a": "", "b": config}, "", 2, "COULD NOT CHECK — regtest/tools/a: expected one module-level scan"},
+		{"a scanner that failed could not check",
+			map[string]string{"a": config + finding("GO-1"), "b": config}, "b", 2, "COULD NOT CHECK — regtest/tools/b: govulncheck exited 1"},
+		{"reshaped JSON could not check rather than reading as a finding",
+			map[string]string{"a": config + `{"finding":{}}` + "\n", "b": config}, "", 2, "COULD NOT CHECK — KeyError"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tree := t.TempDir()
+			write := func(rel, body string, mode os.FileMode) {
+				path := filepath.Join(tree, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("scripts/vuln_tools.py", string(script), 0o644)
+			write("regtest/tools/vuln-accepted.txt", "regtest/tools/a GO-1 planted reason\n", 0o644)
+			for module, out := range c.out {
+				write("regtest/tools/"+module+"/go.mod", "module "+module+"\n", 0o644)
+				write("regtest/tools/"+module+"/scan.out", out, 0o644)
+			}
+			if c.exitOf != "" {
+				write("regtest/tools/"+c.exitOf+"/scan.exit", "1", 0o644)
+			}
+			// The fake runs in each module directory, as govulncheck does.
+			write("fakescan", "#!/bin/sh\ncat scan.out\n[ -f scan.exit ] && echo 'creating client: planted' >&2 && exit 1\nexit 0\n", 0o755)
+
+			cmd := exec.Command("python3", "scripts/vuln_tools.py", filepath.Join(tree, "fakescan"), "-scan", "module", "-format", "json")
+			cmd.Dir = tree
+			out, err := cmd.CombinedOutput()
+			exit := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exit = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("running the script: %v", err)
+			}
+			if exit != c.wantExit || !strings.Contains(string(out), c.wantOutput) {
+				t.Errorf("exit %d, want %d, and output must contain %q; got:\n%s", exit, c.wantExit, c.wantOutput, out)
+			}
+		})
+	}
+}
+
 // checkGateScript is every assertion about what the workflow RUNS, over the
 // concatenated run: blocks and the raw file.
 func checkGateScript(all, raw string) []problem {
