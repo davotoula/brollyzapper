@@ -85,10 +85,15 @@ cross:
 # unaffected either way — setup-go reads go.mod's `toolchain` line and puts that
 # exact Go on PATH — which is the point: the local gate now means what CI means
 # on a machine with any `go` at all.
+#
+# The second line is the regtest tool modules, which `./...` never reaches: a
+# module scan against regtest/tools/vuln-accepted.txt (zu5.12). Why, and which
+# exit is which, is scripts/vuln_tools.py's header.
 vuln:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	$(GOBIN)/govulncheck ./...
+	python3 scripts/vuln_tools.py $(GOBIN)/govulncheck -scan module -format json
 
 # The gate's one third-party linter (zu5.11): unused code, deprecated calls,
 # dropped errors, and the simplifications that otherwise arrive one simplify

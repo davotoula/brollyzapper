@@ -59,24 +59,29 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 	// DOES rather than what the Makefile looks like. An earlier version
 	// string-cut the Makefile on "\nvuln:", which was both fragile and applied
 	// to one target while `make cross` beside it got only the string check.
-	for target, must := range map[string]string{
-		"vuln":  "govulncheck ./...",
-		"cross": "GOOS=",
+	for _, anchor := range []struct{ target, must string }{
+		{"vuln", "govulncheck ./..."},
+		// zu5.12. The regtest tool modules, which `./...` never reaches. The flags
+		// are spelled in the recipe so they can be asserted here: without -scan
+		// module it is a different scan, without -format json no finding list.
+		{"vuln", "scripts/vuln_tools.py"},
+		{"vuln", "govulncheck -scan module -format json"},
+		{"cross", "GOOS="},
 		// 0vk.39. Its own wave's check was the one gate command with nothing
 		// asserting it was still wired up — found by the simplify pass.
-		"toolchain-floor": "scripts/toolchain_floor.py",
+		{"toolchain-floor", "scripts/toolchain_floor.py"},
 		// zu5.11. The exclusion is asserted as well as the run: a recipe that
 		// linted the generated stubs would go red on code that is not ours.
-		"staticcheck": "grep -Ev '/internal/lnd/lnrpc(/|$)'",
+		{"staticcheck", "grep -Ev '/internal/lnd/lnrpc(/|$)'"},
 	} {
-		recipe := expandTarget(t, target)
-		if !strings.Contains(recipe, must) {
+		recipe := expandTarget(t, anchor.target)
+		if !strings.Contains(recipe, anchor.must) {
 			t.Errorf("`make %s` does not run %q; CI calls it, so an empty target would "+
-				"make the whole check vacuous. Recipe:\n%s", target, must, recipe)
+				"make the whole check vacuous. Recipe:\n%s", anchor.target, anchor.must, recipe)
 		}
 		if strings.Contains(recipe, "@latest") {
 			t.Errorf("`make %s` installs a tool @latest, which makes the gate's verdict "+
-				"a function of the day it ran", target)
+				"a function of the day it ran", anchor.target)
 		}
 	}
 
@@ -85,6 +90,89 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 	catches(t, checkGateScript("go build ./...\n", ""), "never runs")
 	catches(t, checkGateScript(all, "env:\n  TOKEN: ${{ secrets.GH_TOKEN }}\n"),
 		"references a secret")
+}
+
+// zu5.12: scripts/vuln_tools.py's verdict, against a scanner whose output is
+// fixed, so the set difference and the three exits stay proven after the plants
+// that first proved them are reverted. The anchors above say the script is WIRED;
+// this says it still DECIDES. A copy of the script runs in a throwaway tree with
+// its own two modules and accepted list, so the real list is never the fixture and
+// the script needs no override that could double as an off switch.
+func TestTheToolModuleVulnVerdict(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join(moduleRoot(t), "scripts", "vuln_tools.py"))
+	if err != nil {
+		t.Fatalf("reading the script: %v", err)
+	}
+	config := `{"config":{"scan_level":"module"}}` + "\n"
+	finding := func(id string) string {
+		return `{"finding":{"osv":"` + id + `","trace":[{"module":"golang.org/x/crypto"}]}}` + "\n"
+	}
+	for _, c := range []struct {
+		name       string
+		out        map[string]string // module -> the scanner's stdout
+		exitOf     string            // a module whose scanner exits 1
+		wantExit   int
+		wantOutput []string
+	}{
+		{"the accepted finding alone is green, and says so",
+			map[string]string{"a": config + finding("GO-1") + finding("GO-1"), "b": config}, "", 0, []string{"GO-1 in golang.org/x/crypto accepted — planted reason"}},
+		{"a new finding is red, named with its module",
+			map[string]string{"a": config + finding("GO-1") + finding("GO-2"), "b": config}, "", 1, []string{
+				"a: GO-2 in golang.org/x/crypto is NEW",
+				// On its own, not only via the case above: the accepted ID stays accepted.
+				"GO-1 in golang.org/x/crypto accepted"}},
+		{"an acceptance the scan no longer finds is red",
+			map[string]string{"a": config, "b": config}, "", 1, []string{"GO-1 is accepted in regtest/tools/vuln-accepted.txt but the scan no longer finds it"}},
+		{"a scanner that printed nothing could not check",
+			map[string]string{"a": "", "b": config}, "", 2, []string{"COULD NOT CHECK — regtest/tools/a: expected one module-level scan"}},
+		{"a scanner that failed could not check",
+			map[string]string{"a": config + finding("GO-1"), "b": config}, "b", 2, []string{"COULD NOT CHECK — regtest/tools/b: govulncheck exited 1"}},
+		{"reshaped JSON could not check rather than reading as a finding",
+			map[string]string{"a": config + `{"finding":{}}` + "\n", "b": config}, "", 2, []string{"COULD NOT CHECK — KeyError"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tree := t.TempDir()
+			write := func(rel, body string, mode os.FileMode) {
+				path := filepath.Join(tree, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("scripts/vuln_tools.py", string(script), 0o644)
+			// Trailing slash deliberately: it must match the module the glob found.
+			write("regtest/tools/vuln-accepted.txt", "regtest/tools/a/ GO-1 planted reason\n", 0o644)
+			for module, out := range c.out {
+				write("regtest/tools/"+module+"/go.mod", "module "+module+"\n", 0o644)
+				write("regtest/tools/"+module+"/scan.out", out, 0o644)
+			}
+			if c.exitOf != "" {
+				write("regtest/tools/"+c.exitOf+"/scan.exit", "1", 0o644)
+			}
+			// The fake runs in each module directory, as govulncheck does.
+			write("fakescan", "#!/bin/sh\ncat scan.out\n[ -f scan.exit ] && echo 'creating client: planted' >&2 && exit 1\nexit 0\n", 0o755)
+
+			cmd := exec.Command("python3", "scripts/vuln_tools.py", filepath.Join(tree, "fakescan"), "-scan", "module", "-format", "json")
+			cmd.Dir = tree
+			out, err := cmd.CombinedOutput()
+			exit := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exit = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("running the script: %v", err)
+			}
+			if exit != c.wantExit {
+				t.Errorf("exit %d, want %d; got:\n%s", exit, c.wantExit, out)
+			}
+			for _, want := range c.wantOutput {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("output does not contain %q; got:\n%s", want, out)
+				}
+			}
+		})
+	}
 }
 
 // checkGateScript is every assertion about what the workflow RUNS, over the

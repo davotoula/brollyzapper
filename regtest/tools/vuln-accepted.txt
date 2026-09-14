@@ -1,0 +1,13 @@
+# Advisories `make vuln` accepts in the regtest tool modules (zu5.12).
+#
+# One line per acceptance: the tool module's directory, the advisory ID, and the
+# reason, which is required — an entry without one is refused. This file is the
+# ONLY way an ID in those modules is quiet: there is no flag, no environment
+# variable, no pattern. It is also bounded from the other side: an entry the scan
+# no longer finds is red too, because an acceptance that bounds nothing is how a
+# list turns into the switch it was meant not to be. Delete the line when that
+# happens. scripts/vuln_tools.py reads this; its header says which exit is which.
+#
+# <module directory>     <advisory>     <reason>
+
+regtest/tools/nwctool    GO-2026-5932   golang.org/x/crypto/openpgp: unmaintained and unsafe by design; the advisory has no fixed version and never will; x/crypto is in the graph for go-nostr's nip44 (chacha20), and `go mod why golang.org/x/crypto/openpgp` says the module does not need openpgp (bd memory go-2026-5932-x-crypto-openpgp-is-permanent). Revisit if the graph ever drops x/crypto.
