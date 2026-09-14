@@ -309,7 +309,8 @@ func TestNoWorkflowInterpolatesInputIntoARunBlock(t *testing.T) {
 
 // Base images are pinned by digest for the same reason actions are pinned by
 // SHA: `golang:1.26-alpine` is a mutable pointer, and it is the layer the two
-// binaries are compiled by.
+// binaries are compiled by. The regtest tool images are held to the same rule;
+// the test says why.
 //
 // The cost is real and deliberate: a pinned base stops receiving upstream
 // patches until someone bumps it, which is what govulncheck in the gate is for
@@ -342,17 +343,25 @@ func checkBaseImagesPinned(files map[string]string) []problem {
 
 func TestTheBaseImagesArePinnedByDigest(t *testing.T) {
 	root := moduleRoot(t)
-	names, err := filepath.Glob(filepath.Join(root, "Dockerfile.*"))
-	if err != nil || len(names) == 0 {
-		t.Fatalf("finding Dockerfiles in %s: %v", root, err)
-	}
+	// The shipped images, and the regtest tool images (0vk.58). Nothing about a
+	// tool ships, but it is still a registry pull that Scorecard's
+	// Pinned-Dependencies reads, and a weekly scanner is a slow way to learn a
+	// pin was dropped. Each pattern must match something: a directory that moves
+	// would otherwise take its Dockerfile out of the rule without a word.
 	files := map[string]string{}
-	for _, path := range names {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("reading %s: %v", path, err)
+	for _, pattern := range []string{"Dockerfile.*", "regtest/tools/*/Dockerfile"} {
+		names, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil || len(names) == 0 {
+			t.Fatalf("finding %s in %s: %v", pattern, root, err)
 		}
-		files[filepath.Base(path)] = string(raw)
+		for _, path := range names {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading %s: %v", path, err)
+			}
+			rel, _ := filepath.Rel(root, path)
+			files[rel] = string(raw)
+		}
 	}
 	clean(t, checkBaseImagesPinned(files))
 

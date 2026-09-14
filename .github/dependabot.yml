@@ -8,12 +8,13 @@
 # proposer, and nothing more: a Dependabot PR is a suggestion that still has to
 # pass the same gate as any other change.
 #
-# Four update entries across three ecosystems, and the one deliberately absent:
+# Five update entries across three ecosystems, and the one deliberately absent:
 #
 #   gomod           the app's module graph
 #   gomod           regtest/tools/{nwctool,zaptool}, which are separate modules
 #   github-actions  the SHA pins in .github/workflows/
 #   docker          the base-image digests in Dockerfile.server and .guard
+#   docker          regtest/tools/sqlite's base-image digest
 #
 #   docker-compose  ABSENT, on purpose, twice over. regtest/docker-compose.yml
 #                   pins LND, bitcoind and strfry, and those pins are re-proved
@@ -136,3 +137,20 @@ updates:
     groups:
       base-images:
         patterns: ["*"]
+
+  # The regtest sqlite tool's alpine digest (0vk.58). Its own entry rather than
+  # a second directory on the one above, for the reason the regtest gomod entry
+  # is separate from the app's: a shipped base image and a test tool's are never
+  # proposed in the same PR, and the review question here is only "does regtest
+  # still run". `directory: "/"` does not reach it — Dependabot reads Dockerfiles
+  # in the named directory, not below it.
+  - package-ecosystem: docker
+    directory: "/regtest/tools/sqlite"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "regtest"

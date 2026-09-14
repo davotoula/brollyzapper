@@ -8,6 +8,10 @@
 #
 # So the tool is a separate throwaway container mounted on the same named
 # volume. Built once by e2e.sh and reused; nothing about it ships.
-FROM alpine:3.20
+#
+# Pinned by digest all the same, as the root Dockerfiles are: it is a registry
+# pull, Scorecard's Pinned-Dependencies reads it, and internal/arch's base-image
+# rule covers it (0vk.58). Dependabot's docker entry proposes the refresh.
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 RUN apk add --no-cache sqlite
 ENTRYPOINT ["sqlite3"]
