@@ -320,7 +320,9 @@ func workflowFiles(t *testing.T) (map[string]workflow, map[string]string) {
 	}
 	parsed, raws := map[string]workflow{}, map[string]string{}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yml") {
+		// Both extensions: GitHub runs a .yaml workflow as readily as a .yml one,
+		// and one skipped here would skip every rule below (0vk.57's simplify).
+		if e.IsDir() || !(strings.HasSuffix(e.Name(), ".yml") || strings.HasSuffix(e.Name(), ".yaml")) {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
