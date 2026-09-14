@@ -1,6 +1,8 @@
 module zaptool
 
-go 1.24.1
+go 1.27.0
+
+toolchain go1.27.1
 
 require github.com/nbd-wtf/go-nostr v0.52.3
 
@@ -27,5 +29,5 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
-	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )

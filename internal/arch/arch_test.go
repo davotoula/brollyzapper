@@ -695,6 +695,73 @@ func TestTheLanguageVersionTracksTheToolchain(t *testing.T) {
 		[]byte("module m\n\ngo !!! not a version\n")), "does not parse")
 }
 
+// 0vk.58: the regtest tool modules carry the root's `go` and `toolchain` lines.
+//
+// They are separate modules the gate never builds, so nothing else notices them
+// fall behind — and they had: `go 1.25.0` and `go 1.24.1` against the root's
+// 1.27, which under GOTOOLCHAIN=auto let a host with an older `go` on PATH build
+// them with it. govulncheck's source scan found 23 and 27 reachable
+// standard-library advisories in the tools as built that way. Equal, not "at
+// least": the root's `toolchain` line is the one scripts/toolchain_floor.py ties
+// to the images, and its `go` line tracks that, so a tool ahead of the pair would
+// make regtest need a Go nothing else here uses.
+// If a tool ever needs a different Go, that is a decision to write down here.
+func checkToolModulesTrackRoot(root []byte, tools map[string][]byte) []problem {
+	want, err := modfile.Parse("go.mod", root, nil)
+	if err != nil || want.Go == nil || want.Toolchain == nil {
+		return []problem{{"go.mod", 0, "the root go.mod does not state both `go` and `toolchain`"}}
+	}
+	var found []problem
+	for name, src := range tools {
+		got, err := modfile.Parse(name, src, nil)
+		if err != nil {
+			found = append(found, problem{name, 0, "does not parse: " + err.Error()})
+			continue
+		}
+		if got.Go == nil || got.Go.Version != want.Go.Version ||
+			got.Toolchain == nil || got.Toolchain.Name != want.Toolchain.Name {
+			found = append(found, problem{name, 0, fmt.Sprintf(
+				"does not carry the root's `go %s` / `toolchain %s`",
+				want.Go.Version, want.Toolchain.Name)})
+		}
+	}
+	return found
+}
+
+func TestTheRegtestToolModulesTrackTheRootGo(t *testing.T) {
+	root := moduleRoot(t)
+	names, err := filepath.Glob(filepath.Join(root, "regtest", "tools", "*", "go.mod"))
+	if err != nil || len(names) == 0 {
+		t.Fatalf("finding regtest/tools/*/go.mod: %v", err)
+	}
+	tools := map[string][]byte{}
+	for _, path := range names {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatalf("relativising %s: %v", path, err)
+		}
+		tools[filepath.ToSlash(rel)] = src
+	}
+	clean(t, checkToolModulesTrackRoot(goModSource(t), tools))
+
+	rootSrc := []byte("module m\n\ngo 1.27.0\n\ntoolchain go1.27.1\n")
+	// The drift this exists for: the language version left behind.
+	catches(t, checkToolModulesTrackRoot(rootSrc, map[string][]byte{
+		"tool/go.mod": []byte("module tool\n\ngo 1.25.0\n\ntoolchain go1.27.1\n")}), "does not carry")
+	// The mechanism the brief warned of: `go` moved, `toolchain` not.
+	catches(t, checkToolModulesTrackRoot(rootSrc, map[string][]byte{
+		"tool/go.mod": []byte("module tool\n\ngo 1.27.0\n")}), "does not carry")
+	catches(t, checkToolModulesTrackRoot(rootSrc, map[string][]byte{
+		"tool/go.mod": []byte("module tool\n\ngo 1.27.0\n\ntoolchain go1.27.0\n")}), "does not carry")
+	catches(t, checkToolModulesTrackRoot(rootSrc, map[string][]byte{
+		"tool/go.mod": []byte("module tool\n\ngo !!!\n")}), "does not parse")
+	catches(t, checkToolModulesTrackRoot([]byte("module m\n\ngo 1.27.0\n"), nil), "does not state both")
+}
+
 // go.mod carries exactly one replace, and it is the fork at the pinned commit.
 //
 // A replace silently swaps what the compiler sees, so it is the line in go.mod a

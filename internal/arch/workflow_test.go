@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -318,22 +319,28 @@ func TestNoWorkflowInterpolatesInputIntoARunBlock(t *testing.T) {
 func checkBaseImagesPinned(files map[string]string) []problem {
 	var found []problem
 	for name, raw := range files {
+		// `FROM x AS build` referred to later by name is a stage, not a registry
+		// pull, and has no digest to pin. Known by the names earlier lines
+		// declared, not by shape: "no slash and no colon" also describes
+		// `FROM alpine`, an unpinned pull of latest (0vk.58 go-review).
+		stages := map[string]bool{"scratch": true}
 		for i, line := range strings.Split(raw, "\n") {
-			if !strings.HasPrefix(strings.TrimSpace(line), "FROM ") {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
 				continue
 			}
-			// `FROM x AS build` referred to later by name is a stage, not a
-			// registry pull, and has no digest to pin.
-			image := strings.Fields(strings.TrimSpace(line))[1]
-			if strings.HasPrefix(image, "--platform=") {
-				image = strings.Fields(strings.TrimSpace(line))[2]
+			fields = fields[1:]
+			if strings.HasPrefix(fields[0], "--platform=") && len(fields) > 1 {
+				fields = fields[1:]
 			}
-			if !strings.Contains(image, "/") && !strings.Contains(image, ":") {
-				continue
-			}
-			if !strings.Contains(image, "@sha256:") {
+			image := fields[0]
+			if !stages[strings.ToLower(image)] && !strings.Contains(image, "@sha256:") {
 				found = append(found, problem{name, i + 1,
 					fmt.Sprintf("%q is pinned by tag, not by digest", image)})
+			}
+			// Declared after the check: a stage can only be named by a later line.
+			if len(fields) >= 3 && strings.EqualFold(fields[1], "AS") {
+				stages[strings.ToLower(fields[2])] = true
 			}
 		}
 	}
@@ -341,18 +348,59 @@ func checkBaseImagesPinned(files map[string]string) []problem {
 }
 
 func TestTheBaseImagesArePinnedByDigest(t *testing.T) {
+	// Every Dockerfile in the tree, not a list of where they are today: the
+	// shipped images and the regtest tool images alike (0vk.58). Nothing about a
+	// tool ships, but it is still a registry pull that Scorecard's
+	// Pinned-Dependencies reads, and a weekly scanner is a slow way to learn a
+	// pin was dropped — or that a new Dockerfile never had one.
 	root := moduleRoot(t)
-	names, err := filepath.Glob(filepath.Join(root, "Dockerfile.*"))
-	if err != nil || len(names) == 0 {
-		t.Fatalf("finding Dockerfiles in %s: %v", root, err)
-	}
 	files := map[string]string{}
-	for _, path := range names {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if slices.Contains(neverScanned, d.Name()) {
+				return filepath.SkipDir
+			}
+			// Two things a walk sees that git does not, either of which would make
+			// the verdict depend on which checkout ran it: the main tree's
+			// gitignored /docs and /.claude, which a worktree does not have, and a
+			// nested worktree or clone (a directory holding a .git FILE or dir),
+			// whose Dockerfiles are another branch's.
+			if path != root {
+				if rel, _ := filepath.Rel(root, path); rel == "docs" || rel == ".claude" {
+					return filepath.SkipDir
+				}
+				if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if d.Name() != "Dockerfile" && !strings.HasPrefix(d.Name(), "Dockerfile.") {
+			return nil
+		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatalf("reading %s: %v", path, err)
+			return err
 		}
-		files[filepath.Base(path)] = string(raw)
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(raw)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s for Dockerfiles: %v", root, err)
+	}
+	// The walk must have found the ones that exist, or a broken walk reads as a
+	// clean tree.
+	for _, want := range []string{"Dockerfile.server", "Dockerfile.guard", "regtest/tools/sqlite/Dockerfile"} {
+		if _, ok := files[want]; !ok {
+			t.Fatalf("the Dockerfile walk did not find %s (found %d files)", want, len(files))
+		}
 	}
 	clean(t, checkBaseImagesPinned(files))
 
@@ -361,6 +409,16 @@ func TestTheBaseImagesArePinnedByDigest(t *testing.T) {
 	}), "pinned by tag, not by digest")
 	// And a build STAGE is not a registry pull, so it must not be flagged.
 	clean(t, checkBaseImagesPinned(map[string]string{
-		"Dockerfile.planted": "FROM build\n",
+		"Dockerfile.planted": "FROM golang@sha256:" + strings.Repeat("0", 64) +
+			" AS build\nFROM --platform=$BUILDPLATFORM build\nFROM scratch\n",
 	}))
+	// A bare image name is a pull of latest, not a stage, unless a line above
+	// declared it — the shape "no slash, no colon" used to let this through.
+	catches(t, checkBaseImagesPinned(map[string]string{
+		"Dockerfile.planted": "FROM alpine\n",
+	}), `"alpine" is pinned by tag`)
+	// A stage is only a stage after its AS line, not before.
+	catches(t, checkBaseImagesPinned(map[string]string{
+		"Dockerfile.planted": "FROM build\nFROM golang@sha256:" + strings.Repeat("0", 64) + " AS build\n",
+	}), `"build" is pinned by tag`)
 }
