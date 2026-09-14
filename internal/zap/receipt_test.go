@@ -275,7 +275,7 @@ func TestAnOverpaidZapStillProducesAReceipt(t *testing.T) {
 	// The description tag is the request verbatim, which is what a client
 	// re-hashes against the invoice's description_hash. An overpayment changes
 	// nothing about it.
-	if got := receipt.Tags.GetFirst([]string{"description"}); got == nil || got.Value() != string(raw) {
+	if got, ok := tagValue(receipt, "description"); !ok || got != string(raw) {
 		t.Error("the receipt's description tag is not the zap request verbatim")
 	}
 }

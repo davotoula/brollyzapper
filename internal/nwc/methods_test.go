@@ -134,11 +134,11 @@ func TestTheInfoEventNamesBothEncryptionSchemes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tag := event.Tags.GetFirst([]string{"encryption"})
-	if tag == nil {
+	got := encryptionTag(event)
+	if got == "" {
 		t.Fatal("the info event carries no encryption tag; a client cannot tell what we speak")
 	}
-	if got := tag.Value(); got != "nip44_v2 nip04" {
+	if got != "nip44_v2 nip04" {
 		t.Errorf("encryption = %q, want %q — NIP-44 first, because the order is a preference "+
 			"and NIP-04 is the fallback", got, "nip44_v2 nip04")
 	}

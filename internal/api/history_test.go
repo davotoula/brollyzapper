@@ -151,10 +151,6 @@ func TestAnUnreadableHistoryStillRendersTheRestOfTheWalletPage(t *testing.T) {
 	}
 }
 
-func hash64(i int) string {
-	return strings.Repeat("f", 62) + string(rune('a'+i/26)) + string(rune('a'+i%26))
-}
-
 // brokenHistory fails every read.
 type brokenHistory struct{}
 

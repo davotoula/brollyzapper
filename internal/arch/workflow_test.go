@@ -64,6 +64,9 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 		// 0vk.39. Its own wave's check was the one gate command with nothing
 		// asserting it was still wired up — found by the simplify pass.
 		"toolchain-floor": "scripts/toolchain_floor.py",
+		// zu5.11. The exclusion is asserted as well as the run: a recipe that
+		// linted the generated stubs would go red on code that is not ours.
+		"staticcheck": "grep -Ev '/internal/lnd/lnrpc(/|$)'",
 	} {
 		recipe := expandTarget(t, target)
 		if !strings.Contains(recipe, must) {
@@ -92,7 +95,7 @@ func checkGateScript(all, raw string) []problem {
 	for _, command := range []string{
 		"gofmt -l .", "go build ./...", "go vet ./...", "go test ./...",
 		"go test -race ./...", "make cross", "go mod tidy -diff", "make vuln",
-		"make fuzz", "make toolchain-floor",
+		"make fuzz", "make toolchain-floor", "make staticcheck",
 	} {
 		if !strings.Contains(all, command) {
 			found = append(found, problem{"ci.yml", 0, fmt.Sprintf(

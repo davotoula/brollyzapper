@@ -521,10 +521,14 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	// default, the ladder and the rejection are untouched, so an absent tag is
 	// still NIP-04 and an unsupported one is still UNSUPPORTED_ENCRYPTION. What
 	// changes is that the line can now say which of those happened.
-	tag := event.Tags.GetFirst([]string{"encryption"})
+	//
+	// Tags.Find matches the name EXACTLY and only a tag that has a value, and
+	// returns a nil slice when there is none (zu5.11). The deprecated GetFirst
+	// it replaced matched a name prefix, so "encryptionx" chose the scheme.
+	tag := event.Tags.Find("encryption")
 	scheme, supported := nostr.NIP04, true
 	if tag != nil {
-		scheme, supported = nostr.EncryptionFromTag(tag.Value())
+		scheme, supported = nostr.EncryptionFromTag(tag[1])
 	}
 
 	s.log.Debug("handling an NWC request", "connection", conn.row().ID,

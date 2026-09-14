@@ -7,6 +7,10 @@ BUF_VERSION               ?= v1.72.0
 PROTOC_GEN_GO_VERSION     ?= v1.36.12
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
 GOVULNCHECK_VERSION       ?= v1.7.0
+# honnef.co/go/tools v0.8.1 is staticcheck release 2026.2.1. Bump it when a Go
+# release lands that this version does not understand, or by hand to pick up
+# new checks — and fix what the new checks find in the same branch.
+STATICCHECK_VERSION       ?= v0.8.1
 # How long the gate fuzzes. Short on purpose: this runs on every push, and the
 # job of a gate-length fuzz run is to re-exercise the corpus and catch a crasher
 # that a change just made reachable — not to search. Raise it by hand
@@ -17,7 +21,7 @@ REGISTRY                  ?= ghcr.io/davotoula
 
 GOBIN ?= $(shell go env GOPATH)/bin
 
-.PHONY: all build test vet check cross vuln fuzz toolchain-floor proto proto-tools docker release clean
+.PHONY: all build test vet check cross vuln staticcheck fuzz toolchain-floor proto proto-tools docker release clean
 
 all: check
 
@@ -85,6 +89,33 @@ vuln:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	$(GOBIN)/govulncheck ./...
+
+# The gate's one third-party linter (zu5.11): unused code, deprecated calls,
+# dropped errors, and the simplifications that otherwise arrive one simplify
+# pass at a time. staticcheck ALONE, by ruling — it needs no configuration file,
+# so there is none to drift, and a finding is kept only with a //lint:ignore
+# carrying its reason at the site, never by switching a check off here.
+#
+# Pinned and installed exactly as `vuln` is, for the same reasons: one version
+# in one file, and built by this module's toolchain so it can parse this code.
+#
+# internal/lnd/lnrpc is left out of the PACKAGE LIST, the way gofmt's grep
+# leaves it out: it is regenerated from the vendored protos, so a
+# //lint:file-ignore in it would be lost on the next `make proto`, and a
+# -checks line would switch the checks off for our own code too. It is still
+# loaded as a dependency; it is only not reported on. A plant inside lnrpc is
+# green with the grep and red without it, and staticcheck's own leniency for
+# "Code generated" files does not cover it: a deprecated call there still
+# reports, so the grep is not redundant. The pattern is anchored so a sibling
+# package named lnrpc-something is still linted.
+#
+# An empty package list fails the recipe on its own: the assignment takes grep's
+# status, and grep -v that selects nothing exits 1.
+staticcheck:
+	GOTOOLCHAIN="$$(go env GOVERSION)" \
+		go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+	pkgs="$$(go list ./... | grep -Ev '/internal/lnd/lnrpc(/|$$)')" && \
+		$(GOBIN)/staticcheck $$pkgs
 
 # toolchain-floor asserts go.mod's `toolchain` equals the Go the digest-pinned
 # base images actually ship (0vk.39).

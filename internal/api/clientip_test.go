@@ -164,7 +164,8 @@ func TestLimiterWindowsExpire(t *testing.T) {
 	limiter := api.NewLimiter(api.FixedLimits(2, 3), api.KeyGlobal, func() time.Time { return now })
 	r := request("10.0.0.1:1", nil)
 
-	if !limiter.Allow(r) || !limiter.Allow(r) || limiter.Allow(r) {
+	first, second, third := limiter.Allow(r), limiter.Allow(r), limiter.Allow(r)
+	if !first || !second || third {
 		t.Fatal("the per-minute allowance is not 2")
 	}
 	now = now.Add(61 * time.Second)
