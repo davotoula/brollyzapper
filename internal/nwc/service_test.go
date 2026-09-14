@@ -1802,6 +1802,16 @@ func TestTheInboundLineNamesTheRequestedEncryptionScheme(t *testing.T) {
 			},
 			want: "absent",
 		},
+		{
+			// zu5.11: the first tag that NAMES a scheme wins, so a valueless
+			// one ahead of it is skipped rather than read as NIP-04.
+			name: "a valueless encryption tag before a real one",
+			tags: func(h *harness) gonostr.Tags {
+				return gonostr.Tags{{"p", h.conn.row().ServicePubkey}, {"encryption"},
+					{"encryption", "nip44_v2"}}
+			},
+			want: "nip44_v2",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t)
