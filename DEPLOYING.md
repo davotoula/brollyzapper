@@ -454,6 +454,9 @@ lnd: the node's certificate does not name 10.61.7.2; it names localhost, lnd, 12
 regenerates them, restart LND, then restart the guard
 ```
 
+The Security page shows the same edit as a failed check, and the Node page's "LND reachable from
+the server" line says whether the app's own credential works, with the time it was last checked.
+
 The handshake text above is what an earlier image shows — and what any *other* client dialling
 the same address will still show you, since the check is this app's and not the node's.
 
@@ -529,8 +532,6 @@ Three signs, in the order they arrive:
    If you left `ADMIN_PASSWORD` empty **on `0.1.21` or later** the server will not have started
    at all, and its log says so in one line naming the variable and the minimum — fix `.env` and
    `docker compose up -d` again. Nothing has been written yet, so there is nothing to undo.
-   **On the `0.1.20` images this template still pins it comes up and locks you out instead**,
-   and the way back is destructive: see the interim note at step 3.
 
    Once in, **Settings** offers a password change. It does not on umbrelOS, where the platform
    supplies the password and displays it itself; here it is yours.

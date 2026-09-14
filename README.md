@@ -7,7 +7,8 @@
 [![Licence](https://img.shields.io/github/license/davotoula/brollyzapper)](LICENSE)
 
 Nostr zap receiving (NIP-57) and Nostr Wallet Connect (NIP-47) for an **existing** LND node,
-packaged as an Umbrel app. Safety over features.
+packaged as an Umbrel app and runnable in plain Docker Compose beside an LND you already run on
+the same host. Safety over features.
 
 It serves its own lightning address — nothing external is required, no Alby, no LNURL host, no
 static file to keep in sync — publishes zap receipts to nostr, and lets a wallet pay through
@@ -31,6 +32,24 @@ merged, install from the community store:
 
 Updates arrive through the store like any other app. The same app id is what the official
 listing will carry, so your data and settings carry over.
+
+## Install outside Umbrel
+
+For an LND on the same Linux host, in Docker beside the app or installed on the host itself.
+Docker Desktop is out: its shared filesystem breaks the guard's socket.
+
+The template is [`deploy/`](deploy/), and [`DEPLOYING.md` §Running outside
+Umbrel](DEPLOYING.md#running-outside-umbrel) is the procedure: five install steps, and the snags
+a first start meets — a node certificate that does not name the address the app dials, LND's gRPC
+still listening on loopback only, and LND's files unreadable by the user the containers run as —
+with the fix for each.
+
+Set **`ADMIN_PASSWORD`** (at least 12 characters) in `.env` before the first start; the server will
+not start without it. Change it later in **Settings**, not in `.env`.
+
+LND on another machine is not supported: both credentials the guard bakes are locked to this
+container's source address, and [DEPLOYING §9](DEPLOYING.md#9-not-supported-lnd-on-another-machine)
+says why that cannot simply be loosened.
 
 ## First run
 
@@ -77,13 +96,13 @@ firewall hole — and three things about it are not optional:
   cannot see who is calling.
 
 The procedure, how to verify it from outside your LAN, and how to confirm the rate limit fires
-are in [`DEPLOYING.md`](DEPLOYING.md), which also covers running outside Umbrel.
+are in [`DEPLOYING.md`](DEPLOYING.md).
 
 ## Where everything else is
 
 | | |
 |---|---|
-| [`DEPLOYING.md`](DEPLOYING.md) | Exposing the address (Cloudflare Tunnel, step by step), what is public, and a plain-Docker install outside Umbrel |
+| [`DEPLOYING.md`](DEPLOYING.md) | Exposing the address (Cloudflare Tunnel, step by step), what is public, and the plain-Docker install procedure |
 | [`OPERATING.md`](OPERATING.md) | Every setting and its default, sending and the two caps, backups, macaroon rotation, storage |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Layout, the build and test gate, the architecture rules, how a change lands |
