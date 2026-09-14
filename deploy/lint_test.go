@@ -8,35 +8,27 @@
 // release that re-pins the package without re-pinning here ships a template
 // that installs last month's binaries. Each check below is one of those.
 //
-// THE THIRD COMPOSE LOADER IN THIS REPOSITORY, and the threshold this repo wrote
-// down for itself is three. internal/arch/arch_test.go's duplication note argues
-// the trade for the secret predicates and ends "Two copies of forty lines is the
-// cheaper trade at two consumers. AT THREE IT IS NOT: that is the moment to make
-// the package." umbrel/lint_test.go and regtest/lint_test.go are the other two,
-// and the §6/§20 mount rule is now stated in three of them.
+// ONE READER FOR THE THREE LINTS, internal/composelint, since BrollyZap-20i.18.
+// This file, umbrel/lint_test.go and regtest/lint_test.go each loaded their
+// compose as `(struct, raw)`, and every defect the 20i epic closed in them was a
+// raw-text scan standing beside a struct already parsed — several introduced
+// inside the fix for the one before, because the string was in scope. The reader
+// hands out no text: scalars with their lines, interpolations, defaults, a key's
+// comment, the comments themselves for the one check whose subject is a comment.
 //
-// NOT EXTRACTED, AND THE REASON HAS CHANGED. It used to be scope — 20i.1's brief
-// ruled out any change under umbrel/, and a shared package has to move that file
-// to be worth making. Brief D changed umbrel/ AND regtest/, so that reason is
-// dead and this paragraph would otherwise be a dead excuse the next reader
-// either acts on or stops at.
+// THE READER IS SHARED, THE STRUCT IS NOT. A shared composeFile would be the
+// UNION of three different documents — umbrel alone needs container_name and
+// env_file, this file alone top-level networks and depends_on, regtest alone
+// command — and a field a lint does not read is exactly the vacuity risk this
+// family of checks hunts. So each lint keeps its own struct, its own tests and
+// its own messages, and decodes into it through the one loader.
 //
-// The honest reason is size and shape. The duplicated piece is the compose
-// loader and the networks model — about fourteen lines per copy, where the bar
-// arch set is forty. And a shared composeFile struct would be the UNION of three
-// different documents: umbrel alone needs container_name, this file alone needs
-// top-level networks and ipam, regtest alone needs aliases. A field a lint does
-// not read is exactly the vacuity risk this whole family of checks hunts, so the
-// union struct would be worse than the duplication it replaced.
-//
-// What IS duplicated deliberately is named identically in all three files —
-// scalarNodes here, in umbrel/lint_test.go and in regtest/lint_test.go — because
-// nothing detects drift between copies but the name. BrollyZap-20i.18 carries
-// the full argument and the sequencing. internal/lnd/lndtest and
-// internal/lnurl/lnurltest are the precedent for where it would go.
+// The .env.example is not compose and does not go through the reader: it has no
+// structure to parse, and `#` genuinely starts a comment there.
 package deploy
 
 import (
+	"cmp"
 	"errors"
 	"maps"
 	"net/netip"
@@ -49,8 +41,7 @@ import (
 	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
-
+	"github.com/davotoula/brollyzapper/internal/composelint"
 	"github.com/davotoula/brollyzapper/internal/config"
 )
 
@@ -63,19 +54,17 @@ const (
 
 type composeFile struct {
 	Services map[string]struct {
-		Image       string            `yaml:"image"`
-		User        string            `yaml:"user"`
-		Volumes     []string          `yaml:"volumes"`
-		Ports       []string          `yaml:"ports"`
-		Restart     string            `yaml:"restart"`
-		DependsOn   []string          `yaml:"depends_on"`
+		Image     string   `yaml:"image"`
+		User      string   `yaml:"user"`
+		Volumes   []string `yaml:"volumes"`
+		Ports     []string `yaml:"ports"`
+		Restart   string   `yaml:"restart"`
+		DependsOn []string `yaml:"depends_on"`
+		// The list spelling of environment decodes into a map with a LOUD error, not
+		// a silent empty one, and loadCompose turns that into a Fatalf. networks is
+		// not a field: the two services spell it differently, and the address check
+		// asks the document for the server's mapping form.
 		Environment map[string]string `yaml:"environment"`
-		// A yaml.Node because the two services spell this differently: the server
-		// needs the mapping form to carry ipv4_address, the guard only names the
-		// network. Environment above needs no such treatment — the list spelling
-		// decodes into a map with a LOUD error, not a silent empty one, and
-		// loadCompose turns that into a Fatalf.
-		Networks yaml.Node `yaml:"networks"`
 	} `yaml:"services"`
 	Networks map[string]struct {
 		IPAM struct {
@@ -86,16 +75,13 @@ type composeFile struct {
 	} `yaml:"networks"`
 }
 
-func loadCompose(t *testing.T) (composeFile, string) {
+// loadCompose is the template, decoded into this lint's own struct, and its
+// document. There is no text: a check that wants to know what the file says asks
+// the document (BrollyZap-20i.18).
+func loadCompose(t *testing.T) (composeFile, *composelint.Document) {
 	t.Helper()
-	raw, err := os.ReadFile(composePath)
-	if err != nil {
-		t.Fatalf("reading %s: %v", composePath, err)
-	}
 	var compose composeFile
-	if err := yaml.Unmarshal(raw, &compose); err != nil {
-		t.Fatalf("parsing %s: %v", composePath, err)
-	}
+	doc := composelint.Load(t, composePath, &compose)
 	// Both services, by name, or the assertions below inspect nothing. Every
 	// check here keys off one of these two, so a rename would otherwise turn the
 	// whole file into a set of vacuous passes.
@@ -111,7 +97,7 @@ func loadCompose(t *testing.T) (composeFile, string) {
 				"both, so the settings checks below would assert nothing", name)
 		}
 	}
-	return compose, string(raw)
+	return compose, doc
 }
 
 // contract is what internal/config actually reads.
@@ -234,6 +220,7 @@ const passwordManagedVar = "ADMIN_PASSWORD_MANAGED"
 var umbrelOnly = []string{"APP_", "NETWORK_IP", "PROXY_", passwordManagedVar}
 
 func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
+	_, doc := loadCompose(t)
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading the deploy directory: %v", err)
@@ -242,10 +229,6 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 	for _, e := range entries {
 		if e.IsDir() || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
-		}
-		raw, err := os.ReadFile(e.Name())
-		if err != nil {
-			t.Fatalf("reading %s: %v", e.Name(), err)
 		}
 		scanned++
 		// COMMENTS ARE EXEMPT, as they are in both neighbouring lints. This
@@ -266,7 +249,7 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 		//
 		// The other files stay a line scan: .env.example has no structure to
 		// parse, and `#` genuinely starts a comment there.
-		cleaned := commentFreeText(t, e.Name(), string(raw))
+		cleaned := commentFreeText(t, e.Name(), doc)
 		for _, needle := range umbrelOnly {
 			if !strings.Contains(cleaned, needle) {
 				continue
@@ -297,39 +280,31 @@ func TestNoUmbrelOnlySettingAppearsAnywhere(t *testing.T) {
 }
 
 // commentFreeText is a file's content with its comments gone, by whichever route
-// the file's own shape allows: the compose is parsed and its scalars joined, and
-// anything else is cut at `#`. See the two hazards recorded at the call site.
-func commentFreeText(t *testing.T, name, raw string) string {
+// the file's own shape allows: the compose is its document's scalars and anchor
+// names — never its text — and anything else is read and cut at `#`. See the two
+// hazards recorded at the call site.
+func commentFreeText(t *testing.T, name string, compose *composelint.Document) string {
 	t.Helper()
+	var out strings.Builder
 	if name != composePath {
-		return withoutComments(raw)
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		return withoutComments(string(raw))
 	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("parsing %s as a document: %v", name, err)
+	for _, scalar := range compose.Scalars() {
+		out.WriteString(scalar.Value)
+		out.WriteString("\n")
 	}
 	// ANCHORS TOO, and that is not theoretical tidiness. An anchor name is not a
 	// scalar Value, so `environment: &NETWORK_IP_anchor` put a forbidden name in
 	// the file and this check passed — measured, and it is the same silent
-	// direction as the two holes above. Anchors sit on mappings and sequences as
-	// readily as on scalars, so every node is asked for one.
-	var out strings.Builder
-	var walk func(*yaml.Node)
-	walk = func(n *yaml.Node) {
-		if n.Anchor != "" {
-			out.WriteString(n.Anchor)
-			out.WriteString("\n")
-		}
-		if n.Kind == yaml.ScalarNode {
-			out.WriteString(n.Value)
-			out.WriteString("\n")
-			return
-		}
-		for _, child := range n.Content {
-			walk(child)
-		}
+	// direction as the two holes above.
+	for _, anchor := range compose.Anchors() {
+		out.WriteString(anchor.Name)
+		out.WriteString("\n")
 	}
-	walk(&doc)
 	return out.String()
 }
 
@@ -359,14 +334,8 @@ var imageRE = regexp.MustCompile(`ghcr\.io/davotoula/brollyzapper(-guard)?:[0-9]
 // is wrong. Equality here makes the pin step update both or go red.
 func TestTheImagesEqualThePackages(t *testing.T) {
 	compose, _ := loadCompose(t)
-	pkgRaw, err := os.ReadFile(packageCompose)
-	if err != nil {
-		t.Fatalf("reading %s: %v", packageCompose, err)
-	}
 	var pkg composeFile
-	if err := yaml.Unmarshal(pkgRaw, &pkg); err != nil {
-		t.Fatalf("parsing %s: %v", packageCompose, err)
-	}
+	composelint.Load(t, packageCompose, &pkg)
 
 	// PER SERVICE, NOT AS A SET. The first version pulled every digest-pinned
 	// reference out of each file's raw text and compared the two sorted sets —
@@ -409,13 +378,10 @@ func TestTheImagesEqualThePackages(t *testing.T) {
 // A server on a floating address gets a credential that stops working the next
 // time Docker hands out addresses in a different order.
 func TestTheServerHasAFixedAddressAndTheGuardBakesIt(t *testing.T) {
-	compose, _ := loadCompose(t)
+	compose, doc := loadCompose(t)
 
-	var networks map[string]struct {
-		IPv4 string `yaml:"ipv4_address"`
-	}
-	serverNetworks := compose.Services["server"].Networks
-	if err := serverNetworks.Decode(&networks); err != nil {
+	networks, err := doc.Networks("server")
+	if err != nil {
 		t.Fatalf("the server's networks are not a mapping with an ipv4_address: %v", err)
 	}
 	var fixed, onNetwork string
@@ -663,132 +629,15 @@ func assignedInExample(t *testing.T) map[string][]string {
 	return out
 }
 
-// interpolatedNames is every variable the template reads, in either spelling,
-// taken off the parsed document's scalars.
-//
-// BOTH SPELLINGS, because `\$\{([A-Z_]…)` required the brace and the bare form is
-// equally valid compose: `$LND_DIR` would never have been collected, so
-// .env.example would never have been required to show it and the operator would
-// not have been shown a setting (BrollyZap-20i.19). Latent rather than live —
-// this template has no bare form today, and the floor below would still have
-// passed on the other names — but the Umbrel package writes bare
-// interpolations eight times over six code lines, and this template is what a
-// reader copies from.
-//
-// OFF THE SCALARS, not the raw text, for the two reasons brief D paid for next
-// door: a comment naming `${SOMETHING}` would otherwise demand an assignment for
-// a variable the template does not read, and a double-quoted scalar folded with
-// a trailing backslash hides a name from a per-line regexp while compose still
-// interpolates it. Measured 12 Sep 2026: both readings return the same fourteen
-// names on the template as it stands, so this changes nothing today and closes
-// both tomorrows.
-func interpolatedNames(t *testing.T, raw string) map[string]bool {
-	t.Helper()
-	out := map[string]bool{}
-	for _, value := range unescapedScalars(t, raw) {
-		for _, m := range anyInterpolationRE.FindAllStringSubmatch(value, -1) {
-			out[m[1]] = true
-		}
-	}
-	return out
-}
-
-// interpolatedDefaults is every default the template gives a variable, by name —
-// interpolatedNames' sibling, reading the same scalars for the same reasons.
-//
-// A SIBLING RATHER THAN AN EXTENSION: interpolatedNames' contract is the set of
-// names, and anyInterpolationRE captures the name only, by a comment that names
-// its identical twin in regtest/lint_test.go. Widening either would break the one
-// drift detector those copies have.
-//
-// A SLICE PER NAME, because DATA_DIR is read with its default seven times over,
-// and a template that disagreed with itself is a finding, not a coin toss.
-//
-// `:-` and `-` both count — compose substitutes for unset-or-empty and for unset
-// respectively, and either is what an operator who leaves the line commented
-// gets. `:?` and `?` are an error message, never a value, so they do not match.
-func interpolatedDefaults(t *testing.T, raw string) map[string][]string {
-	t.Helper()
-	out := map[string][]string{}
-	for _, value := range unescapedScalars(t, raw) {
-		for _, m := range interpolationDefaultRE.FindAllStringSubmatch(value, -1) {
-			out[m[1]] = append(out[m[1]], m[2])
-		}
-	}
-	return out
-}
-
-// ${NAME:-default} and ${NAME-default}: m[1] the name, m[2] the default. A nested
-// ${A:-${B}} is not read correctly — the default stops at the first `}` — and the
-// template has none; the parser table below says so rather than this comment
-// alone.
-var interpolationDefaultRE = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*):?-([^}]*)\}`)
-
-// unescapedScalars is every scalar's value in the template with compose's `$$`
-// escape removed, which is what both interpolation readers above scan.
-func unescapedScalars(t *testing.T, raw string) []string {
-	t.Helper()
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("parsing %s as a document: %v", composePath, err)
-	}
-	var out []string
-	for _, scalar := range scalarNodes(&doc) {
-		// `$$` IS COMPOSE'S ESCAPE FOR A LITERAL `$`, never an interpolation, and
-		// Go's regexp has no lookbehind to say so. Removing the pairs first is
-		// exact rather than approximate: `$$NAME` becomes `NAME` and matches
-		// nothing, while `$$$NAME` becomes `$NAME` — which is what compose does
-		// with it too, a literal dollar followed by a real interpolation.
-		// Measured: without this, `$$NOT_REAL_VAR` demanded an assignment for a
-		// name compose never reads.
-		out = append(out, strings.ReplaceAll(scalar.Value, "$$", ""))
-	}
-	return out
-}
-
-// ${NAME}, ${NAME:-default} and bare $NAME alike; the default half is this
-// file's own business and not the operator's, so only the name is captured.
-//
-// NOT NAMED interpolationRE, which umbrel/lint_test.go already uses for a
-// DIFFERENT pattern — scoped to APP_BROLLYZAPPER_* and capturing the brace at
-// m[1] and the name at m[2]. Identical names are this repo's only drift
-// detector between deliberate copies, so a same-name-different-pattern pair is
-// the one arrangement that turns the detector into a trap: code moved between
-// the two packages compiles and reads the brace as the variable name. The
-// genuinely identical twin of THIS pattern is the local `interpolation` in
-// regtest/lint_test.go.
-var anyInterpolationRE = regexp.MustCompile(`\$\{?([A-Z_][A-Z0-9_]*)`)
-
-// scalarNodes is every scalar in a YAML document, keys included, carrying its
-// Value and its Line. Comments are not scalars, and neither is a line break.
-//
-// An alias node carries no Content, only a pointer this does not follow, so a
-// recursive alias terminates rather than recursing forever — and nothing is
-// missed by not following it, since the anchor's own definition is a scalar
-// elsewhere in the same tree.
-//
-// DELIBERATELY DUPLICATED, byte-identical and under this same name, in
-// umbrel/lint_test.go and regtest/lint_test.go. THIS IS THE THIRD COPY, and
-// nothing detects drift between them but the name — so a change here is a change
-// in three places. BrollyZap-20i.18 carries the extraction argument.
-func scalarNodes(node *yaml.Node) []*yaml.Node {
-	if node.Kind == yaml.ScalarNode {
-		return []*yaml.Node{node}
-	}
-	var out []*yaml.Node
-	for _, child := range node.Content {
-		out = append(out, scalarNodes(child)...)
-	}
-	return out
-}
-
 // TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates keeps the interview
 // complete: a variable the compose file reads and the example never SETS is one
 // the operator cannot know to set, and it interpolates to empty.
 func TestTheExampleEnvNamesEveryVariableTheTemplateInterpolates(t *testing.T) {
-	_, raw := loadCompose(t)
+	_, doc := loadCompose(t)
 	assigned := assignedInExample(t)
-	seen := interpolatedNames(t, raw)
+	// The document's interpolations: off its scalars in both spellings, with the
+	// `$$` escape honoured — composelint's Interpolations says why each matters.
+	seen := doc.InterpolatedNames()
 	for _, name := range slices.Sorted(maps.Keys(seen)) {
 		if len(assigned[name]) == 0 {
 			t.Errorf("%s interpolates ${%s} and %s has no assignment line for it — a mention "+
@@ -835,9 +684,11 @@ func TestTheExampleShowsEachSettingAtTheTemplatesDefault(t *testing.T) {
 		"TRUSTED_PROXIES": "the example shows the value for a reverse-proxy install; the default is empty",
 	}
 
-	_, raw := loadCompose(t)
+	_, doc := loadCompose(t)
 	assigned := assignedInExample(t)
-	defaults := interpolatedDefaults(t, raw)
+	// A slice per name, because DATA_DIR is read with its default seven times
+	// over and a template that disagrees with itself is a finding, not a coin toss.
+	defaults := doc.Defaults()
 
 	compared := 0
 	for _, name := range slices.Sorted(maps.Keys(defaults)) {
@@ -958,7 +809,7 @@ var interimFiles = []string{envPath, composePath, "../DEPLOYING.md"}
 // dash belongs would disarm this check silently and leave the note in the
 // release it was meant to be removed from.
 func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
-	compose, _ := loadCompose(t)
+	compose, doc := loadCompose(t)
 	// BOTH IMAGES, AND THE NEWER OF THE TWO. The notes say they go "when the two
 	// `image:` lines move", and nothing in this file asserts the two tags equal
 	// each other — TestTheImagesEqualThePackages compares each service to the
@@ -973,11 +824,8 @@ func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 	}
 
 	for _, path := range interimFiles {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("reading %s: %v", path, err)
-		}
-		for i, line := range strings.Split(string(raw), "\n") {
+		for _, candidate := range interimCandidates(t, path, doc) {
+			i, line := candidate.Line-1, candidate.Text
 			if !strings.Contains(line, "INTERIM") {
 				continue
 			}
@@ -996,6 +844,44 @@ func TestAnInterimNoteIsRemovedByThePinItNames(t *testing.T) {
 			}
 		}
 	}
+}
+
+// interimCandidates is every line of path an INTERIM note could be on, in file
+// order, each with its line number.
+//
+// THE COMPOSE GIVES ITS COMMENTS AND ITS SCALARS, NOT ITS TEXT — both, because
+// the line scan this replaced read every line, and a malformed marker inside a
+// value was caught by it. Comments alone was measured missing exactly that
+// (go-review, 20i.18): red on main, green here. The document places each on its
+// line, so nothing needs the file as lines. The other two files are prose
+// throughout, and are read as lines.
+func interimCandidates(t *testing.T, path string, compose *composelint.Document) []numberedLine {
+	t.Helper()
+	var out []numberedLine
+	if path == composePath {
+		for _, c := range compose.Comments() {
+			out = append(out, numberedLine{Text: c.Text, Line: c.Line})
+		}
+		for _, s := range compose.Scalars() {
+			out = append(out, numberedLine{Text: s.Value, Line: s.Line})
+		}
+		slices.SortStableFunc(out, func(a, b numberedLine) int { return cmp.Compare(a.Line, b.Line) })
+		return out
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	for i, line := range strings.Split(string(raw), "\n") {
+		out = append(out, numberedLine{Text: line, Line: i + 1})
+	}
+	return out
+}
+
+// numberedLine is a line of text and its 1-based number.
+type numberedLine struct {
+	Text string
+	Line int
 }
 
 // imageTag is the tag out of a pinned reference, without the digest.
@@ -1042,96 +928,6 @@ func olderThan(pinned, want string) bool {
 		}
 	}
 	return false
-}
-
-// TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode is what makes the rule
-// above survive a revert.
-//
-// Every claim its comment block makes was measured once, by hand, against a
-// template that satisfies it: put the brace back in anyInterpolationRE and the
-// whole suite stays green, because this template has no bare form to catch.
-// That is a rule written rather than tested, and it is the shape
-// umbrel/lint_test.go's own parser table exists to avoid.
-func TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		raw  string
-		want []string
-	}{{
-		name: "braced, with and without a default",
-		raw:  "services:\n  s:\n    environment:\n      A: ${LND_DIR}\n      B: ${HTTP_PORT:-8080}\n",
-		want: []string{"HTTP_PORT", "LND_DIR"},
-	}, {
-		name: "bare, which the brace-only pattern never saw",
-		raw:  "services:\n  s:\n    environment:\n      A: $LND_DIR\n",
-		want: []string{"LND_DIR"},
-	}, {
-		name: "a comment must not demand an assignment",
-		raw:  "# an earlier draft read ${LND_SOCKET_PATH}\nservices:\n  s:\n    environment:\n      A: ${LND_DIR}\n",
-		want: []string{"LND_DIR"},
-	}, {
-		name: "a folded scalar is one name, not two halves",
-		raw:  "services:\n  s:\n    environment:\n      A: \"${LND_D\\\n        IR}\"\n",
-		want: []string{"LND_DIR"},
-	}, {
-		name: "$$ is an escaped literal dollar, not an interpolation",
-		raw:  "services:\n  s:\n    environment:\n      A: \"$$NOT_REAL\"\n      B: ${LND_DIR}\n",
-		want: []string{"LND_DIR"},
-	}, {
-		name: "$$$NAME is a literal dollar and then a real one",
-		raw:  "services:\n  s:\n    environment:\n      A: \"$$$LND_DIR\"\n",
-		want: []string{"LND_DIR"},
-	}, {
-		name: "a name in a volume string counts, wherever it appears",
-		raw:  "services:\n  s:\n    volumes:\n      - ${DATA_DIR}/guard:/guard\n",
-		want: []string{"DATA_DIR"},
-	}} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := slices.Sorted(maps.Keys(interpolatedNames(t, tc.raw)))
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("interpolatedNames(%q) = %v, want %v", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestInterpolatedDefaultsReadsOnlyARealDefault is the parser table for the
-// value comparison, for the reason the one above exists: every row here is a
-// template shape that would make TestTheExampleShowsEachSettingAtTheTemplatesDefault
-// compare against something compose never substitutes.
-func TestInterpolatedDefaultsReadsOnlyARealDefault(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		raw  string
-		want map[string][]string
-	}{{
-		name: "both default spellings, and a name read twice keeps both",
-		raw:  "services:\n  s:\n    environment:\n      A: ${HTTP_PORT:-8080}\n      B: ${LOG_LEVEL-INFO}\n      C: ${HTTP_PORT:-8080}\n",
-		want: map[string][]string{"HTTP_PORT": {"8080", "8080"}, "LOG_LEVEL": {"INFO"}},
-	}, {
-		name: "an empty default is a default",
-		raw:  "services:\n  s:\n    environment:\n      A: ${TRUSTED_PROXIES:-}\n",
-		want: map[string][]string{"TRUSTED_PROXIES": {""}},
-	}, {
-		name: "a required variable's message is not a default, and neither is no default",
-		raw:  "services:\n  s:\n    environment:\n      A: ${LND_DIR:?LND_DIR is unset}\n      B: ${LND_ADDRESS}\n      C: $LND_NETWORK\n",
-		want: map[string][]string{},
-	}, {
-		name: "a comment's default is not the template's",
-		raw:  "# was ${HTTP_PORT:-9090}\nservices:\n  s:\n    ports:\n      - \"${HTTP_PORT:-8080}:8080\"\n",
-		want: map[string][]string{"HTTP_PORT": {"8080"}},
-	}, {
-		name: "an escaped dollar is not an interpolation",
-		raw:  "services:\n  s:\n    environment:\n      A: \"$${HTTP_PORT:-9090}\"\n",
-		want: map[string][]string{},
-	}} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := interpolatedDefaults(t, tc.raw)
-			if !maps.EqualFunc(got, tc.want, slices.Equal) {
-				t.Errorf("interpolatedDefaults(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
-	}
 }
 
 // TestEnvValueIsTheValueComposeReads pins the normalisation the comparison
