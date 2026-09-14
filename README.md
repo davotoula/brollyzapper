@@ -7,7 +7,8 @@
 [![Licence](https://img.shields.io/github/license/davotoula/brollyzapper)](LICENSE)
 
 Nostr zap receiving (NIP-57) and Nostr Wallet Connect (NIP-47) for an **existing** LND node,
-packaged as an Umbrel app. Safety over features.
+packaged as an Umbrel app and runnable in plain Docker Compose beside an LND you already run on
+the same host. Safety over features.
 
 It serves its own lightning address — nothing external is required, no Alby, no LNURL host, no
 static file to keep in sync — publishes zap receipts to nostr, and lets a wallet pay through
@@ -31,6 +32,24 @@ merged, install from the community store:
 
 Updates arrive through the store like any other app. The same app id is what the official
 listing will carry, so your data and settings carry over.
+
+## Install outside Umbrel
+
+For an LND you already run on this host, in Docker beside the app or on the host itself. The host
+must be Linux: Docker Desktop's shared filesystem refuses the permission the guard sets on its
+socket.
+
+The template is [`deploy/`](deploy/), and [`DEPLOYING.md` §Running outside
+Umbrel](DEPLOYING.md#running-outside-umbrel) is the procedure: five install steps, and the two
+snags a first start meets — a node certificate that does not name the address the app dials, and
+LND's files owned by a user the containers do not run as — with the fix for each.
+
+Set **`ADMIN_PASSWORD`** in `.env` before the first start, at least 12 characters; the server will
+not start without it. To change it later, use **Settings** once you are in, not `.env`.
+
+LND on another machine is not supported. Both credentials the guard bakes are locked to this
+container's source address, and across hosts that lock would cover everything on the Docker host
+instead (DEPLOYING §9).
 
 ## First run
 
@@ -83,7 +102,7 @@ are in [`DEPLOYING.md`](DEPLOYING.md), which also covers running outside Umbrel.
 
 | | |
 |---|---|
-| [`DEPLOYING.md`](DEPLOYING.md) | Exposing the address (Cloudflare Tunnel, step by step), what is public, and a plain-Docker install outside Umbrel |
+| [`DEPLOYING.md`](DEPLOYING.md) | Exposing the address (Cloudflare Tunnel, step by step), what is public, and the plain-Docker install procedure |
 | [`OPERATING.md`](OPERATING.md) | Every setting and its default, sending and the two caps, backups, macaroon rotation, storage |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Layout, the build and test gate, the architecture rules, how a change lands |
