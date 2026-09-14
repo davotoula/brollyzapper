@@ -29,7 +29,11 @@ cd "$(dirname "$0")"
 # `--tlsextradomain=lnd`, which is exactly what makes the name usable.
 LND_RPC="${LND_RPC:-lnd:10009}"
 LND_IMAGE="${LND_IMAGE:-lightninglabs/lnd:v0.21.1-beta}"
-TOOL_IMAGE="${TOOL_IMAGE:-alpine:3.20}"
+# The tool image is tools/sqlite/Dockerfile's FROM reference, read here rather than
+# restated, so its digest lives in one line Dependabot maintains (0vk.59;
+# regtest/script_lint_test.go holds every script to it).
+TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
+[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
 CRED_VOLUME="${CRED_VOLUME:-brollyregtest_credentials}"
 WORK=$(mktemp -d)
 

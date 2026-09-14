@@ -25,6 +25,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The tool image is tools/sqlite/Dockerfile's FROM reference, read here rather than
+# restated, so its digest lives in one line Dependabot maintains (0vk.59;
+# regtest/script_lint_test.go holds every script to it).
+TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
+[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
 APP="http://localhost:${APP_PORT:-8080}"
 NAME="${ADDRESS_NAME:-test}"
 PASS="${ADMIN_PASSWORD:-regtest-admin}"
@@ -76,7 +81,7 @@ lncli_payer() { docker compose exec -T lnd-payer lncli --network=regtest "$@"; }
 guard_id()   { docker compose ps -q guard; }
 server_id()  { docker compose ps -q brollyzapper; }
 inspect()    { docker inspect -f "$2" "$1"; }
-cred_stat()  { docker run --rm -v brollyregtest_credentials:/c alpine:3.20 stat -c '%s %Y %i' "/c/$1" 2>/dev/null || echo "missing"; }
+cred_stat()  { docker run --rm -v brollyregtest_credentials:/c "$TOOL_IMAGE" stat -c '%s %Y %i' "/c/$1" 2>/dev/null || echo "missing"; }
 root_ids()   { lncli_recv listmacaroonids | jq -r '.root_key_ids|sort|join(",")'; }
 # Read from compose, not spelled again here: the ipaddr caveat has to match the
 # address the server actually has, and lint_test.go already ties SERVER_IP to the

@@ -18,6 +18,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The tool image is tools/sqlite/Dockerfile's FROM reference, read here rather than
+# restated, so its digest lives in one line Dependabot maintains (0vk.59;
+# regtest/script_lint_test.go holds every script to it).
+TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
+[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
 APP="http://localhost:${APP_PORT:-8080}"
 RELAY_HOST="ws://localhost:${RELAY_PORT:-7777}"
 RELAY_APP="ws://relay:7777"
@@ -109,7 +114,7 @@ conns_to() {
   local srv ip
   srv=$(docker compose ps -q brollyzapper)
   ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(docker compose ps -q "$1")")
-  docker run --rm --net="container:$srv" alpine:3.20 netstat -tn 2>/dev/null \
+  docker run --rm --net="container:$srv" "$TOOL_IMAGE" netstat -tn 2>/dev/null \
     | grep -c "$ip:7777.*ESTABLISHED" || true
 }
 
