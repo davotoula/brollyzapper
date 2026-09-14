@@ -39,9 +39,10 @@ For an LND on the same Linux host, in Docker beside the app or installed on the 
 Docker Desktop is out: its shared filesystem breaks the guard's socket.
 
 The template is [`deploy/`](deploy/), and [`DEPLOYING.md` §Running outside
-Umbrel](DEPLOYING.md#running-outside-umbrel) is the procedure: five install steps, and the two
-snags a first start meets — a node certificate that does not name the address the app dials, and
-LND's files owned by a user the containers do not run as — with the fix for each.
+Umbrel](DEPLOYING.md#running-outside-umbrel) is the procedure: five install steps, and the snags
+a first start meets — a node certificate that does not name the address the app dials, LND's gRPC
+still listening on loopback only, and LND's files unreadable by the user the containers run as —
+with the fix for each.
 
 Set **`ADMIN_PASSWORD`** (at least 12 characters) in `.env` before the first start; the server will
 not start without it. Change it later in **Settings**, not in `.env`.
