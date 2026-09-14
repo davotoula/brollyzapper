@@ -454,11 +454,11 @@ lnd: the node's certificate does not name 10.61.7.2; it names localhost, lnd, 12
 regenerates them, restart LND, then restart the guard
 ```
 
-The handshake text above is what an earlier image shows — and what any *other* client dialling
-the same address will still show you, since the check is this app's and not the node's.
-
 The Security page shows the same edit as a failed check, and the Node page's "LND reachable from
 the server" line says whether the app's own credential works, with the time it was last checked.
+
+The handshake text above is what an earlier image shows — and what any *other* client dialling
+the same address will still show you, since the check is this app's and not the node's.
 
 *`rpclisten` is still on loopback* — the same node, dialled this time by a name its certificate
 *does* carry, with LND's gRPC bound to `127.0.0.1`:

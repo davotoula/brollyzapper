@@ -35,21 +35,20 @@ listing will carry, so your data and settings carry over.
 
 ## Install outside Umbrel
 
-For an LND you already run on this host, in Docker beside the app or on the host itself. The host
-must be Linux: Docker Desktop's shared filesystem refuses the permission the guard sets on its
-socket.
+For an LND on the same Linux host, in Docker beside the app or installed on the host itself.
+Docker Desktop is out: its shared filesystem breaks the guard's socket.
 
 The template is [`deploy/`](deploy/), and [`DEPLOYING.md` §Running outside
 Umbrel](DEPLOYING.md#running-outside-umbrel) is the procedure: five install steps, and the two
 snags a first start meets — a node certificate that does not name the address the app dials, and
 LND's files owned by a user the containers do not run as — with the fix for each.
 
-Set **`ADMIN_PASSWORD`** in `.env` before the first start, at least 12 characters; the server will
-not start without it. To change it later, use **Settings** once you are in, not `.env`.
+Set **`ADMIN_PASSWORD`** (at least 12 characters) in `.env` before the first start; the server will
+not start without it. Change it later in **Settings**, not in `.env`.
 
-LND on another machine is not supported. Both credentials the guard bakes are locked to this
-container's source address, and across hosts that lock would cover everything on the Docker host
-instead (DEPLOYING §9).
+LND on another machine is not supported: both credentials the guard bakes are locked to this
+container's source address, and [DEPLOYING §9](DEPLOYING.md#9-not-supported-lnd-on-another-machine)
+says why that cannot simply be loosened.
 
 ## First run
 
@@ -96,7 +95,7 @@ firewall hole — and three things about it are not optional:
   cannot see who is calling.
 
 The procedure, how to verify it from outside your LAN, and how to confirm the rate limit fires
-are in [`DEPLOYING.md`](DEPLOYING.md), which also covers running outside Umbrel.
+are in [`DEPLOYING.md`](DEPLOYING.md).
 
 ## Where everything else is
 
