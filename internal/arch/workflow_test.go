@@ -112,20 +112,23 @@ func TestTheToolModuleVulnVerdict(t *testing.T) {
 		out        map[string]string // module -> the scanner's stdout
 		exitOf     string            // a module whose scanner exits 1
 		wantExit   int
-		wantOutput string
+		wantOutput []string
 	}{
 		{"the accepted finding alone is green, and says so",
-			map[string]string{"a": config + finding("GO-1") + finding("GO-1"), "b": config}, "", 0, "GO-1 in golang.org/x/crypto accepted — planted reason"},
+			map[string]string{"a": config + finding("GO-1") + finding("GO-1"), "b": config}, "", 0, []string{"GO-1 in golang.org/x/crypto accepted — planted reason"}},
 		{"a new finding is red, named with its module",
-			map[string]string{"a": config + finding("GO-1") + finding("GO-2"), "b": config}, "", 1, "a: GO-2 in golang.org/x/crypto is NEW"},
+			map[string]string{"a": config + finding("GO-1") + finding("GO-2"), "b": config}, "", 1, []string{
+				"a: GO-2 in golang.org/x/crypto is NEW",
+				// On its own, not only via the case above: the accepted ID stays accepted.
+				"GO-1 in golang.org/x/crypto accepted"}},
 		{"an acceptance the scan no longer finds is red",
-			map[string]string{"a": config, "b": config}, "", 1, "GO-1 is accepted in regtest/tools/vuln-accepted.txt but the scan no longer finds it"},
+			map[string]string{"a": config, "b": config}, "", 1, []string{"GO-1 is accepted in regtest/tools/vuln-accepted.txt but the scan no longer finds it"}},
 		{"a scanner that printed nothing could not check",
-			map[string]string{"a": "", "b": config}, "", 2, "COULD NOT CHECK — regtest/tools/a: expected one module-level scan"},
+			map[string]string{"a": "", "b": config}, "", 2, []string{"COULD NOT CHECK — regtest/tools/a: expected one module-level scan"}},
 		{"a scanner that failed could not check",
-			map[string]string{"a": config + finding("GO-1"), "b": config}, "b", 2, "COULD NOT CHECK — regtest/tools/b: govulncheck exited 1"},
+			map[string]string{"a": config + finding("GO-1"), "b": config}, "b", 2, []string{"COULD NOT CHECK — regtest/tools/b: govulncheck exited 1"}},
 		{"reshaped JSON could not check rather than reading as a finding",
-			map[string]string{"a": config + `{"finding":{}}` + "\n", "b": config}, "", 2, "COULD NOT CHECK — KeyError"},
+			map[string]string{"a": config + `{"finding":{}}` + "\n", "b": config}, "", 2, []string{"COULD NOT CHECK — KeyError"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tree := t.TempDir()
@@ -139,7 +142,8 @@ func TestTheToolModuleVulnVerdict(t *testing.T) {
 				}
 			}
 			write("scripts/vuln_tools.py", string(script), 0o644)
-			write("regtest/tools/vuln-accepted.txt", "regtest/tools/a GO-1 planted reason\n", 0o644)
+			// Trailing slash deliberately: it must match the module the glob found.
+			write("regtest/tools/vuln-accepted.txt", "regtest/tools/a/ GO-1 planted reason\n", 0o644)
 			for module, out := range c.out {
 				write("regtest/tools/"+module+"/go.mod", "module "+module+"\n", 0o644)
 				write("regtest/tools/"+module+"/scan.out", out, 0o644)
@@ -159,8 +163,13 @@ func TestTheToolModuleVulnVerdict(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("running the script: %v", err)
 			}
-			if exit != c.wantExit || !strings.Contains(string(out), c.wantOutput) {
-				t.Errorf("exit %d, want %d, and output must contain %q; got:\n%s", exit, c.wantExit, c.wantOutput, out)
+			if exit != c.wantExit {
+				t.Errorf("exit %d, want %d; got:\n%s", exit, c.wantExit, out)
+			}
+			for _, want := range c.wantOutput {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("output does not contain %q; got:\n%s", want, out)
+				}
 			}
 		})
 	}

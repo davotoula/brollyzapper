@@ -3,8 +3,12 @@
 
 `make vuln`'s `govulncheck ./...` covers the root module. regtest/tools/nwctool
 and regtest/tools/zaptool are SEPARATE modules the gate never scanned, and their
-x/crypto and x/sys drifted into four advisories that the repository first heard
-about from a public OpenSSF Scorecard score (0vk.58). This closes that (zu5.12).
+x/crypto and x/sys drifted into three advisories (GO-2026-6354 and 6355 in
+x/crypto, GO-2026-5024 in x/sys) that the repository first heard about from a
+public OpenSSF Scorecard score (0vk.58). This closes MOST of that (zu5.12): the
+module scan finds the x/crypto pair, but not 5024 — govulncheck never lists it
+for zaptool at x/sys v0.31.0, on any GOOS, because no x/sys package is built
+there. Scorecard's OSV version query remains the only thing that sees that shape.
 
     python3 scripts/vuln_tools.py <govulncheck> -scan module -format json
 
@@ -64,7 +68,9 @@ def accepted():
                 problems.append("%s:%d: needs <module directory> <advisory> <reason>; "
                                 "an acceptance without its reason is refused" % (ACCEPTED, n))
                 continue
-            key = (parts[0], parts[1])
+            # Spelled as the glob spells it, so `regtest/tools/a/` is not a second
+            # module that "does not exist" beside the finding it was meant to accept.
+            key = (os.path.normpath(parts[0]), parts[1])
             if key in entries:
                 problems.append("%s:%d: %s %s is accepted twice" % (ACCEPTED, n, *key))
             entries[key] = parts[2]
@@ -102,7 +108,8 @@ def scan(module, command):
         raise CannotCheck("%s: output is not govulncheck's JSON (is -format json "
                           "still in the recipe?): %s" % (module, e))
     # The run has to prove it was the scan this verdict is about: a symbol scan
-    # would report fewer IDs, and an empty stdout parses as no findings at all.
+    # given a pattern also exits 0 and would be read as this one, and an empty
+    # stdout parses as no findings at all.
     levels = [o["config"].get("scan_level") for o in objects if "config" in o]
     if levels != ["module"]:
         raise CannotCheck("%s: expected one module-level scan, got scan_level %s"
