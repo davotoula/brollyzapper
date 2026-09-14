@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -309,8 +310,7 @@ func TestNoWorkflowInterpolatesInputIntoARunBlock(t *testing.T) {
 
 // Base images are pinned by digest for the same reason actions are pinned by
 // SHA: `golang:1.26-alpine` is a mutable pointer, and it is the layer the two
-// binaries are compiled by. The regtest tool images are held to the same rule;
-// the test says why.
+// binaries are compiled by.
 //
 // The cost is real and deliberate: a pinned base stops receiving upstream
 // patches until someone bumps it, which is what govulncheck in the gate is for
@@ -342,25 +342,45 @@ func checkBaseImagesPinned(files map[string]string) []problem {
 }
 
 func TestTheBaseImagesArePinnedByDigest(t *testing.T) {
-	root := moduleRoot(t)
-	// The shipped images, and the regtest tool images (0vk.58). Nothing about a
+	// Every Dockerfile in the tree, not a list of where they are today: the
+	// shipped images and the regtest tool images alike (0vk.58). Nothing about a
 	// tool ships, but it is still a registry pull that Scorecard's
 	// Pinned-Dependencies reads, and a weekly scanner is a slow way to learn a
-	// pin was dropped. Each pattern must match something: a directory that moves
-	// would otherwise take its Dockerfile out of the rule without a word.
+	// pin was dropped — or that a new Dockerfile never had one.
+	root := moduleRoot(t)
 	files := map[string]string{}
-	for _, pattern := range []string{"Dockerfile.*", "regtest/tools/*/Dockerfile"} {
-		names, err := filepath.Glob(filepath.Join(root, pattern))
-		if err != nil || len(names) == 0 {
-			t.Fatalf("finding %s in %s: %v", pattern, root, err)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		for _, path := range names {
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("reading %s: %v", path, err)
+		if d.IsDir() {
+			if slices.Contains(neverScanned, d.Name()) {
+				return filepath.SkipDir
 			}
-			rel, _ := filepath.Rel(root, path)
-			files[rel] = string(raw)
+			return nil
+		}
+		if d.Name() != "Dockerfile" && !strings.HasPrefix(d.Name(), "Dockerfile.") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(raw)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s for Dockerfiles: %v", root, err)
+	}
+	// The walk must have found the ones that exist, or a broken walk reads as a
+	// clean tree.
+	for _, want := range []string{"Dockerfile.server", "Dockerfile.guard", "regtest/tools/sqlite/Dockerfile"} {
+		if _, ok := files[want]; !ok {
+			t.Fatalf("the Dockerfile walk did not find %s (found %d files)", want, len(files))
 		}
 	}
 	clean(t, checkBaseImagesPinned(files))
