@@ -1,0 +1,106 @@
+# OpenSSF Scorecard: a public number for the things this repository already
+# does on purpose — SHA-pinned actions, digest-pinned images, a security
+# policy, least-privilege tokens, protected branches, no binary artefacts. It
+# is what a store reviewer or an operator can check without reading the tree,
+# and it notices a regression nothing else here watches for, such as a
+# Dependabot PR that swaps a SHA for a tag (BrollyZap-0vk.28).
+#
+# NOT PART OF THE GATE. ci.yml is the gate and mirrors the local gate exactly
+# (CLAUDE.md); this file, like codeql.yml, is a scanner whose findings are
+# triaged — fixed, or accepted with a written reason on the bead. A low score
+# here does not make a branch unmergeable. A check lives in exactly one of
+# ci.yml, codeql.yml or this file: never moved between them, never duplicated.
+#
+# RESULTS ARE PUBLISHED (David, 13 Sep 2026): to the OpenSSF API that backs
+# https://scorecards.dev/viewer/?uri=github.com/davotoula/brollyzapper, and as
+# SARIF to this repository's code scanning.
+#
+# PUBLISHING CONSTRAINS THIS FILE, and the constraints are enforced by the
+# receiving API rather than by anything here, so they are easy to break by
+# "tidying". The API rejects the results — and the scorecard step fails — if
+# the workflow has top-level `env:` or `defaults:`, any workflow-level write
+# permission, or `id-token: write` on a job other than the scorecard one; or if
+# that job has its own `env:`/`defaults:`, a container or services, a runner
+# that is not GitHub-hosted Ubuntu, or ANY step outside actions/checkout,
+# actions/upload-artifact, github/codeql-action/upload-sarif,
+# ossf/scorecard-action and step-security/harden-runner. So: no `run:` steps
+# in this job, ever (scorecard-action v2.4.4 README, "Workflow Restrictions").
+#
+# No secrets: like ci.yml and codeql.yml, this workflow needs none, and one
+# appearing here would be a design change rather than a CI detail.
+#
+# Every action is pinned to a commit SHA with the version in a trailing
+# comment; internal/arch asserts it for every workflow in this directory, and
+# Dependabot's github-actions entry proposes the bumps.
+name: Scorecard
+
+on:
+  # The analysis of record is the default branch's, which is all Scorecard
+  # measures — hence no pull_request trigger.
+  push:
+    branches: [main]
+
+  # Weekly, for the checks that change without a push: Maintained,
+  # Vulnerabilities, and the repository settings Scorecard reads through the
+  # API (rulesets among them).
+  #
+  # Thursday, off the hour. Not Monday, when Dependabot opens its PRs and
+  # merging them pushes to main anyway; not Wednesday, which is codeql.yml's
+  # scan, so a week's change in the Security tab stays attributable to one
+  # tool. Off the hour because GitHub's scheduler is congested on the hour.
+  schedule:
+    - cron: "29 4 * * 4"
+
+  # NO branch_protection_rule TRIGGER, though the upstream template carries
+  # one. That event fires on CLASSIC branch protection rules only, and this
+  # repository protects main and v* with RULESETS (8 Sep 2026), which no
+  # workflow event reports. It would be a trigger that cannot fire. If classic
+  # protection is ever added — after a delete-and-recreate, say — add it back.
+  #
+  # A scheduled workflow on a public repo is disabled automatically after 60
+  # days without repository activity, and GitHub emails the owner when it does.
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: scorecard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The SARIF upload to code scanning, as in codeql.yml.
+      security-events: write
+      # THE ONE PLACE THIS REPOSITORY MINTS AN OIDC TOKEN, and it is here only
+      # because publish_results needs it: the scorecard step presents the
+      # token to the OpenSSF API as proof that this workflow, in this
+      # repository, produced these results. ci.yml's rule is no secrets, and
+      # this holds to it — an OIDC token is not a stored secret, it is minted
+      # per run and scoped to it. But it is a credential that leaves the
+      # runner, so it is granted to this one job and nowhere else, and one
+      # appearing in another workflow is worth the same escalation a secret
+      # would be. `actions: read` and the other reads the upstream template
+      # lists are for private repositories; this one is public.
+      id-token: write
+    steps:
+      # Without persisted credentials: nothing after this step pushes, and a
+      # token left in .git/config is one more thing for a step to find.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # No upload-artifact step, which the template also carries: the same
+      # SARIF lands in code scanning below, where it is triaged, so a second
+      # copy in the Actions tab would be one more thing that is public for five
+      # days and read by nobody.
+      - name: upload to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: results.sarif
