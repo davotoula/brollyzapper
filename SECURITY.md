@@ -4,7 +4,7 @@ BrollyZapper brokers credentials for a Lightning node. If you have found a way t
 spend what it should not, read what it should not, or mint authority it should not hold,
 please report it privately.
 
-**Report via GitHub's private vulnerability reporting** — *Security → Report a
+**Report via [GitHub's private vulnerability reporting](https://github.com/davotoula/brollyzapper/security/advisories/new)** — *Security → Report a
 vulnerability* on this repository. That opens a private thread with the maintainer; nothing
 is public until a fix ships.
 
