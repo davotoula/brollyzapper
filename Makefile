@@ -103,9 +103,14 @@ vuln:
 # leaves it out: it is regenerated from the vendored protos, so a
 # //lint:file-ignore in it would be lost on the next `make proto`, and a
 # -checks line would switch the checks off for our own code too. It is still
-# loaded as a dependency; it is only not reported on. The emptiness test is
-# there because staticcheck with no arguments lints `.`, which would be a green
-# run over nothing if `go list` ever failed.
+# loaded as a dependency; it is only not reported on. A plant inside lnrpc is
+# green with the grep and red without it, and staticcheck's own leniency for
+# "Code generated" files does not cover it: a deprecated call there still
+# reports, so the grep is not redundant.
+#
+# The emptiness test is there because staticcheck with no arguments lints only
+# `.`. That fails today, since the module root holds no Go files — the test makes
+# an empty package list a failure by itself rather than by that accident.
 staticcheck:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
