@@ -40,8 +40,9 @@ jobs:
     permissions:
       contents: read
       # The push to GHCR. On the job, not the workflow, as in codeql.yml and
-      # scorecard.yml: a top-level write reaches every job added later
-      # (Scorecard, Token-Permissions — 0vk.58).
+      # scorecard.yml: a top-level write reaches every job without its own block
+      # (Scorecard, Token-Permissions — 0vk.58). internal/arch refuses a
+      # workflow-level write, and any job write not on writeGrants (0vk.57).
       packages: write
     # The dispatcher's input crosses into the shell HERE and nowhere else.
     #
