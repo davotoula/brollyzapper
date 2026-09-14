@@ -22,14 +22,15 @@
 # file, read the run log for that warning and the viewer's date.
 #
 # PUBLISHING CONSTRAINS THIS FILE, and the constraints are enforced by the
-# receiving API rather than by anything here — silently, per the paragraph
-# above — so they are easy to break by "tidying". The API refuses the results
-# if the workflow has top-level `env:` or `defaults:`, any workflow-level write
-# permission, or `id-token: write` on a job other than the scorecard one; or if
-# that job has its own `env:`/`defaults:`, a container or services, a runner
-# other than one GitHub-hosted `ubuntu-latest`/`ubuntu-YY.MM` label, a step
-# whose SHA is not a commit of that action's own repository, or ANY step
-# outside a short allowlist: actions/checkout, actions/upload-artifact,
+# receiving API rather than by anything here — silently, per the paragraph above
+# (the two permission constraints are also held locally by internal/arch's
+# writeGrants, 0vk.57) — so they are easy to break by "tidying". The API refuses
+# the results if the workflow has top-level `env:` or `defaults:`, any
+# workflow-level write permission, or `id-token: write` on a job other than the
+# scorecard one; or if that job has its own `env:`/`defaults:`, a container or
+# services, a runner other than one GitHub-hosted `ubuntu-latest`/`ubuntu-YY.MM`
+# label, a step whose SHA is not a commit of that action's own repository, or
+# ANY step outside a short allowlist: actions/checkout, actions/upload-artifact,
 # actions/create-github-app-token, github/codeql-action/upload-sarif,
 # ossf/scorecard-action and step-security/harden-runner. So: no `run:` steps in
 # this job, ever (verify_workflow.go, now in ossf/scorecard-infra; read at
