@@ -48,6 +48,9 @@ on:
   # merging them pushes to main anyway; not Wednesday, which is codeql.yml's
   # scan, so a week's change in the Security tab stays attributable to one
   # tool. Off the hour because GitHub's scheduler is congested on the hour.
+  #
+  # A scheduled workflow on a public repo is disabled automatically after 60
+  # days without repository activity, and GitHub emails the owner when it does.
   schedule:
     - cron: "29 4 * * 4"
 
@@ -56,9 +59,6 @@ on:
   # repository protects main and v* with RULESETS (8 Sep 2026), which no
   # workflow event reports. It would be a trigger that cannot fire. If classic
   # protection is ever added — after a delete-and-recreate, say — add it back.
-  #
-  # A scheduled workflow on a public repo is disabled automatically after 60
-  # days without repository activity, and GitHub emails the owner when it does.
 
 permissions:
   contents: read
