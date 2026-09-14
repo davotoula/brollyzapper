@@ -147,13 +147,14 @@ func main() {
 			if event == nil {
 				continue
 			}
-			if e := event.Tags.GetFirst([]string{"e"}); e == nil || e.Value() != request.ID {
+			// Tags.Find matches the tag name exactly. The deprecated GetFirst
+			// matched a PREFIX, so "e" also matched an "encryption" tag.
+			if e := event.Tags.Find("e"); e == nil || e[1] != request.ID {
 				continue // someone else's answer
 			}
-			tag := event.Tags.GetFirst([]string{"encryption"})
 			replyScheme := "nip04"
-			if tag != nil && tag.Value() != "" {
-				replyScheme = tag.Value()
+			if tag := event.Tags.Find("encryption"); tag != nil && tag[1] != "" {
+				replyScheme = tag[1]
 			}
 			plaintext, err := open(replyScheme, *secret, *servicePubkey, event.Content)
 			if err != nil {
