@@ -96,7 +96,9 @@ jobs:
       # a stored secret, it is minted per run and scoped to it. But it is a
       # credential that leaves the runner, so it is granted to this one job
       # and nowhere else, and one appearing in another workflow is worth the
-      # same escalation a secret would be (unenforced today: BrollyZap-0vk.57).
+      # same escalation a secret would be. internal/arch holds it: every write
+      # grant is on writeGrants with its reason, and this is its one id-token
+      # row (0vk.57).
       # `actions: read` and the other reads the upstream template lists are for
       # private repositories; this one is public.
       id-token: write
