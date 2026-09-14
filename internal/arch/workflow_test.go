@@ -238,15 +238,23 @@ type job struct {
 // ITS OWN TYPE, NOT map[string]string (0vk.57). GitHub also accepts the scalar
 // forms `permissions: write-all` and `read-all`, and a map field fails Unmarshal
 // on them — which under workflowFiles is a t.Fatalf "is not valid YAML" for the
-// whole file: red with the wrong diagnosis, and every other rule in this file
-// dead for that workflow. write-all is the one spelling an attacker would reach
-// for. So this never fails the parse; what it cannot read, it records for the
-// rule to name at its line.
+// whole file: red with the wrong diagnosis, and every rule built on
+// workflowFiles dead, for every workflow. write-all is the one spelling an
+// attacker would reach for. So this never fails the parse; what it cannot read,
+// it records for the rule to name at its line.
 //
 // declared separates an absent block from `permissions: {}`, which grants
 // nothing and is valid. yaml.v3 calls UnmarshalYAML only for a non-null value, so
 // a bare `permissions:` (null) reads as absent — measured on v3.0.1, 14 Sep 2026:
-// red at workflow level, inherit at job level, which is what it amounts to.
+// red at workflow level, unreported at job level. GitHub's workflow schema allows
+// only a map, read-all or write-all there, so no job it would run gets through.
+//
+// A scope's value must be read, write or none, exactly: GitHub's schema is that
+// lowercase enum, and `contents: Write` would otherwise be neither a write nor
+// invalid — silently outside "every write is allowlisted" (0vk.57 go-review).
+//
+// line is the node's: for the map form, the first scope's line, which is where
+// a reader wants to look anyway.
 type permissions struct {
 	declared bool
 	line     int
@@ -262,6 +270,11 @@ func (p *permissions) UnmarshalYAML(n *yaml.Node) error {
 		p.writeAll = true
 	case n.Kind == yaml.ScalarNode && n.Value == "read-all":
 	case n.Kind == yaml.MappingNode && n.Decode(&p.scopes) == nil:
+		for scope, level := range p.scopes {
+			if level != "read" && level != "write" && level != "none" {
+				p.invalid = fmt.Sprintf("%s: %q is not read, write or none", scope, level)
+			}
+		}
 	default:
 		p.invalid = fmt.Sprintf("%s %q", n.Tag, n.Value)
 	}
@@ -375,7 +388,8 @@ type writeGrant struct{ file, job, scope, why string }
 // new one is a decision, made here with its reason, not a line added in passing.
 //
 // Nothing is at workflow level, and nothing may be: a top-level write reaches
-// every job added later (publish.yml says so), and Scorecard's publishing API
+// every job without its own block, including ones added later (publish.yml says
+// so), and Scorecard's publishing API
 // refuses scorecard.yml's results if one appears (its header). Checked both ways
 // — a row the workflow no longer grants is red too, because an allowlist that
 // bounds nothing is how it becomes a switch (the ruling zu5.12 applied to its
@@ -399,7 +413,8 @@ func checkWriteGrants(parsed map[string]workflow, allow []writeGrant) []problem 
 		// permissions: a setting, read today, which does not survive a recreate.
 		if !w.Permissions.declared {
 			found = append(found, problem{file, 0, "declares no top-level permissions: " +
-				"block, so its token's scope is whatever the repository setting says"})
+				"block, so the token of any job without its own is scoped by whatever the " +
+				"repository setting says"})
 		}
 		if w.Permissions.invalid != "" {
 			found = append(found, problem{file, w.Permissions.line, "workflow level: permissions " +
@@ -407,8 +422,8 @@ func checkWriteGrants(parsed map[string]workflow, allow []writeGrant) []problem 
 		}
 		for _, scope := range w.Permissions.writes() {
 			found = append(found, problem{file, w.Permissions.line, fmt.Sprintf(
-				"the workflow level grants %s; a top-level write reaches every "+
-					"job, including ones added later — grant it on the job that needs it",
+				"the workflow level grants %s; a top-level write reaches every job without "+
+					"its own permissions: block, including ones added later — grant it on the job that needs it",
 				grantLabel(scope))})
 		}
 		for name, j := range w.Jobs {
@@ -473,6 +488,9 @@ func TestEveryWriteGrantIsAllowlisted(t *testing.T) {
 	catches(t, checkWriteGrants(plant(jobs), allow), "declares no top-level permissions")
 	catches(t, checkWriteGrants(plant(top+jobs+"  gate:\n    permissions: [contents]\n"), allow),
 		"job gate: permissions is neither a map nor read-all/write-all")
+	// A write GitHub would refuse to run is still not a write this rule may miss.
+	catches(t, checkWriteGrants(plant(top+jobs+"  gate:\n    permissions:\n      contents: Write\n"), allow),
+		`contents: "Write" is not read, write or none`)
 }
 
 // A tag is a mutable pointer. `actions/checkout@v4` is whatever that repo's
