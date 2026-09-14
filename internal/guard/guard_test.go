@@ -407,7 +407,8 @@ func TestRotationIsDetectedAfterThreeConsecutiveRejectedProbes(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	detector := guard.NewRotationDetector(func() time.Time { return now }, 30*time.Second, 3)
 
-	if detector.ProbeFailed() || detector.ProbeFailed() {
+	first, second := detector.ProbeFailed(), detector.ProbeFailed()
+	if first || second {
 		t.Fatal("rotation was declared before the third rejected probe")
 	}
 	if !detector.ProbeFailed() {
@@ -431,7 +432,8 @@ func TestOnlyTheGuardsOwnProbesAdvanceTheRun(t *testing.T) {
 	if !detector.Armed() {
 		t.Error("a rejection did not arm the probe loop")
 	}
-	if detector.ProbeFailed() || detector.ProbeFailed() {
+	first, second := detector.ProbeFailed(), detector.ProbeFailed()
+	if first || second {
 		t.Error("observations from elsewhere counted toward the threshold; twenty of them " +
 			"should leave the run at zero, so two probes must not be enough")
 	}
@@ -447,7 +449,8 @@ func TestASuccessBetweenProbesMeansTheyAreNotConsecutive(t *testing.T) {
 	if detector.Armed() {
 		t.Error("a success left the probe loop armed")
 	}
-	if detector.ProbeFailed() || detector.ProbeFailed() {
+	first, second := detector.ProbeFailed(), detector.ProbeFailed()
+	if first || second {
 		t.Fatal("a success did not reset the run of probes")
 	}
 	if !detector.ProbeFailed() {

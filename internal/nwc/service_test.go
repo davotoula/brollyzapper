@@ -455,7 +455,7 @@ func TestTheReplyUsesTheSchemeTheClientUsed(t *testing.T) {
 				published[0].Content); err != nil {
 				t.Errorf("the client cannot read the reply it was sent: %v", err)
 			}
-			if got := published[0].Tags.GetFirst([]string{"encryption"}).Value(); got != string(scheme) {
+			if got := encryptionTag(published[0]); got != string(scheme) {
 				t.Errorf("the response's encryption tag is %q, want %q", got, scheme)
 			}
 		})
@@ -882,10 +882,19 @@ func (h *harness) requestTo(t *testing.T, conn *connection, from nostr.Identity,
 	return event
 }
 
+// encryptionTag is the value of an event's encryption tag, or "" when it has
+// none — which EncryptionFromTag reads as NIP-04, as §8 step 2 does.
+func encryptionTag(event gonostr.Event) string {
+	if tag := event.Tags.Find("encryption"); tag != nil {
+		return tag[1]
+	}
+	return ""
+}
+
 // open reads a published response back, as the client would.
 func (h *harness) open(t *testing.T, event gonostr.Event) string {
 	t.Helper()
-	scheme, _ := nostr.EncryptionFromTag(event.Tags.GetFirst([]string{"encryption"}).Value())
+	scheme, _ := nostr.EncryptionFromTag(encryptionTag(event))
 	plaintext, err := h.client.Decrypt(scheme, h.conn.row().ServicePubkey, event.Content)
 	if err != nil {
 		t.Fatalf("reading a response: %v", err)
@@ -1381,11 +1390,10 @@ func TestAnOutOfWindowRequestCannotMoveTheResumePoint(t *testing.T) {
 // fakeAuditor is the nwc.Auditor seam: it records what would have reached §12's
 // durable trail.
 type fakeAuditor struct {
-	mu     sync.Mutex
-	rows   []auditedRow
-	err    error
-	calls  int
-	closed bool
+	mu    sync.Mutex
+	rows  []auditedRow
+	err   error
+	calls int
 }
 
 type auditedRow struct {
@@ -1776,6 +1784,26 @@ func TestTheInboundLineNamesTheRequestedEncryptionScheme(t *testing.T) {
 			},
 			want: "unsupported",
 			deny: "nip44_v3",
+		},
+		{
+			// zu5.11. The tag is read by its exact name. The deprecated
+			// Tags.GetFirst this replaced matched a name PREFIX, so a tag that
+			// merely began with "encryption" chose the reply's scheme.
+			name: "a tag whose name only starts with encryption",
+			tags: func(h *harness) gonostr.Tags {
+				return gonostr.Tags{{"p", h.conn.row().ServicePubkey}, {"encryptionx", "nip44_v2"}}
+			},
+			want: "absent",
+		},
+		{
+			// zu5.11. A tag with no value names no scheme, so the request is
+			// the implicit NIP-04 fallback and the line says so. GetFirst read it
+			// as present, and logged an explicit "nip04" nobody had sent.
+			name: "an encryption tag with no value",
+			tags: func(h *harness) gonostr.Tags {
+				return gonostr.Tags{{"p", h.conn.row().ServicePubkey}, {"encryption"}}
+			},
+			want: "absent",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -23,8 +23,9 @@ func TestStringNeverRendersItsValue(t *testing.T) {
 	}{Name: "admin", Password: s}
 
 	renderings := map[string]string{
-		"String()":         s.String(),
-		"%v":               fmt.Sprintf("%v", s),
+		"String()": s.String(),
+		"%v":       fmt.Sprintf("%v", s),
+		//lint:ignore S1025 the %s verb IS the rendering under test; String() is the row above
 		"%s":               fmt.Sprintf("%s", s),
 		"%q":               fmt.Sprintf("%q", s),
 		"%+v":              fmt.Sprintf("%+v", s),

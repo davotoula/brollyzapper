@@ -715,9 +715,6 @@ func (d Direction) kinds() []string {
 // includes reports whether this direction covers one kind.
 func (d Direction) includes(kind string) bool { return slices.Contains(d.kinds(), kind) }
 
-// paymentKinds is what list_transactions may ever return.
-var paymentKinds = []string{KindInvoiceIn, KindPaymentOut}
-
 // Txns reads the history through a filter, newest first.
 //
 // TWO SOURCES, unioned, and the reason is the data model rather than the query.
