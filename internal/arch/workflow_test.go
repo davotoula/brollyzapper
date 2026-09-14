@@ -320,9 +320,7 @@ func workflowFiles(t *testing.T) (map[string]workflow, map[string]string) {
 	}
 	parsed, raws := map[string]workflow{}, map[string]string{}
 	for _, e := range entries {
-		// Both extensions: GitHub runs a .yaml workflow as readily as a .yml one,
-		// and one skipped here would skip every rule below (0vk.57's simplify).
-		if e.IsDir() || !(strings.HasSuffix(e.Name(), ".yml") || strings.HasSuffix(e.Name(), ".yaml")) {
+		if e.IsDir() || !isWorkflowFile(e.Name()) {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
@@ -342,6 +340,21 @@ func workflowFiles(t *testing.T) (map[string]workflow, map[string]string) {
 		t.Fatal("no workflows found; these rules would pass vacuously")
 	}
 	return parsed, raws
+}
+
+// isWorkflowFile takes both extensions: GitHub runs a .yaml workflow as readily
+// as a .yml one, and one skipped by workflowFiles skips every rule built on it
+// (0vk.57's simplify pass).
+func isWorkflowFile(name string) bool {
+	return strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml")
+}
+
+func TestWorkflowFilesTakesBothExtensions(t *testing.T) {
+	for name, want := range map[string]bool{"ci.yml": true, "release.yaml": true, "README.md": false, "ci.yml.bak": false} {
+		if isWorkflowFile(name) != want {
+			t.Errorf("isWorkflowFile(%q) = %v, want %v", name, !want, want)
+		}
+	}
 }
 
 // stepLabel names a step for a failure message, since a parsed step has no line
