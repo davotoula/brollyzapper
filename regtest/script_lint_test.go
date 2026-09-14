@@ -10,7 +10,6 @@ package regtest
 // whatever 3.20 meant that day, on a release already past end of life.
 
 import (
-	"bufio"
 	"fmt"
 	"maps"
 	"os"
@@ -54,12 +53,9 @@ func joinContinuations(src string) []logicalLine {
 	var out []logicalLine
 	var cur strings.Builder
 	start := 0
-	sc := bufio.NewScanner(strings.NewReader(src))
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for n := 1; sc.Scan(); n++ {
-		text := sc.Text()
+	for i, text := range strings.Split(src, "\n") {
 		if cur.Len() == 0 {
-			start = n
+			start = i + 1
 		}
 		if body, ok := strings.CutSuffix(text, `\`); ok {
 			cur.WriteString(body + " ")
@@ -122,23 +118,21 @@ func shellWords(s string) []string {
 // rule loudly, naming the word, rather than passing.
 var dockerRunBooleans = []string{"--rm", "-i", "-t", "-it", "-d", "--init", "--read-only"}
 
-// runImage is the image word of the `docker run` in text, or "" if there is none.
-func runImage(text string) (string, bool) {
-	_, after, ok := strings.Cut(text, "docker run ")
-	if !ok {
-		return "", false
-	}
+// runImage is the image word of the `docker run` in text — "" when the line has
+// flags and nothing after them, which acceptableImage then refuses.
+func runImage(text string) string {
+	_, after, _ := strings.Cut(text, "docker run ")
 	words := shellWords(after)
 	for i := 0; i < len(words); i++ {
 		w := words[i]
 		if !strings.HasPrefix(w, "-") {
-			return w, true
+			return w
 		}
 		if !strings.Contains(w, "=") && !slices.Contains(dockerRunBooleans, w) {
 			i++ // the flag's value
 		}
 	}
-	return "", true
+	return ""
 }
 
 // acceptableImage: a variable (whose value is some other rule's business — the
@@ -161,13 +155,14 @@ func checkScriptImages(scripts map[string]string) []string {
 			if strings.HasPrefix(strings.TrimSpace(l.text), "#") {
 				continue
 			}
-			image, isRun := runImage(l.text)
-			if !isRun || acceptableImage(image) {
+			if !strings.Contains(l.text, "docker run ") {
 				continue
 			}
-			found = append(found, fmt.Sprintf("%s:%d: `docker run` names image %q; use \"$TOOL_IMAGE\" "+
-				"(read from %s), another variable, a brollyregtest-* image, or a tag@sha256 pin — "+
-				"a bare tag is whatever it means the day the script runs", name, l.line, image, toolDockerfile))
+			if image := runImage(l.text); !acceptableImage(image) {
+				found = append(found, fmt.Sprintf("%s:%d: `docker run` names image %q; use \"$TOOL_IMAGE\" "+
+					"(read from %s), another variable, a brollyregtest-* image, or a tag@sha256 pin — "+
+					"a bare tag is whatever it means the day the script runs", name, l.line, image, toolDockerfile))
+			}
 		}
 	}
 	return found
@@ -238,48 +233,32 @@ func toolFrom(t *testing.T) string {
 	return ref
 }
 
-func TestEveryScriptImageIsPinned(t *testing.T) {
-	scripts := realScripts(t)
-	for _, p := range checkScriptImages(scripts) {
-		t.Error(p)
-	}
-	// The control: a rule over files with no `docker run` in them agrees with
-	// everything. These scripts run images in thirty-odd places today.
-	runs := 0
-	for _, src := range scripts {
-		for _, l := range joinContinuations(src) {
-			if _, ok := runImage(l.text); ok {
-				runs++
-			}
+// scriptsWith is the sorted names of the scripts whose text contains marker.
+func scriptsWith(scripts map[string]string, marker string) []string {
+	var names []string
+	for _, name := range slices.Sorted(maps.Keys(scripts)) {
+		if strings.Contains(scripts[name], marker) {
+			names = append(names, name)
 		}
 	}
-	if runs < 10 {
-		t.Errorf("found only %d `docker run` sites across regtest/*.sh; the rule above is "+
-			"asserting over almost nothing", runs)
-	}
+	return names
+}
 
-	const pinned = "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
-	for _, tc := range []struct {
-		src  string
-		want string // "" means clean
-	}{
-		{`cred_stat() { docker run --rm -v brollyregtest_credentials:/c "$TOOL_IMAGE" stat /c/x; }`, ""},
-		{`docker run --rm -i "$TOOL_IMAGE" sha256sum`, ""},
-		{`docker run --rm -v "$DBVOL:/data" brollyregtest-sqlite /data/db.sqlite`, ""},
-		{"docker run --rm " + pinned + " uname -m", ""},
-		{`case "$(docker run --rm "$TOOL_IMAGE" uname -m)" in`, ""},
-		// Criterion 3: the site this bead removed, put back.
-		{`cred_stat()  { docker run --rm -v brollyregtest_credentials:/c alpine:3.20 stat -c '%s' "/c/$1"; }`,
-			`planted.sh:1: ` + "`docker run`" + ` names image "alpine:3.20"`},
-		// Criterion 4: the image on a continuation line — the plant that proves the join.
-		{"x=1\ndocker run --rm -v \"$WORK:/w\" \\\n  alpine:3.20 /w/nwctool \"$@\"",
-			`planted.sh:2: ` + "`docker run`" + ` names image "alpine:3.20"`},
-		{`docker run --rm --net="container:$srv" alpine:3.20 netstat -tn`, `names image "alpine:3.20"`},
-		{"docker run --rm alpine" + pinned[len("alpine:3.24"):] + " uname -m", `names image "alpine@sha256:`},
-		// An unknown boolean flag reads the command as the image: loud, not silent.
-		{`docker run --rm --privileged "$TOOL_IMAGE" uname -m`, `names image "uname"`},
-	} {
-		found := checkScriptImages(map[string]string{"planted.sh": tc.src})
+// The controls, as lists rather than floors — stack_lint_test.go's ruling for
+// its services, for the same reason: a count passes a set that gained one and
+// lost another. What would change them: a script that starts or stops running
+// a container, which is a change worth a reader's attention.
+var (
+	dockerRunScripts = []string{"authorise.sh", "cap.sh", "e2e.sh", "ipaddr.sh", "nwc.sh", "rotation.sh", "spend.sh"}
+	toolImageScripts = []string{"authorise.sh", "cap.sh", "e2e.sh", "nwc.sh", "rotation.sh", "spend.sh"}
+)
+
+type plant struct{ src, want string } // want "" means clean
+
+func assertPlants(t *testing.T, check func(src string) []string, plants []plant) {
+	t.Helper()
+	for _, tc := range plants {
+		found := check(tc.src)
 		switch {
 		case tc.want == "" && len(found) != 0:
 			t.Errorf("clean case flagged:\n%s\n→ %v", tc.src, found)
@@ -289,22 +268,48 @@ func TestEveryScriptImageIsPinned(t *testing.T) {
 	}
 }
 
+func TestEveryScriptImageIsPinned(t *testing.T) {
+	scripts := realScripts(t)
+	for _, p := range checkScriptImages(scripts) {
+		t.Error(p)
+	}
+	if got := scriptsWith(scripts, "docker run "); !slices.Equal(got, dockerRunScripts) {
+		t.Errorf("scripts running a container are %v, and this file expects %v; the rule above "+
+			"asserts over whatever is there", got, dockerRunScripts)
+	}
+
+	const pinned = "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+	assertPlants(t, func(src string) []string {
+		return checkScriptImages(map[string]string{"planted.sh": src})
+	}, []plant{
+		{`cred_stat() { docker run --rm -v brollyregtest_credentials:/c "$TOOL_IMAGE" stat /c/x; }`, ""},
+		{`docker run --rm -i "$TOOL_IMAGE" sha256sum`, ""},
+		{`docker run --rm -v "$DBVOL:/data" brollyregtest-sqlite /data/db.sqlite`, ""},
+		{"docker run --rm " + pinned + " uname -m", ""},
+		{`case "$(docker run --rm "$TOOL_IMAGE" uname -m)" in`, ""},
+		// Criterion 3: the site this bead removed, put back.
+		{`cred_stat()  { docker run --rm -v brollyregtest_credentials:/c alpine:3.20 stat -c '%s' "/c/$1"; }`,
+			"planted.sh:1: `docker run` names image \"alpine:3.20\""},
+		// Criterion 4: the image on a continuation line — the plant that proves the join.
+		{"x=1\ndocker run --rm -v \"$WORK:/w\" \\\n  alpine:3.20 /w/nwctool \"$@\"",
+			"planted.sh:2: `docker run` names image \"alpine:3.20\""},
+		{`docker run --rm --net="container:$srv" alpine:3.20 netstat -tn`, `names image "alpine:3.20"`},
+		{"docker run --rm alpine" + pinned[len("alpine:3.24"):] + " uname -m", `names image "alpine@sha256:`},
+		// An unknown boolean flag reads the command as the image: loud, not silent.
+		{`docker run --rm --privileged "$TOOL_IMAGE" uname -m`, `names image "uname"`},
+	})
+}
+
 func TestEveryToolImageDefaultIsTheDockerfilesFrom(t *testing.T) {
 	want := toolFrom(t)
 	scripts := realScripts(t)
-	users := 0
 	for _, name := range slices.Sorted(maps.Keys(scripts)) {
-		if strings.Contains(scripts[name], "$TOOL_IMAGE") {
-			users++
-		}
 		for _, p := range checkToolImageDefault(name, scripts[name], ".", want) {
 			t.Error(p)
 		}
 	}
-	// Six scripts carry the definition today; a derivation nobody uses is not
-	// the thing this asserts over.
-	if users < 6 {
-		t.Errorf("only %d scripts use $TOOL_IMAGE; expected the six that run a tool image", users)
+	if got := scriptsWith(scripts, "$TOOL_IMAGE"); !slices.Equal(got, toolImageScripts) {
+		t.Errorf("scripts using $TOOL_IMAGE are %v, and this file expects %v", got, toolImageScripts)
 	}
 
 	const guard = `[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image" >&2; exit 1; }`
@@ -312,21 +317,13 @@ func TestEveryToolImageDefaultIsTheDockerfilesFrom(t *testing.T) {
 		return `TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' ` + path + ` 2>/dev/null || true)}"`
 	}
 	use := "\ndocker run --rm \"$TOOL_IMAGE\" uname -m\n"
-	for _, tc := range []struct {
-		src, want string
-	}{
+	assertPlants(t, func(src string) []string {
+		return checkToolImageDefault("planted.sh", src, ".", want)
+	}, []plant{
 		{derive(toolDockerfile) + "\n" + guard + use, ""},
 		// Criterion 5: a default that is not the Dockerfile's.
 		{`TOOL_IMAGE="${TOOL_IMAGE:-alpine:3.24}"` + "\n" + guard + use, `TOOL_IMAGE defaults to "alpine:3.24"`},
 		{derive("tools/nope/Dockerfile") + "\n" + guard + use, "does not resolve"},
 		{derive(toolDockerfile) + use, "found 1 such lines"},
-	} {
-		found := checkToolImageDefault("planted.sh", tc.src, ".", want)
-		switch {
-		case tc.want == "" && len(found) != 0:
-			t.Errorf("clean case flagged:\n%s\n→ %v", tc.src, found)
-		case tc.want != "" && (len(found) == 0 || !strings.Contains(found[0], tc.want)):
-			t.Errorf("planted case not caught as %q:\n%s\n→ %v", tc.want, tc.src, found)
-		}
-	}
+	})
 }

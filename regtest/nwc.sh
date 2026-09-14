@@ -13,9 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# The tool image is tools/sqlite/Dockerfile's FROM reference, read here rather than
-# restated, so its digest lives in one line Dependabot maintains (0vk.59;
-# regtest/script_lint_test.go holds every script to it).
+# Default: tools/sqlite/Dockerfile's FROM, stated once (0vk.59; script_lint_test.go says why).
 TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
 [ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
 APP="${APP:-http://localhost:8080}"
