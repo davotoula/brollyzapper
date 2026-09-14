@@ -233,15 +233,67 @@ func expandTarget(t *testing.T, target string) string {
 
 // workflow is the shape every rule in this file reads.
 type workflow struct {
-	Name string         `yaml:"name"`
-	Jobs map[string]job `yaml:"jobs"`
+	Name        string         `yaml:"name"`
+	Permissions permissions    `yaml:"permissions"`
+	Jobs        map[string]job `yaml:"jobs"`
 }
 
 // job and step are named rather than anonymous so a test can build one. The
 // scanners take their input (zu5.6), and a synthetic workflow is how each rule
 // proves it can still fail.
 type job struct {
-	Steps []step `yaml:"steps"`
+	Permissions permissions `yaml:"permissions"`
+	Steps       []step      `yaml:"steps"`
+}
+
+// permissions is a `permissions:` block, at workflow or job level.
+//
+// ITS OWN TYPE, NOT map[string]string (0vk.57). GitHub also accepts the scalar
+// forms `permissions: write-all` and `read-all`, and a map field fails Unmarshal
+// on them — which under workflowFiles is a t.Fatalf "is not valid YAML" for the
+// whole file: red with the wrong diagnosis, and every other rule in this file
+// dead for that workflow. write-all is the one spelling an attacker would reach
+// for. So this never fails the parse; what it cannot read, it records for the
+// rule to name at its line.
+//
+// declared separates an absent block from `permissions: {}`, which grants
+// nothing and is valid. yaml.v3 calls UnmarshalYAML only for a non-null value, so
+// a bare `permissions:` (null) reads as absent — measured on v3.0.1, 14 Sep 2026:
+// red at workflow level, inherit at job level, which is what it amounts to.
+type permissions struct {
+	declared bool
+	line     int
+	all      string            // "read-all" or "write-all", the scalar form
+	scopes   map[string]string // scope -> read | write | none, the map form
+	invalid  string            // the node's kind, when it is neither form
+}
+
+func (p *permissions) UnmarshalYAML(n *yaml.Node) error {
+	p.declared, p.line = true, n.Line
+	switch {
+	case n.Kind == yaml.ScalarNode && (n.Value == "read-all" || n.Value == "write-all"):
+		p.all = n.Value
+	case n.Kind == yaml.MappingNode && n.Decode(&p.scopes) == nil:
+	default:
+		p.invalid = fmt.Sprintf("%s %q", n.Tag, n.Value)
+	}
+	return nil
+}
+
+// writes is every scope this block grants write on; write-all is named as itself,
+// since it is every scope at once and no allowlist row could stand for it.
+func (p permissions) writes() []string {
+	if p.all == "write-all" {
+		return []string{"write-all"}
+	}
+	var out []string
+	for scope, level := range p.scopes {
+		if level == "write" {
+			out = append(out, scope)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 type step struct {
@@ -301,6 +353,112 @@ func stepLabel(file, job, name string) string {
 		name = "(unnamed step)"
 	}
 	return fmt.Sprintf("%s / job %s / %q", file, job, name)
+}
+
+// writeGrant is one `write` a job is allowed to hold, with the reason it holds it.
+type writeGrant struct{ file, job, scope, why string }
+
+// writeGrants is every write grant in every workflow (0vk.57). A GITHUB_TOKEN is
+// not a stored secret, but it is a credential scoped by these blocks, and each
+// write here is something a compromised step in that job could do with it. So a
+// new one is a decision, made here with its reason, not a line added in passing.
+//
+// Nothing is at workflow level, and nothing may be: a top-level write reaches
+// every job added later (publish.yml says so), and Scorecard's publishing API
+// refuses scorecard.yml's results if one appears (its header). Checked both ways
+// — a row the workflow no longer grants is red too, because an allowlist that
+// bounds nothing is how it becomes a switch (the ruling zu5.12 applied to its
+// accepted list).
+var writeGrants = []writeGrant{
+	{"codeql.yml", "analyze", "security-events", "the SARIF upload to code scanning"},
+	{"scorecard.yml", "analysis", "security-events", "the SARIF upload to code scanning"},
+	{"scorecard.yml", "analysis", "id-token", "the OIDC token publish_results signs the results with, via Sigstore; the ONE place this repository mints one"},
+	{"publish.yml", "publish", "packages", "the image push to GHCR"},
+}
+
+func checkWriteGrants(parsed map[string]workflow, allow []writeGrant) []problem {
+	var found []problem
+	allowed := map[[3]string]bool{}
+	for _, g := range allow {
+		allowed[[3]string{g.file, g.job, g.scope}] = true
+	}
+	invalid := func(file, where string, p permissions) {
+		if p.invalid != "" {
+			found = append(found, problem{file, p.line, fmt.Sprintf(
+				"%s: permissions is neither a map nor read-all/write-all (%s)", where, p.invalid)})
+		}
+	}
+	for file, w := range parsed {
+		// Without one, the token's scope is the repository's default workflow
+		// permissions: a setting, read today, which does not survive a recreate.
+		if !w.Permissions.declared {
+			found = append(found, problem{file, 0, "declares no top-level permissions: " +
+				"block, so its token's scope is whatever the repository setting says"})
+		}
+		invalid(file, "workflow level", w.Permissions)
+		for _, scope := range w.Permissions.writes() {
+			found = append(found, problem{file, w.Permissions.line, fmt.Sprintf(
+				"the workflow level grants %s: write; a top-level write reaches every "+
+					"job, including ones added later — grant it on the job that needs it", scope)})
+		}
+		for name, j := range w.Jobs {
+			invalid(file, "job "+name, j.Permissions)
+			for _, scope := range j.Permissions.writes() {
+				if !allowed[[3]string{file, name, scope}] {
+					found = append(found, problem{file, j.Permissions.line, fmt.Sprintf(
+						"job %s grants %s: write, which is not on the allowlist "+
+							"(writeGrants, with its reason)", name, scope)})
+				}
+			}
+		}
+	}
+	for _, g := range allow {
+		if w, ok := parsed[g.file]; !ok || !slices.Contains(w.Jobs[g.job].Permissions.writes(), g.scope) {
+			found = append(found, problem{g.file, 0, fmt.Sprintf(
+				"allowlists job %s %s: write, which the workflow does not grant; "+
+					"delete the row", g.job, g.scope)})
+		}
+	}
+	return found
+}
+
+func TestEveryWriteGrantIsAllowlisted(t *testing.T) {
+	parsed, _ := workflowFiles(t)
+	clean(t, checkWriteGrants(parsed, writeGrants))
+
+	// The plants are YAML, not struct literals, so the parse is under test too:
+	// `write-all` is exactly the spelling a plain map field could not decode.
+	plant := func(src string) map[string]workflow {
+		t.Helper()
+		var w workflow
+		if err := yaml.Unmarshal([]byte(src), &w); err != nil {
+			t.Fatalf("the plant does not parse — not a result: %v", err)
+		}
+		return map[string]workflow{"planted.yml": w}
+	}
+	allow := []writeGrant{{"planted.yml", "publish", "packages", "planted"}}
+	const ok = "permissions:\n  contents: read\njobs:\n  publish:\n    permissions:\n      contents: read\n      packages: write\n"
+	clean(t, checkWriteGrants(plant(ok), allow))
+
+	// This bead's reason for existing: an OIDC token beside the one that pushes.
+	catches(t, checkWriteGrants(plant(ok+"      id-token: write\n"), allow),
+		"job publish grants id-token: write, which is not on the allowlist")
+	catches(t, checkWriteGrants(plant(strings.Replace(ok, "contents: read\njobs", "contents: write\njobs", 1)), allow),
+		"workflow level grants contents: write")
+	catches(t, checkWriteGrants(plant(ok+"  gate:\n    permissions: write-all\n"), allow),
+		"job gate grants write-all")
+	catches(t, checkWriteGrants(plant("permissions: write-all\n"+ok[len("permissions:\n  contents: read\n"):]), allow),
+		"workflow level grants write-all")
+	// Both ways: a row the file does not grant bounds nothing.
+	catches(t, checkWriteGrants(plant(ok), append(allow, writeGrant{"planted.yml", "gate", "packages", "planted"})),
+		"allowlists job gate packages: write, which the workflow does not grant")
+	catches(t, checkWriteGrants(plant(ok), nil),
+		"job publish grants packages: write, which is not on the allowlist")
+	// Without a top-level block the token's scope is a repository setting.
+	catches(t, checkWriteGrants(plant(ok[len("permissions:\n  contents: read\n"):]), allow),
+		"declares no top-level permissions")
+	catches(t, checkWriteGrants(plant(ok+"  gate:\n    permissions: [contents]\n"), allow),
+		"job gate: permissions is neither a map nor read-all/write-all")
 }
 
 // A tag is a mutable pointer. `actions/checkout@v4` is whatever that repo's
