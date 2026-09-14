@@ -1,6 +1,8 @@
 module nwctool
 
-go 1.25.0
+go 1.27.0
+
+toolchain go1.27.1
 
 require github.com/nbd-wtf/go-nostr v0.52.3
 
