@@ -319,22 +319,28 @@ func TestNoWorkflowInterpolatesInputIntoARunBlock(t *testing.T) {
 func checkBaseImagesPinned(files map[string]string) []problem {
 	var found []problem
 	for name, raw := range files {
+		// `FROM x AS build` referred to later by name is a stage, not a registry
+		// pull, and has no digest to pin. Known by the names earlier lines
+		// declared, not by shape: "no slash and no colon" also describes
+		// `FROM alpine`, an unpinned pull of latest (0vk.58 go-review).
+		stages := map[string]bool{"scratch": true}
 		for i, line := range strings.Split(raw, "\n") {
-			if !strings.HasPrefix(strings.TrimSpace(line), "FROM ") {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) < 2 || !strings.EqualFold(fields[0], "FROM") {
 				continue
 			}
-			// `FROM x AS build` referred to later by name is a stage, not a
-			// registry pull, and has no digest to pin.
-			image := strings.Fields(strings.TrimSpace(line))[1]
-			if strings.HasPrefix(image, "--platform=") {
-				image = strings.Fields(strings.TrimSpace(line))[2]
+			fields = fields[1:]
+			if strings.HasPrefix(fields[0], "--platform=") && len(fields) > 1 {
+				fields = fields[1:]
 			}
-			if !strings.Contains(image, "/") && !strings.Contains(image, ":") {
-				continue
-			}
-			if !strings.Contains(image, "@sha256:") {
+			image := fields[0]
+			if !stages[strings.ToLower(image)] && !strings.Contains(image, "@sha256:") {
 				found = append(found, problem{name, i + 1,
 					fmt.Sprintf("%q is pinned by tag, not by digest", image)})
+			}
+			// Declared after the check: a stage can only be named by a later line.
+			if len(fields) >= 3 && strings.EqualFold(fields[1], "AS") {
+				stages[strings.ToLower(fields[2])] = true
 			}
 		}
 	}
@@ -356,6 +362,19 @@ func TestTheBaseImagesArePinnedByDigest(t *testing.T) {
 		if d.IsDir() {
 			if slices.Contains(neverScanned, d.Name()) {
 				return filepath.SkipDir
+			}
+			// Two things a walk sees that git does not, either of which would make
+			// the verdict depend on which checkout ran it: the main tree's
+			// gitignored /docs and /.claude, which a worktree does not have, and a
+			// nested worktree or clone (a directory holding a .git FILE or dir),
+			// whose Dockerfiles are another branch's.
+			if path != root {
+				if rel, _ := filepath.Rel(root, path); rel == "docs" || rel == ".claude" {
+					return filepath.SkipDir
+				}
+				if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -390,6 +409,16 @@ func TestTheBaseImagesArePinnedByDigest(t *testing.T) {
 	}), "pinned by tag, not by digest")
 	// And a build STAGE is not a registry pull, so it must not be flagged.
 	clean(t, checkBaseImagesPinned(map[string]string{
-		"Dockerfile.planted": "FROM build\n",
+		"Dockerfile.planted": "FROM golang@sha256:" + strings.Repeat("0", 64) +
+			" AS build\nFROM --platform=$BUILDPLATFORM build\nFROM scratch\n",
 	}))
+	// A bare image name is a pull of latest, not a stage, unless a line above
+	// declared it — the shape "no slash, no colon" used to let this through.
+	catches(t, checkBaseImagesPinned(map[string]string{
+		"Dockerfile.planted": "FROM alpine\n",
+	}), `"alpine" is pinned by tag`)
+	// A stage is only a stage after its AS line, not before.
+	catches(t, checkBaseImagesPinned(map[string]string{
+		"Dockerfile.planted": "FROM build\nFROM golang@sha256:" + strings.Repeat("0", 64) + " AS build\n",
+	}), `"build" is pinned by tag`)
 }

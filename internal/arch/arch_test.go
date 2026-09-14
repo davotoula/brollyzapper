@@ -702,9 +702,9 @@ func TestTheLanguageVersionTracksTheToolchain(t *testing.T) {
 // 1.27, which under GOTOOLCHAIN=auto let a host with an older `go` on PATH build
 // them with it. govulncheck's source scan found 23 and 27 reachable
 // standard-library advisories in the tools as built that way. Equal, not "at
-// least": the root's pair is the one scripts/toolchain_floor.py ties to the
-// images, and a tool ahead of it would make regtest need a Go nothing else here
-// uses.
+// least": the root's `toolchain` line is the one scripts/toolchain_floor.py ties
+// to the images, and its `go` line tracks that, so a tool ahead of the pair would
+// make regtest need a Go nothing else here uses.
 // If a tool ever needs a different Go, that is a decision to write down here.
 func checkToolModulesTrackRoot(root []byte, tools map[string][]byte) []problem {
 	want, err := modfile.Parse("go.mod", root, nil)

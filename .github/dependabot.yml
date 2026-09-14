@@ -14,7 +14,7 @@
 #   gomod           regtest/tools/{nwctool,zaptool}, which are separate modules
 #   github-actions  the SHA pins in .github/workflows/
 #   docker          the base-image digests in Dockerfile.server and .guard
-#   docker          the regtest tool images' digests (regtest/tools/*)
+#   docker          the regtest sqlite tool's base-image digest
 #
 #   docker-compose  ABSENT, on purpose, twice over. regtest/docker-compose.yml
 #                   pins LND, bitcoind and strfry, and those pins are re-proved
@@ -138,20 +138,23 @@ updates:
       base-images:
         patterns: ["*"]
 
-  # The regtest tool images' digests (0vk.58). Its own entry rather than more
-  # directories on the one above, for the reason the regtest gomod entry is
-  # separate from the app's: a shipped base image and a test tool's are never
+  # The regtest sqlite tool's alpine digest (0vk.58). Its own entry rather than
+  # a second directory on the one above, for the reason the regtest gomod entry
+  # is separate from the app's: a shipped base image and a test tool's are never
   # proposed in the same PR, and the review question here is only "does regtest
-  # still run". `directory: "/"` does not reach them — Dependabot reads
-  # Dockerfiles in the named directory, not below it; the glob matches the set
-  # internal/arch's base-image rule holds to a digest.
+  # still run". `directory: "/"` does not reach it — Dependabot reads
+  # Dockerfiles in the named directory, not below it.
+  #
+  # Named, not globbed as /regtest/tools/*: four of the five tool directories
+  # hold no Dockerfile, and whether Dependabot skips those or errors on them is
+  # not documented. A new tool Dockerfile is held to a digest by internal/arch's
+  # base-image test regardless; it is only its refresh that needs a line here.
   #
   # Monthly, not weekly: nothing here ships and nothing pairs with it, so a
   # weekly PR would be a full gate run a week for a throwaway image. Weekly if a
   # tool image ever carries something a regtest run depends on being current.
   - package-ecosystem: docker
-    directories:
-      - "/regtest/tools/*"
+    directory: "/regtest/tools/sqlite"
     schedule:
       interval: monthly
       time: "07:00"
