@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/davotoula/brollyzapper/internal/api"
+	"github.com/davotoula/brollyzapper/internal/composelint"
 )
 
 const packageDir = "brollyzapper"
@@ -38,12 +39,9 @@ type composeFile struct {
 		// A yaml.Node because compose takes a string or a list, and the only
 		// question asked of it is whether it is there at all.
 		EnvFile yaml.Node `yaml:"env_file"`
-		// A yaml.Node because the two services spell this differently — the
-		// server needs the mapping form to carry ipv4_address, the guard names
-		// the network and nothing else — and because a missing block must be a
-		// visible decode failure rather than a zero value that reads as "no
-		// address" and passes.
-		Networks yaml.Node `yaml:"networks"`
+		// No Networks field: the two services spell it differently, and the
+		// address check asks the document for the server's mapping form
+		// (composelint's Networks), where the sequence form is an error.
 	} `yaml:"services"`
 }
 
@@ -67,19 +65,18 @@ func readPackageFile(t *testing.T, name string) string {
 	return string(raw)
 }
 
-func loadCompose(t *testing.T) (composeFile, string) {
+// loadCompose is the package compose, decoded into this lint's own struct, and
+// its document. There is no text: a check that wants to know what the file says
+// asks the document (BrollyZap-20i.18).
+func loadCompose(t *testing.T) (composeFile, *composelint.Document) {
 	t.Helper()
-	const name = "docker-compose.yml"
-	raw := readPackageFile(t, name)
-	path := filepath.Join(packageDir, name)
+	path := filepath.Join(packageDir, "docker-compose.yml")
 	var compose composeFile
-	if err := yaml.Unmarshal([]byte(raw), &compose); err != nil {
-		t.Fatalf("parsing %s: %v", path, err)
-	}
+	doc := composelint.Load(t, path, &compose)
 	if len(compose.Services) == 0 {
 		t.Fatalf("%s declares no services; the lint is not actually running", path)
 	}
-	return compose, raw
+	return compose, doc
 }
 
 // THE assertion. §16: adding an admin.macaroon mount to the server service is
@@ -133,7 +130,7 @@ func TestTheServerServiceHasNoAdminMacaroonMount(t *testing.T) {
 // value and who owns it — and a reader who finds them apart has to go looking
 // for whether the separation meant something.
 func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
-	compose, raw := loadCompose(t)
+	compose, doc := loadCompose(t)
 	server, ok := compose.Services["server"]
 	if !ok {
 		t.Fatal("no server service in the package compose")
@@ -156,44 +153,32 @@ func TestThePackageDeclaresThePasswordManaged(t *testing.T) {
 			"this password, so the platform has to be the one supplying it",
 			server.Environment["ADMIN_PASSWORD"], want)
 	}
-	// Adjacency, read off the raw file because the parsed map has no order.
+	// Adjacency, read off the DOCUMENT'S ORDER because the decoded map has none.
 	//
 	// NOTHING BUT COMMENT AND BLANK BETWEEN THEM, rather than "within N lines".
 	// A line budget would have to grow every time the comment above the flag
 	// does, and a number that has to be maintained to keep meaning the same
-	// thing is a number that will be widened until it means nothing.
-	lines := strings.Split(raw, "\n")
-	pwLine, managedLine := lineOf(t, lines, "ADMIN_PASSWORD:"), lineOf(t, lines, managed+":")
+	// thing is a number that will be widened until it means nothing. In the node
+	// tree comments and blanks are not entries, so "nothing but" is the entries
+	// between the two keys, and there are to be none.
+	//
+	// The SERVER'S environment, by path. The raw-line version took the first line
+	// anywhere in the file starting `ADMIN_PASSWORD:`.
+	between, err := doc.KeysBetween([]string{"services", "server", "environment"}, "ADMIN_PASSWORD", managed)
+	if err != nil {
+		t.Fatalf("the adjacency of ADMIN_PASSWORD and %s cannot be read: %v", managed, err)
+	}
+	pwLine, managedLine := between.First, between.Second
 	if managedLine < pwLine {
 		t.Fatalf("%s is at line %d, ABOVE ADMIN_PASSWORD at line %d; the flag describes the "+
 			"password, so it reads after it", managed, managedLine, pwLine)
 	}
-	for i, line := range lines[pwLine : managedLine-1] {
-		if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			t.Errorf("line %d, %q, sits between ADMIN_PASSWORD and %s. They are one decision "+
-				"— the value and who owns it — and a reader who finds another setting "+
-				"between them has to work out whether the separation meant something",
-				pwLine+i+1, trimmed, managed)
-		}
+	for _, entry := range between.Entries {
+		t.Errorf("line %d, %q, sits between ADMIN_PASSWORD and %s. They are one decision "+
+			"— the value and who owns it — and a reader who finds another setting "+
+			"between them has to work out whether the separation meant something",
+			entry.Line, entry.Value, managed)
 	}
-}
-
-// lineOf is the 1-based line whose SETTING is needle, for the adjacency check
-// above.
-//
-// It matches a trimmed PREFIX rather than a substring, so a comment mentioning
-// the variable — and this file has several — cannot be mistaken for the line
-// that sets it. It fails the test rather than returning a sentinel, so a needle
-// that stopped matching cannot quietly satisfy a comparison.
-func lineOf(t *testing.T, lines []string, needle string) int {
-	t.Helper()
-	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), needle) {
-			return i + 1
-		}
-	}
-	t.Fatalf("no line in the package compose sets %q", needle)
-	return 0
 }
 
 // Box-verified 2026-08-21: PROXY_TRUST_UPSTREAM=true makes app_proxy forward a
@@ -382,7 +367,7 @@ func TestImagesArePinnedByDigest(t *testing.T) {
 // These two must agree or the guard cannot write recv.macaroon on first run —
 // a failure that reads like a bake error and is not.
 func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
-	compose, raw := loadCompose(t)
+	compose, doc := loadCompose(t)
 	for _, name := range []string{"guard", "server"} {
 		service, ok := compose.Services[name]
 		if !ok {
@@ -421,47 +406,17 @@ func TestBothServicesRunAsTheUidThatOwnsTheAppData(t *testing.T) {
 	// asks the user: key of the named service — not the first `user:` line found
 	// below a `guard:` somewhere in the text, which reads the server's comment
 	// the day the guard's user: line is deleted.
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("parsing the package compose as a document: %v", err)
-	}
 	for _, name := range []string{"guard", "server"} {
-		user := serviceKey(&doc, name, "user")
-		if user == nil {
+		user, ok := doc.Key("services", name, "user")
+		if !ok {
 			continue // already reported above, by value
 		}
-		if !strings.Contains(user.HeadComment, "65532") {
+		if !strings.Contains(user.Comment, "65532") {
 			t.Errorf("the comment above the %s's user: at line %d does not name 65532; the "+
 				"next person to touch user: will not know why 1000 matters, and an explanation "+
 				"somewhere else in the file is not one they will find", name, user.Line)
 		}
 	}
-}
-
-// serviceKey is the KEY node of one setting on one service — the node that
-// carries the setting's line and the comment block written above it — or nil.
-func serviceKey(doc *yaml.Node, service, key string) *yaml.Node {
-	if len(doc.Content) == 0 {
-		return nil
-	}
-	_, services := mappingEntry(doc.Content[0], "services")
-	_, svc := mappingEntry(services, service)
-	k, _ := mappingEntry(svc, key)
-	return k
-}
-
-// mappingEntry is one key of a yaml mapping node and its value. A nil or
-// non-mapping node has no keys, so a chain of lookups fails once, at the end.
-func mappingEntry(node *yaml.Node, key string) (k, v *yaml.Node) {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil, nil
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return node.Content[i], node.Content[i+1]
-		}
-	}
-	return nil, nil
 }
 
 // The framework already defaults app_proxy auth on, and setting it explicitly
@@ -965,13 +920,10 @@ func TestTheManifestVersionMatchesTheImageTags(t *testing.T) {
 // is the level up: the same VARIABLE at both ends, and a variable exports.sh
 // actually sets to a literal address. Today they agree by hand.
 func TestTheStaticAddressIsOneVariableAtBothEnds(t *testing.T) {
-	compose, _ := loadCompose(t)
+	compose, doc := loadCompose(t)
 
-	var networks map[string]struct {
-		IPv4 string `yaml:"ipv4_address"`
-	}
-	serverNetworks := compose.Services["server"].Networks
-	if err := serverNetworks.Decode(&networks); err != nil {
+	networks, err := doc.Networks("server")
+	if err != nil {
 		t.Fatalf("the server's networks are not a mapping with an ipv4_address: %v", err)
 	}
 	// EVERY network that carries one, not the last the map happened to yield.
@@ -1047,9 +999,9 @@ func TestTheStaticAddressIsOneVariableAtBothEnds(t *testing.T) {
 // lying and every test green. Measured on 279678d before this test existed.
 // This is that comment, made checkable.
 func TestTheExportsAreExactlyWhatTheComposeNeeds(t *testing.T) {
-	_, raw := loadCompose(t)
+	_, doc := loadCompose(t)
 	exported := exports(t)
-	required, defaulted := interpolationsIn(t, raw)
+	required, defaulted := interpolationsIn(doc)
 
 	for name := range required {
 		if _, ok := exported[name]; !ok {
@@ -1108,14 +1060,9 @@ func TestTheExportsAreExactlyWhatTheComposeNeeds(t *testing.T) {
 // `${X:?…}` and `${X?…}` are NOT defaults — they are the opposite, an error
 // when unset — so they count as required. What would reopen this: compose
 // gaining a form that supplies a value some other way.
-func interpolationsIn(t *testing.T, raw string) (required, defaulted map[string]bool) {
-	t.Helper()
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
-		t.Fatalf("parsing the package compose as a document: %v", err)
-	}
+func interpolationsIn(doc *composelint.Document) (required, defaulted map[string]bool) {
 	required, defaulted = map[string]bool{}, map[string]bool{}
-	for _, scalar := range scalarNodes(&doc) {
+	for _, scalar := range doc.Scalars() {
 		for _, m := range interpolationRE.FindAllStringSubmatch(scalar.Value, -1) {
 			braced, name, operator := m[1] != "", m[2], m[3]
 			if braced && (operator == ":-" || operator == "-") {
@@ -1142,34 +1089,6 @@ func interpolationsIn(t *testing.T, raw string) (required, defaulted map[string]
 // `$APP_BROLLYZAPPER_X-suffix` compose interpolates X and leaves the rest, so
 // reading that as "defaulted" would excuse exports.sh from supplying it.
 var interpolationRE = regexp.MustCompile(`\$(\{)?(APP_BROLLYZAPPER_[A-Z0-9_]*)(:?[-?])?`)
-
-// scalarNodes is every scalar in a YAML document, keys included, carrying its
-// Value and its Line. Comments are not scalars, which is the whole point of
-// asking the parser rather than the file — and neither is a line break: yaml
-// folds a `\`-continued double-quoted scalar back into one Value, where a raw
-// line scan sees two halves and matches neither.
-//
-// An alias node carries no Content, only a pointer this does not follow, so a
-// recursive alias terminates rather than recursing forever — and nothing is
-// missed by not following it, since the anchor's own definition is a scalar
-// elsewhere in the same tree.
-//
-// DELIBERATELY DUPLICATED, byte-identical and under this same name, in
-// regtest/lint_test.go and deploy/lint_test.go — three copies, and nothing
-// detects drift between them but the name, so the name is kept identical on
-// purpose (the discipline internal/arch/arch_test.go states for its own twin).
-// Not extracted, on size and shape: deploy/lint_test.go's package comment
-// carries the argument, and BrollyZap-20i.18 the sequencing.
-func scalarNodes(node *yaml.Node) []*yaml.Node {
-	if node.Kind == yaml.ScalarNode {
-		return []*yaml.Node{node}
-	}
-	var out []*yaml.Node
-	for _, child := range node.Content {
-		out = append(out, scalarNodes(child)...)
-	}
-	return out
-}
 
 // wholeValueVariable is the variable a compose value IS, or "" if the value is
 // anything else — a literal, or a string with a variable inside it. The whole
