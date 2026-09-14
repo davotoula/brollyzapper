@@ -107,14 +107,15 @@ vuln:
 # green with the grep and red without it, and staticcheck's own leniency for
 # "Code generated" files does not cover it: a deprecated call there still
 # reports, so the grep is not redundant.
+# The pattern is anchored so a sibling package named lnrpc-something is still
+# linted.
 #
-# The emptiness test is there because staticcheck with no arguments lints only
-# `.`. That fails today, since the module root holds no Go files — the test makes
-# an empty package list a failure by itself rather than by that accident.
+# An empty package list fails the recipe on its own: the assignment takes grep's
+# status, and grep -v that selects nothing exits 1.
 staticcheck:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
-	pkgs="$$(go list ./... | grep -v '/internal/lnd/lnrpc')" && test -n "$$pkgs" && \
+	pkgs="$$(go list ./... | grep -Ev '/internal/lnd/lnrpc(/|$$)')" && \
 		$(GOBIN)/staticcheck $$pkgs
 
 # toolchain-floor asserts go.mod's `toolchain` equals the Go the digest-pinned

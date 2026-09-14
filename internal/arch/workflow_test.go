@@ -66,7 +66,7 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 		"toolchain-floor": "scripts/toolchain_floor.py",
 		// zu5.11. The exclusion is asserted as well as the run: a recipe that
 		// linted the generated stubs would go red on code that is not ours.
-		"staticcheck": "grep -v '/internal/lnd/lnrpc'",
+		"staticcheck": "grep -Ev '/internal/lnd/lnrpc(/|$)'",
 	} {
 		recipe := expandTarget(t, target)
 		if !strings.Contains(recipe, must) {

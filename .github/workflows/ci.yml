@@ -14,8 +14,8 @@
 # Gaps between this and the local gate: none. `make check` is build + vet +
 # test, and `cross`, the gofmt exclusion, `go mod tidy -diff`, govulncheck and
 # staticcheck are reproduced below verbatim. If a check is ever added locally
-# and not here, name it in this comment — a CI that is quietly weaker than the local gate is
-# worse than one that is obviously so.
+# and not here, name it in this comment — a CI that is quietly weaker than the
+# local gate is worse than one that is obviously so.
 #
 # Every action is pinned to a commit SHA with the version in a trailing comment,
 # and the Dockerfiles pin their base images by digest. internal/arch asserts

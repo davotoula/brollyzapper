@@ -1786,9 +1786,7 @@ func TestTheInboundLineNamesTheRequestedEncryptionScheme(t *testing.T) {
 			deny: "nip44_v3",
 		},
 		{
-			// zu5.11. The tag is read by its exact name. The deprecated
-			// Tags.GetFirst this replaced matched a name PREFIX, so a tag that
-			// merely began with "encryption" chose the reply's scheme.
+			// zu5.11: the tag is read by its exact name; see handle.
 			name: "a tag whose name only starts with encryption",
 			tags: func(h *harness) gonostr.Tags {
 				return gonostr.Tags{{"p", h.conn.row().ServicePubkey}, {"encryptionx", "nip44_v2"}}
@@ -1796,9 +1794,8 @@ func TestTheInboundLineNamesTheRequestedEncryptionScheme(t *testing.T) {
 			want: "absent",
 		},
 		{
-			// zu5.11. A tag with no value names no scheme, so the request is
-			// the implicit NIP-04 fallback and the line says so. GetFirst read it
-			// as present, and logged an explicit "nip04" nobody had sent.
+			// zu5.11: a tag with no value names no scheme, so this is the
+			// implicit fallback, not an explicit "nip04" nobody sent.
 			name: "an encryption tag with no value",
 			tags: func(h *harness) gonostr.Tags {
 				return gonostr.Tags{{"p", h.conn.row().ServicePubkey}, {"encryption"}}
