@@ -280,8 +280,9 @@ func (p *permissions) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// writes is every scope this block grants write on; write-all is named as itself,
-// since it is every scope at once and no allowlist row could stand for it.
+// writes is every write this block grants, as a message names it: "packages:
+// write" per scope, or "write-all" as itself, since it is every scope at once and
+// no allowlist row could stand for it.
 func (p permissions) writes() []string {
 	if p.all == "write-all" {
 		return []string{"write-all"}
@@ -289,7 +290,7 @@ func (p permissions) writes() []string {
 	var out []string
 	for scope, level := range p.scopes {
 		if level == "write" {
-			out = append(out, scope)
+			out = append(out, scope+": write")
 		}
 	}
 	slices.Sort(out)
@@ -380,7 +381,7 @@ func checkWriteGrants(parsed map[string]workflow, allow []writeGrant) []problem 
 	var found []problem
 	allowed := map[[3]string]bool{}
 	for _, g := range allow {
-		allowed[[3]string{g.file, g.job, g.scope}] = true
+		allowed[[3]string{g.file, g.job, g.scope + ": write"}] = true
 	}
 	invalid := func(file, where string, p permissions) {
 		if p.invalid != "" {
@@ -396,24 +397,24 @@ func checkWriteGrants(parsed map[string]workflow, allow []writeGrant) []problem 
 				"block, so its token's scope is whatever the repository setting says"})
 		}
 		invalid(file, "workflow level", w.Permissions)
-		for _, scope := range w.Permissions.writes() {
+		for _, grant := range w.Permissions.writes() {
 			found = append(found, problem{file, w.Permissions.line, fmt.Sprintf(
-				"the workflow level grants %s: write; a top-level write reaches every "+
-					"job, including ones added later — grant it on the job that needs it", scope)})
+				"the workflow level grants %s; a top-level write reaches every "+
+					"job, including ones added later — grant it on the job that needs it", grant)})
 		}
 		for name, j := range w.Jobs {
 			invalid(file, "job "+name, j.Permissions)
-			for _, scope := range j.Permissions.writes() {
-				if !allowed[[3]string{file, name, scope}] {
+			for _, grant := range j.Permissions.writes() {
+				if !allowed[[3]string{file, name, grant}] {
 					found = append(found, problem{file, j.Permissions.line, fmt.Sprintf(
-						"job %s grants %s: write, which is not on the allowlist "+
-							"(writeGrants, with its reason)", name, scope)})
+						"job %s grants %s, which is not on the allowlist "+
+							"(writeGrants, with its reason)", name, grant)})
 				}
 			}
 		}
 	}
 	for _, g := range allow {
-		if w, ok := parsed[g.file]; !ok || !slices.Contains(w.Jobs[g.job].Permissions.writes(), g.scope) {
+		if w, ok := parsed[g.file]; !ok || !slices.Contains(w.Jobs[g.job].Permissions.writes(), g.scope+": write") {
 			found = append(found, problem{g.file, 0, fmt.Sprintf(
 				"allowlists job %s %s: write, which the workflow does not grant; "+
 					"delete the row", g.job, g.scope)})
@@ -446,9 +447,9 @@ func TestEveryWriteGrantIsAllowlisted(t *testing.T) {
 	catches(t, checkWriteGrants(plant(strings.Replace(ok, "contents: read\njobs", "contents: write\njobs", 1)), allow),
 		"workflow level grants contents: write")
 	catches(t, checkWriteGrants(plant(ok+"  gate:\n    permissions: write-all\n"), allow),
-		"job gate grants write-all")
+		"job gate grants write-all, which is not on the allowlist")
 	catches(t, checkWriteGrants(plant("permissions: write-all\n"+ok[len("permissions:\n  contents: read\n"):]), allow),
-		"workflow level grants write-all")
+		"workflow level grants write-all;")
 	// Both ways: a row the file does not grant bounds nothing.
 	catches(t, checkWriteGrants(plant(ok), append(allow, writeGrant{"planted.yml", "gate", "packages", "planted"})),
 		"allowlists job gate packages: write, which the workflow does not grant")
