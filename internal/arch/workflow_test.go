@@ -62,8 +62,8 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 	for _, anchor := range []struct{ target, must string }{
 		{"vuln", "govulncheck ./..."},
 		// zu5.12. The regtest tool modules, which `./...` never reaches. The flags
-		// are asserted with the script: without -scan module it would be a
-		// different scan, and without -format json there is no finding list.
+		// are spelled in the recipe so they can be asserted here: without -scan
+		// module it is a different scan, without -format json no finding list.
 		{"vuln", "scripts/vuln_tools.py"},
 		{"vuln", "govulncheck -scan module -format json"},
 		{"cross", "GOOS="},
@@ -74,15 +74,14 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 		// linted the generated stubs would go red on code that is not ours.
 		{"staticcheck", "grep -Ev '/internal/lnd/lnrpc(/|$)'"},
 	} {
-		target, must := anchor.target, anchor.must
-		recipe := expandTarget(t, target)
-		if !strings.Contains(recipe, must) {
+		recipe := expandTarget(t, anchor.target)
+		if !strings.Contains(recipe, anchor.must) {
 			t.Errorf("`make %s` does not run %q; CI calls it, so an empty target would "+
-				"make the whole check vacuous. Recipe:\n%s", target, must, recipe)
+				"make the whole check vacuous. Recipe:\n%s", anchor.target, anchor.must, recipe)
 		}
 		if strings.Contains(recipe, "@latest") {
 			t.Errorf("`make %s` installs a tool @latest, which makes the gate's verdict "+
-				"a function of the day it ran", target)
+				"a function of the day it ran", anchor.target)
 		}
 	}
 

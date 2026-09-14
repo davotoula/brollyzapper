@@ -93,9 +93,8 @@ jobs:
       # arrives on its own — govulncheck is what tells us one is needed. Over the
       # root module it reports only vulnerabilities in code paths the app actually
       # reaches, so a finding there is a finding about us (review L12). Over the
-      # regtest tool modules it is a module scan, checked against
-      # regtest/tools/vuln-accepted.txt (zu5.12): those modules are not built
-      # here, and their drift was first reported by a public Scorecard score.
+      # regtest tool modules it is a module scan against
+      # regtest/tools/vuln-accepted.txt (zu5.12; scripts/vuln_tools.py says why).
       #
       # Through the Makefile rather than inline, so the pinned version lives in
       # exactly one place. @latest anywhere would make the gate's verdict a

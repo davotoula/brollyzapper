@@ -86,15 +86,9 @@ cross:
 # exact Go on PATH — which is the point: the local gate now means what CI means
 # on a machine with any `go` at all.
 #
-# THE SECOND LINE IS THE REGTEST TOOL MODULES (zu5.12): regtest/tools/*/go.mod are
-# separate modules `./...` never reaches, and their dependencies drifted into four
-# advisories that a public Scorecard score reported before anything here did
-# (0vk.58). A MODULE scan — the tools are not built by the gate, so the question
-# is what the module graph carries, not what is called — with a verdict read from
-# the finding list against regtest/tools/vuln-accepted.txt, never from
-# govulncheck's exit: JSON exits 0 whatever it finds. The flags are spelled here
-# so `make -n vuln` shows them, which is where internal/arch asserts them; the
-# script's header says which of its exits is which.
+# The second line is the regtest tool modules, which `./...` never reaches: a
+# module scan against regtest/tools/vuln-accepted.txt (zu5.12). Why, and which
+# exit is which, is scripts/vuln_tools.py's header.
 vuln:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)

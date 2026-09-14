@@ -50,9 +50,11 @@ class CannotCheck(Exception):
 def accepted():
     """{(module dir, ID): reason}, refusing an entry without a reason."""
     entries, problems = {}, []
-    if not os.path.exists(ACCEPTED):
+    try:
+        f = open(ACCEPTED)
+    except FileNotFoundError:
         raise CannotCheck(ACCEPTED + " is missing")
-    with open(ACCEPTED) as f:
+    with f:
         for n, line in enumerate(f, 1):
             line = line.strip()
             if not line or line.startswith("#"):
@@ -119,9 +121,10 @@ def check(command):
         raise CannotCheck("no %s found; run from the repository root" % MODULES)
     entries, problems = accepted()
 
-    lines = []
+    lines, seen = [], set()
     for module in modules:
         found = scan(module, command)
+        seen.update((module, osv) for osv in found)
         for osv, dep in sorted(found.items()):
             if (module, osv) in entries:
                 lines.append("%s: %s in %s accepted — %s" % (module, osv, dep, entries[(module, osv)]))
@@ -130,13 +133,10 @@ def check(command):
                                 "with its reason" % (module, osv, dep, dep, ACCEPTED))
         if not found:
             lines.append("%s: no advisories" % module)
-        for (m, osv) in sorted(entries):
-            if m == module and osv not in found:
-                problems.append("%s: %s is accepted in %s but the scan no longer finds it; "
-                                "delete the line" % (module, osv, ACCEPTED))
-    for (m, osv) in sorted(entries):
-        if m not in modules:
-            problems.append("%s: %s is accepted for a module that does not exist" % (m, osv))
+    for m, osv in sorted(entries.keys() - seen):
+        where = "the scan no longer finds it" if m in modules else "there is no such module"
+        problems.append("%s: %s is accepted in %s but %s; delete the line"
+                        % (m, osv, ACCEPTED, where))
     return lines, problems
 
 
@@ -148,6 +148,12 @@ def main():
         lines, problems = check(sys.argv[1:])
     except CannotCheck as e:
         print("vuln-tools: COULD NOT CHECK — %s" % e, file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001 — deliberate, as in toolchain_floor.py
+        # Load-bearing, not habit: an uncaught exception exits 1, the code a real
+        # finding uses. The likeliest one is a govulncheck upgrade reshaping its
+        # JSON (a KeyError on "osv"), which is could-not-check, not a finding.
+        print("vuln-tools: COULD NOT CHECK — %s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 2
     for line in lines:
         print("vuln-tools: " + line)
