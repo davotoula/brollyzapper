@@ -59,16 +59,22 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 	// DOES rather than what the Makefile looks like. An earlier version
 	// string-cut the Makefile on "\nvuln:", which was both fragile and applied
 	// to one target while `make cross` beside it got only the string check.
-	for target, must := range map[string]string{
-		"vuln":  "govulncheck ./...",
-		"cross": "GOOS=",
+	for _, anchor := range []struct{ target, must string }{
+		{"vuln", "govulncheck ./..."},
+		// zu5.12. The regtest tool modules, which `./...` never reaches. The flags
+		// are asserted with the script: without -scan module it would be a
+		// different scan, and without -format json there is no finding list.
+		{"vuln", "scripts/vuln_tools.py"},
+		{"vuln", "govulncheck -scan module -format json"},
+		{"cross", "GOOS="},
 		// 0vk.39. Its own wave's check was the one gate command with nothing
 		// asserting it was still wired up — found by the simplify pass.
-		"toolchain-floor": "scripts/toolchain_floor.py",
+		{"toolchain-floor", "scripts/toolchain_floor.py"},
 		// zu5.11. The exclusion is asserted as well as the run: a recipe that
 		// linted the generated stubs would go red on code that is not ours.
-		"staticcheck": "grep -Ev '/internal/lnd/lnrpc(/|$)'",
+		{"staticcheck", "grep -Ev '/internal/lnd/lnrpc(/|$)'"},
 	} {
+		target, must := anchor.target, anchor.must
 		recipe := expandTarget(t, target)
 		if !strings.Contains(recipe, must) {
 			t.Errorf("`make %s` does not run %q; CI calls it, so an empty target would "+

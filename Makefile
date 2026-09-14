@@ -85,10 +85,21 @@ cross:
 # unaffected either way — setup-go reads go.mod's `toolchain` line and puts that
 # exact Go on PATH — which is the point: the local gate now means what CI means
 # on a machine with any `go` at all.
+#
+# THE SECOND LINE IS THE REGTEST TOOL MODULES (zu5.12): regtest/tools/*/go.mod are
+# separate modules `./...` never reaches, and their dependencies drifted into four
+# advisories that a public Scorecard score reported before anything here did
+# (0vk.58). A MODULE scan — the tools are not built by the gate, so the question
+# is what the module graph carries, not what is called — with a verdict read from
+# the finding list against regtest/tools/vuln-accepted.txt, never from
+# govulncheck's exit: JSON exits 0 whatever it finds. The flags are spelled here
+# so `make -n vuln` shows them, which is where internal/arch asserts them; the
+# script's header says which of its exits is which.
 vuln:
 	GOTOOLCHAIN="$$(go env GOVERSION)" \
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	$(GOBIN)/govulncheck ./...
+	python3 scripts/vuln_tools.py $(GOBIN)/govulncheck -scan module -format json
 
 # The gate's one third-party linter (zu5.11): unused code, deprecated calls,
 # dropped errors, and the simplifications that otherwise arrive one simplify
