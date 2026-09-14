@@ -34,7 +34,7 @@ go build ./... && go vet ./... && go test ./... && go test -race ./...
 make cross              # both binaries, linux/amd64 + linux/arm64
 gofmt -l . | grep -v '^internal/lnd/lnrpc/'   # generated code is not ours to format
 go mod tidy -diff
-make vuln               # govulncheck, pinned in the Makefile
+make vuln               # govulncheck: root symbol scan + regtest tool modules vs regtest/tools/vuln-accepted.txt
 make fuzz               # re-exercises the corpus, ten seconds
 make toolchain-floor    # go.mod's floor against the Go the pinned base images ship
 ```
