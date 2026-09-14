@@ -88,8 +88,12 @@ def scan(module, command):
     except OSError as e:
         raise CannotCheck("%s: could not run %s: %s" % (module, command[0], e))
     if run.returncode != 0:
-        raise CannotCheck("%s: govulncheck exited %d\n%s"
-                          % (module, run.returncode, run.stderr.strip()))
+        # 3 is the TEXT format's "found something" exit, which -format json never
+        # uses; it means the flag went missing, not that the scan ran and found.
+        hint = " (the text format's findings exit: is -format json still in the recipe?)" \
+            if run.returncode == 3 else ""
+        raise CannotCheck("%s: govulncheck exited %d%s\n%s"
+                          % (module, run.returncode, hint, run.stderr.strip()))
     try:
         objects = stream(run.stdout)
     except ValueError as e:
