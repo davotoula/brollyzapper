@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -23,12 +24,14 @@ import (
 // toolDockerfile is the one statement of the tool image's reference. Dependabot
 // maintains it (its docker entry for that directory, 0vk.58), and every script's
 // TOOL_IMAGE default is read from it at run time, so a bump moves the scripts in
-// the same PR and the tree never states the digest twice.
+// the same PR and no script states the digest (this file's plants read it from
+// the Dockerfile too).
 const toolDockerfile = "tools/sqlite/Dockerfile"
 
 // fromReference is the image a Dockerfile's FIRST `FROM` line names — the same
-// line the scripts' awk reads. A second FROM would be a build stage the scripts
-// have no use for; the first is the base.
+// line the scripts' awk reads. The Dockerfile is single-stage; a second stage or
+// a `FROM --platform=` would change what both read, and toolFrom's pin check
+// fails loudly when it does.
 func fromReference(src string) string {
 	for line := range strings.Lines(src) {
 		fields := strings.Fields(line)
@@ -46,9 +49,9 @@ type logicalLine struct {
 	text string
 }
 
-// joinContinuations joins `\`-continued lines. Four of nwc.sh's thirteen sites
-// put the image on the line AFTER `docker run … \`, so a per-line scan over
-// lines containing `docker run` reads a line with no image on it and passes.
+// joinContinuations joins `\`-continued lines. Three of nwc.sh's eight sites put
+// the image on the line AFTER `docker run … \`, so a per-line scan over lines
+// containing `docker run` reads a line with no image on it and passes.
 func joinContinuations(src string) []logicalLine {
 	var out []logicalLine
 	var cur strings.Builder
@@ -118,10 +121,45 @@ func shellWords(s string) []string {
 // rule loudly, naming the word, rather than passing.
 var dockerRunBooleans = []string{"--rm", "-i", "-t", "-it", "-d", "--init", "--read-only"}
 
-// runImage is the image word of the `docker run` in text — "" when the line has
-// flags and nothing after them, which acceptableImage then refuses.
-func runImage(text string) string {
-	_, after, _ := strings.Cut(text, "docker run ")
+// dockerRunRE finds each `docker run` on a line, however spaced, and the
+// `docker container run` spelling of it (0vk.59 go-review: a literal
+// "docker run " missed both, and a second run after `;` on the same line).
+var dockerRunRE = regexp.MustCompile(`\bdocker\s+(?:container\s+)?run\s`)
+
+// stripComment drops a `#` comment that starts a word outside quotes, so a
+// comment mentioning `docker run` is not read as one. `${#x}` and `a#b` are not
+// comments: the `#` does not start a word.
+func stripComment(text string) string {
+	var quote rune
+	prev := ' '
+	for i, r := range text {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case r == '#' && (prev == ' ' || prev == '\t'):
+			return text[:i]
+		}
+		prev = r
+	}
+	return text
+}
+
+// runImages is the image word of every `docker run` in text; "" for a run whose
+// flags have nothing after them, which acceptableImage then refuses.
+func runImages(text string) []string {
+	var images []string
+	for _, loc := range dockerRunRE.FindAllStringIndex(text, -1) {
+		images = append(images, runImage(text[loc[1]:]))
+	}
+	return images
+}
+
+// runImage is the image word of the arguments after one `docker run`.
+func runImage(after string) string {
 	words := shellWords(after)
 	for i := 0; i < len(words); i++ {
 		w := words[i]
@@ -135,9 +173,13 @@ func runImage(text string) string {
 	return ""
 }
 
-// acceptableImage: a variable (whose value is some other rule's business — the
-// TOOL_IMAGE default below, the compose lint for the stack's), a locally built
-// brollyregtest-* image, or a reference pinned by tag and digest.
+// acceptableImage: a variable, a locally built brollyregtest-* image, or a
+// reference pinned by tag and digest.
+//
+// A VARIABLE IS TRUSTED HERE, and that is a known blind spot, not an oversight:
+// only $TOOL_IMAGE's value is checked (checkToolImageDefault). $SQLITE_IMAGE is
+// a brollyregtest-* name; $LND_IMAGE defaults to a tag with no digest in cap.sh,
+// spend.sh and ipaddr.sh, which this bead did not take on — its report says so.
 func acceptableImage(image string) bool {
 	switch {
 	case strings.HasPrefix(image, "$"):
@@ -152,16 +194,14 @@ func checkScriptImages(scripts map[string]string) []string {
 	var found []string
 	for _, name := range slices.Sorted(maps.Keys(scripts)) {
 		for _, l := range joinContinuations(scripts[name]) {
-			if strings.HasPrefix(strings.TrimSpace(l.text), "#") {
-				continue
-			}
-			if !strings.Contains(l.text, "docker run ") {
-				continue
-			}
-			if image := runImage(l.text); !acceptableImage(image) {
+			for _, image := range runImages(stripComment(l.text)) {
+				if acceptableImage(image) {
+					continue
+				}
 				found = append(found, fmt.Sprintf("%s:%d: `docker run` names image %q; use \"$TOOL_IMAGE\" "+
 					"(read from %s), another variable, a brollyregtest-* image, or a tag@sha256 pin — "+
-					"a bare tag is whatever it means the day the script runs", name, l.line, image, toolDockerfile))
+					"a bare tag is whatever was pulled first, and on a fresh runner whatever it means "+
+					"that day", name, l.line, image, toolDockerfile))
 			}
 		}
 	}
@@ -273,12 +313,19 @@ func TestEveryScriptImageIsPinned(t *testing.T) {
 	for _, p := range checkScriptImages(scripts) {
 		t.Error(p)
 	}
-	if got := scriptsWith(scripts, "docker run "); !slices.Equal(got, dockerRunScripts) {
+	var running []string
+	for _, name := range slices.Sorted(maps.Keys(scripts)) {
+		if dockerRunRE.MatchString(scripts[name]) {
+			running = append(running, name)
+		}
+	}
+	if got := running; !slices.Equal(got, dockerRunScripts) {
 		t.Errorf("scripts running a container are %v, and this file expects %v; the rule above "+
 			"asserts over whatever is there", got, dockerRunScripts)
 	}
 
-	const pinned = "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+	pinned := toolFrom(t) // read, not restated: the plants must not be a second statement of the digest
+	digestOnly := "alpine" + pinned[strings.Index(pinned, "@"):]
 	assertPlants(t, func(src string) []string {
 		return checkScriptImages(map[string]string{"planted.sh": src})
 	}, []plant{
@@ -294,7 +341,14 @@ func TestEveryScriptImageIsPinned(t *testing.T) {
 		{"x=1\ndocker run --rm -v \"$WORK:/w\" \\\n  alpine:3.20 /w/nwctool \"$@\"",
 			"planted.sh:2: `docker run` names image \"alpine:3.20\""},
 		{`docker run --rm --net="container:$srv" alpine:3.20 netstat -tn`, `names image "alpine:3.20"`},
-		{"docker run --rm alpine" + pinned[len("alpine:3.24"):] + " uname -m", `names image "alpine@sha256:`},
+		{"docker run --rm " + digestOnly + " uname -m", `names image "alpine@sha256:`},
+		// go-review: a second run on the line, the other spellings, and a comment.
+		{`docker run --rm "$TOOL_IMAGE" true; docker run --rm alpine:3.20 uname -m`, `names image "alpine:3.20"`},
+		{`x=$(docker run --rm "$TOOL_IMAGE" true && docker run --rm alpine:3.20 uname -m)`, `names image "alpine:3.20"`},
+		{`docker  run --rm alpine:3.20 uname -m`, `names image "alpine:3.20"`},
+		{`docker container run --rm alpine:3.20 uname -m`, `names image "alpine:3.20"`},
+		{`x=1  # docker run alpine:3.20 is what this used to say`, ""},
+		{`echo "a # not a comment"; docker run --rm alpine:3.20 true`, `names image "alpine:3.20"`},
 		// An unknown boolean flag reads the command as the image: loud, not silent.
 		{`docker run --rm --privileged "$TOOL_IMAGE" uname -m`, `names image "uname"`},
 	})
