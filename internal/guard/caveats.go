@@ -98,9 +98,15 @@ const RenewInterval = time.Hour
 //
 // The tick channel is a parameter so the schedule is the caller's and a test
 // costs microseconds — the same shape as the reconciler and the domain probe.
-// It does NOT check on entry: cmd/brollyguard calls EnsureReceiveMacaroon at
+// It does NOT renew on entry: cmd/brollyguard calls EnsureReceiveMacaroon at
 // startup, and a second immediate pass would only double the attempt count on
 // the failing path.
+//
+// It DOES sweep orphaned root keys on entry and after every tick's renewals
+// (2o1). On entry is the startup sweep — cmd/brollyguard starts this loop right
+// after the startup bakes, so no second call site is needed — and after the
+// renewals so a bake's own sweep has run first. See sweepOrphans for why this is
+// safe now and was not in Wave 30.
 //
 // A failure is logged and retried on the next tick. An expiring credential is a
 // state the Node page shows (Status carries ReceiveExpiry); it is never a reason
@@ -126,6 +132,7 @@ func (g *Guard) RunRenewal(ctx context.Context, tick <-chan time.Time) {
 				"error", err.Error())
 		}
 	}
+	g.sweepOrphans(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -135,6 +142,7 @@ func (g *Guard) RunRenewal(ctx context.Context, tick <-chan time.Time) {
 				return
 			}
 			renew()
+			g.sweepOrphans(ctx)
 		}
 	}
 }

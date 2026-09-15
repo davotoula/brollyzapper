@@ -255,8 +255,15 @@ func (g *Guard) removeSpendCredential() error {
 // The three places that end sending — the kill switch's two paths and an
 // external revocation — all do exactly this, and they did it in three slightly
 // different ways. What is kept is returned so the caller can say so.
+//
+// It spares what the RECEIVE credential's sidecar names (2o1), and deliberately
+// not the spend one's: ending sending means revoking the spend credential's key
+// wherever it is recorded, including a key a crashed bake left pending beside a
+// file on disk — that is tna.5 G4, and a kill switch that spared it would not be
+// one. Every caller removes spend.macaroon anyway, which is what the sidecar
+// would have been protecting.
 func (g *Guard) sweepAndForgetSpend(ctx context.Context, pending []uint64) ([]uint64, error) {
-	kept := g.sweepPending(ctx, "spend", pending, 0)
+	kept := g.sweepPending(ctx, "spend", pending, 0, g.sidecarRootKeys(receiveCredential))
 	return kept, g.clearSpendState(kept)
 }
 

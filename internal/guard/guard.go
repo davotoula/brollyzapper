@@ -113,6 +113,15 @@ type Guard struct {
 
 	rotated chan struct{}
 
+	// writeCredential is how the guard writes to the credential volume, and it
+	// is WriteCredential outside a test. A field so a test can interrupt a bake
+	// between its two writes — the crash window 2o1's sweep has to survive —
+	// without a fixture that writes the state behind the guard's back.
+	writeCredential func(path string, data []byte, mode os.FileMode) error
+	// sidecarNoted is which credentials' sidecar problems have been said, so an
+	// hourly sweep says each once. See noteSidecar.
+	sidecarNoted sync.Map
+
 	probeInterval time.Duration
 
 	// bakeMu serialises baking. There are two callers now — the socket's
@@ -180,6 +189,7 @@ func New(cfg *config.Guard, opts Options) (*Guard, error) {
 		log:               log,
 		sleep:             sleep,
 		rotated:           make(chan struct{}),
+		writeCredential:   WriteCredential,
 		probeInterval:     probeInterval,
 	}, nil
 }
@@ -356,7 +366,18 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 	if err := lnd.RequireCaveatValues(macaroon, g.ipCaveatValue(), expiry); err != nil {
 		return fmt.Errorf("guard: the %s macaroon failed verification: %w", c.kind, err)
 	}
-	if err := WriteCredential(g.credentialPath(c.file), macaroon, 0o600); err != nil {
+	// THE SIDECAR FIRST, then the macaroon (2o1). The sidecar names the root key
+	// this credential is about to be baked under, so an unattended sweep can tell
+	// the key a file on disk depends on from an orphan without parsing a macaroon
+	// (ADR 0001). The order is the whole guarantee: a crash between the two
+	// writes leaves the OLD macaroon beside a sidecar naming an unused key — which
+	// only spares that key until the next bake — and never a NEW macaroon beside
+	// a sidecar that does not name it, which is the file a sweep would break.
+	if err := g.writeCredential(g.credentialPath(c.file)+RootKeySidecarSuffix,
+		[]byte(strconv.FormatUint(rootKeyID, 10)), 0o600); err != nil {
+		return err
+	}
+	if err := g.writeCredential(g.credentialPath(c.file), macaroon, 0o600); err != nil {
 		return err
 	}
 	// ONE state write records the new key and remembers the old one.
@@ -413,7 +434,13 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 	// keys this guard made and nothing is using. All of them, because a bake
 	// that failed after BakeMacaroon leaves one behind and the next bake is the
 	// only thing that will ever look.
-	kept := g.sweepPending(ctx, c.kind, append(previous.PendingRootKeyIDs, previousKey), rootKeyID)
+	//
+	// Sparing what either credential's sidecar names (2o1): a bake of the OTHER
+	// credential that died in G3's window left its live key in this same pending
+	// set, and a receive bake that swept it would break sending, or the reverse.
+	// This credential's own sidecar names rootKeyID, which is spared anyway.
+	kept := g.sweepPending(ctx, c.kind, append(previous.PendingRootKeyIDs, previousKey), rootKeyID,
+		g.sidecarRootKeys(receiveCredential, spendCredential))
 	if err := g.state.update(func(st *State) {
 		st.PendingRootKeyIDs = slices.DeleteFunc(st.PendingRootKeyIDs, func(id uint64) bool {
 			return id != rootKeyID && !slices.Contains(kept, id)
@@ -501,10 +528,15 @@ func (g *Guard) ipCaveatValue() string {
 // were gone and the other the keys that were kept. An inversion in either is
 // silent and produces exactly the d24.10 bug this replaced: a live root key
 // with no record of it anywhere.
-func (g *Guard) sweepPending(ctx context.Context, kind string, ids []uint64, current uint64) []uint64 {
+//
+// An id in spare is KEPT without being touched: a credential on disk depends on
+// it (2o1). Kept rather than dropped, so it is still pending — and swept — once
+// that credential is re-baked and nothing names it any more.
+func (g *Guard) sweepPending(ctx context.Context, kind string, ids []uint64, current uint64,
+	spare []uint64) []uint64 {
 	var kept []uint64
 	for _, orphan := range ids {
-		if !g.revokePrevious(ctx, kind, orphan, current) {
+		if slices.Contains(spare, orphan) || !g.revokePrevious(ctx, kind, orphan, current) {
 			kept = append(kept, orphan)
 		}
 	}
@@ -532,22 +564,32 @@ func (g *Guard) revokePrevious(ctx context.Context, kind string, previous, curre
 	if previous == 0 || previous == current {
 		return true // nothing of ours is left honouring it
 	}
-	deleted, err := g.node.DeleteMacaroonID(ctx, previous)
+	gone, deleted := g.revokeRootKey(ctx, kind, previous)
+	if deleted {
+		g.audit(ctx, slog.LevelInfo, "previous "+kind+" macaroon revoked",
+			logging.EventMacaroonRevoke, nil)
+	}
+	return gone
+}
+
+// revokeRootKey asks the node to delete one root key, and reports whether it is
+// GONE (see revokePrevious) and whether this call is what DELETED it. It audits
+// nothing: the operator-triggered sweeps write a row per key, and the unattended
+// one writes one row per sweep, so the row is the caller's.
+func (g *Guard) revokeRootKey(ctx context.Context, kind string, id uint64) (gone, deleted bool) {
+	deleted, err := g.node.DeleteMacaroonID(ctx, id)
 	if err != nil {
 		g.log.Warn("could not revoke the previous root key; a stolen copy of the old "+
 			"credential stays valid until it expires, and the id is kept so a later sweep "+
 			"can try again", "kind", kind, "error", err.Error())
-		return false
+		return false, false
 	}
 	if !deleted {
 		// The node is not listing it. Nothing more to do about it, ever.
 		g.log.Warn("the node did not delete the previous root key; it was not listing it",
 			"kind", kind)
-		return true
 	}
-	g.audit(ctx, slog.LevelInfo, "previous "+kind+" macaroon revoked",
-		logging.EventMacaroonRevoke, nil)
-	return true
+	return true, deleted
 }
 
 // EnsureReceiveMacaroon bakes the receive macaroon when the credential volume

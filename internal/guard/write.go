@@ -47,3 +47,7 @@ func WriteCredential(path string, data []byte, mode os.FileMode) error {
 	}
 	return nil
 }
+
+// RootKeySidecarSuffix names the file beside a credential that records the root
+// key it was baked under (2o1).
+const RootKeySidecarSuffix = ".rootkey"
