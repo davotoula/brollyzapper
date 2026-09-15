@@ -121,9 +121,12 @@ func inputs(t *testing.T) preflight.Inputs {
 				ReceiveRootKeyChecked: true, ReceiveRootKeyListed: true}, nil
 		},
 		SpendMacaroon: func() ([]byte, bool) { return nil, false },
-		// A healthy receive credential, as the guard bakes it (§6, d46.26).
+		// A healthy receive credential, as the guard bakes it (§6, d46.26). Its
+		// expiry is far off because one test runs the fixture on the wall clock
+		// (the inventory's Now row, as0.11 go-review): a near date turns that red
+		// the day it passes.
 		ReceiveMacaroon: func() ([]byte, bool) {
-			return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2026-12-01T00:00:00Z"), true
+			return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2099-01-01T00:00:00Z"), true
 		},
 		ServerIP: netip.MustParseAddr("10.21.0.17"),
 		DataDir:  dataDir,
@@ -369,7 +372,7 @@ func TestAnUnwiredReportChecksNothing(t *testing.T) {
 // field whose absence nobody decided about, and the reflection below names it.
 func TestEachUnwiredAccessorLeavesExactlyItsRowsNotChecked(t *testing.T) {
 	spend := func() ([]byte, bool) {
-		return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2026-12-01T00:00:00Z", lnd.GuardCaveat("n")), true
+		return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2099-01-01T00:00:00Z", lnd.GuardCaveat("n")), true
 	}
 	spendStatus := func(context.Context) (lnd.BrokerStatus, error) {
 		return lnd.BrokerStatus{LNDReachable: true, ReceiveMacaroonPresent: true, ReceiveRootKeyChecked: true,
