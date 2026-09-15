@@ -187,7 +187,7 @@ func acceptableImage(image string) bool {
 	switch {
 	case imageVariableRE.MatchString(image):
 		return true
-	case strings.HasPrefix(image, "brollyregtest-") && !strings.ContainsAny(image, ":/@"):
+	case localBuildName(image):
 		return true
 	}
 	return pinnedImage(image)
@@ -212,17 +212,17 @@ func checkScriptImages(scripts map[string]string) []string {
 }
 
 // imageStatement is where an image variable's default must come from: the one
-// statement of that image in the tree, and the reference it holds.
+// statement of that image in the tree, and the reference it holds — or, for a
+// local build, nothing to pin at all.
 type imageStatement struct {
 	from string // for the message: "tools/sqlite/Dockerfile's FROM reference"
 	want string
+	// local is an image a script BUILDS (rotation.sh: `docker build -t
+	// "$SQLITE_IMAGE" tools/sqlite`): there is no registry reference, so the
+	// default must be a brollyregtest-* name, and a literal name has no read that
+	// can come back empty, so it carries no guard.
+	local bool
 }
-
-// localBuilds are image variables whose default is an image a script BUILDS
-// (rotation.sh: `docker build -t "$SQLITE_IMAGE" tools/sqlite`), so there is no
-// registry reference to pin: the default must be a brollyregtest-* name, which is
-// what acceptableImage accepts in a `docker run` too.
-var localBuilds = []string{"SQLITE_IMAGE"}
 
 var (
 	imageAssignRE = regexp.MustCompile(`^([A-Z][A-Z0-9_]*_IMAGE)=`)
@@ -231,53 +231,55 @@ var (
 	imageVariableRE = regexp.MustCompile(`^\$(?:[A-Z][A-Z0-9_]*_IMAGE|\{[A-Z][A-Z0-9_]*_IMAGE\})$`)
 )
 
+// localBuildName is an image a script builds itself: brollyregtest-*, with no
+// registry, tag or digest.
+func localBuildName(image string) bool {
+	return strings.HasPrefix(image, "brollyregtest-") && !strings.ContainsAny(image, ":/@")
+}
+
 // checkImageDefaults runs each image variable's definition in a script — its
 // assignment and, for a pulled image, the guard after it, nothing else — in dir
 // with the variable unset, and requires what it prints. Executed, not matched as
 // text: the assertion is what the default RESOLVES to, which a string compare
 // against one blessed spelling of the awk would not prove.
 //
-// Every *_IMAGE the script assigns or reads is judged, so an image variable this
-// file has no statement for is refused by name rather than trusted.
+// Every *_IMAGE the script assigns or reads outside a comment is judged, so an
+// image variable this file has no statement for is refused by name rather than
+// trusted.
 func checkImageDefaults(name, src, dir string, statements map[string]imageStatement) []string {
 	vars := map[string]bool{}
-	for _, m := range imageUseRE.FindAllStringSubmatch(src, -1) {
-		vars[m[1]] = true
-	}
-	for line := range strings.Lines(src) {
-		if m := imageAssignRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+	for _, l := range joinContinuations(src) {
+		code := stripComment(l.text)
+		for _, m := range imageUseRE.FindAllStringSubmatch(code, -1) {
+			vars[m[1]] = true
+		}
+		if m := imageAssignRE.FindStringSubmatch(strings.TrimSpace(code)); m != nil {
 			vars[m[1]] = true
 		}
 	}
 	var found []string
 	for _, v := range slices.Sorted(maps.Keys(vars)) {
-		local := slices.Contains(localBuilds, v)
-		statement, pulled := statements[v]
-		if !local && !pulled {
+		statement, known := statements[v]
+		if !known {
 			found = append(found, fmt.Sprintf("%s: uses $%s, which is not an image variable this file "+
-				"knows; give it a statement to resolve to in imageStatements, or a brollyregtest-* "+
-				"build in localBuilds", name, v))
+				"knows; give it a statement to resolve to in imageStatements", name, v))
 			continue
 		}
 		var def []string
-		guards := 0
+		assigns, guards := 0, 0
 		for line := range strings.Lines(src) {
-			t := strings.TrimSpace(line)
-			switch {
+			switch t := strings.TrimSpace(line); {
 			case strings.HasPrefix(t, v+"="):
-				def = append(def, t)
+				def, assigns = append(def, t), assigns+1
 			case strings.HasPrefix(t, `[ -n "$`+v+`" ]`):
-				def = append(def, t)
-				guards++
+				def, guards = append(def, t), guards+1
 			}
 		}
-		// A pulled image's default can come back empty from its read, so it carries
-		// a guard; a local build's is a literal name and has nothing to guard.
 		shape, wantGuards := "one "+v+"= line and one [ -n \"$"+v+"\" ] guard", 1
-		if local {
+		if statement.local {
 			shape, wantGuards = "one "+v+"= line", 0
 		}
-		if len(def)-guards != 1 || guards != wantGuards {
+		if assigns != 1 || guards != wantGuards {
 			found = append(found, fmt.Sprintf("%s: uses $%s, so it must define it with %s; found %d such lines",
 				name, v, shape, len(def)))
 			continue
@@ -290,16 +292,14 @@ func checkImageDefaults(name, src, dir string, statements map[string]imageStatem
 			found = append(found, fmt.Sprintf("%s: its %s definition does not resolve (%v): %s", name, v, err, out))
 			continue
 		}
-		got := string(out)
-		switch {
-		case local && !(strings.HasPrefix(got, "brollyregtest-") && !strings.ContainsAny(got, ":/@")):
+		// A pulled want is pinned already: toolFrom and lndImage refuse one that is not.
+		switch got := string(out); {
+		case statement.local && !localBuildName(got):
 			found = append(found, fmt.Sprintf("%s: %s defaults to %q, which is not a brollyregtest-* local build",
 				name, v, got))
-		case pulled && got != statement.want:
+		case !statement.local && got != statement.want:
 			found = append(found, fmt.Sprintf("%s: %s defaults to %q, not %s %q; read it from there so the "+
 				"digest is stated once", name, v, got, statement.from, statement.want))
-		case pulled && !pinnedImage(got):
-			found = append(found, fmt.Sprintf("%s: %s defaults to %q, which is not tag@sha256-pinned", name, v, got))
 		}
 	}
 	return found
@@ -351,12 +351,13 @@ func lndImage(t *testing.T) string {
 	return ref
 }
 
-// imageStatements is every pulled image variable's one statement.
+// imageStatements is every image variable a script may use, and what it must resolve to.
 func imageStatements(t *testing.T) map[string]imageStatement {
 	t.Helper()
 	return map[string]imageStatement{
-		"TOOL_IMAGE": {from: toolDockerfile + "'s FROM reference", want: toolFrom(t)},
-		"LND_IMAGE":  {from: composePath + "'s parsed lnd image", want: lndImage(t)},
+		"TOOL_IMAGE":   {from: toolDockerfile + "'s FROM reference", want: toolFrom(t)},
+		"LND_IMAGE":    {from: composePath + "'s parsed lnd image", want: lndImage(t)},
+		"SQLITE_IMAGE": {local: true},
 	}
 }
 
@@ -469,17 +470,19 @@ func TestEveryImageVariableResolvesToItsOneStatement(t *testing.T) {
 	check := func(src string) []string {
 		return checkImageDefaults("planted.sh", src, ".", statements)
 	}
-	const toolGuard = `[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image" >&2; exit 1; }`
+	guard := func(v string) string {
+		return `[ -n "$` + v + `" ] || { echo "FAIL could not read ` + v + `" >&2; exit 1; }`
+	}
+	use := func(v string) string { return "\ndocker run --rm \"$" + v + "\" true\n" }
 	toolDerive := func(path string) string {
 		return `TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' ` + path + ` 2>/dev/null || true)}"`
 	}
-	toolUse := "\ndocker run --rm \"$TOOL_IMAGE\" uname -m\n"
-	const lndGuard = `[ -n "$LND_IMAGE" ] || { echo "FAIL could not read the LND image" >&2; exit 1; }`
 	lndDerive := func(path string) string {
 		return `LND_IMAGE="${LND_IMAGE:-$(awk '$1 == "x-lnd-common:" { in_lnd = 1; next } /^[^ #]/ { in_lnd = 0 } ` +
 			`in_lnd && $1 == "image:" { print $2; exit }' ` + path + ` 2>/dev/null || true)}"`
 	}
-	lndUse := "\ndocker run --rm --entrypoint sh \"$LND_IMAGE\" -c true\n"
+	toolGuard, toolUse := guard("TOOL_IMAGE"), use("TOOL_IMAGE")
+	lndGuard, lndUse := guard("LND_IMAGE"), use("LND_IMAGE")
 	assertPlants(t, check, []plant{
 		{toolDerive(toolDockerfile) + "\n" + toolGuard + toolUse, ""},
 		// 0vk.59 criterion 5: a default that is not the Dockerfile's.
@@ -496,6 +499,8 @@ func TestEveryImageVariableResolvesToItsOneStatement(t *testing.T) {
 		// A local build is a brollyregtest-* name, and nothing else.
 		{"SQLITE_IMAGE=brollyregtest-sqlite\ndocker run --rm \"$SQLITE_IMAGE\" /data/db.sqlite\n", ""},
 		{"SQLITE_IMAGE=keinos/sqlite3:latest\ndocker run --rm \"$SQLITE_IMAGE\" /data/db.sqlite\n", "not a brollyregtest-* local build"},
+		// A comment naming an image variable is not a use of one.
+		{"# was $RELAY_IMAGE once\n" + toolDerive(toolDockerfile) + "\n" + toolGuard + toolUse, ""},
 		// An image variable nobody wrote a statement for is refused, not trusted.
 		{`RELAY_IMAGE="${RELAY_IMAGE:-dockurr/strfry:latest}"` + "\ndocker run --rm \"$RELAY_IMAGE\" true\n", "not an image variable this file knows"},
 	})

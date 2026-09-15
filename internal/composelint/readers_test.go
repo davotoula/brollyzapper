@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -37,6 +38,10 @@ import (
 
 // lintDirs are the three directories whose tests are the lints, from here.
 var lintDirs = []string{"../../deploy", "../../umbrel", "../../regtest"}
+
+// skippedDirs are never walked by either rule. data/ is regtest's gitignored
+// runtime state of a stack (bitcoind, LND) — never source, and thousands of files.
+var skippedDirs = []string{"data", "testdata", "vendor"}
 
 // fileReaders is every call that turns a path into content, by the name it is
 // called under and the index of its path argument. An "os." name matches the os
@@ -115,17 +120,16 @@ func scanReads(t *testing.T, pkg []sourceFile) (refused, all []readCall) {
 				}
 				arg := call.Args[argAt]
 				rc := readCall{
-					At:   fset.Position(call.Pos()).String(),
-					Call: types.ExprString(call),
-					Kind: "computed",
+					At:    fset.Position(call.Pos()).String(),
+					Call:  types.ExprString(call),
+					Kind:  "computed",
+					Names: stringParts(arg, consts),
 				}
-				if v, ok := stringValue(arg, consts); ok {
-					rc.Kind, rc.Names = "const", []string{v}
+				if _, ok := stringValue(arg, consts, 0); ok {
+					rc.Kind = "const"
 					if _, lit := arg.(*ast.BasicLit); lit {
 						rc.Kind = "literal"
 					}
-				} else {
-					rc.Names = stringParts(arg, consts)
 				}
 				all = append(all, rc)
 				if slices.ContainsFunc(rc.Names, isComposeName) {
@@ -187,10 +191,7 @@ func collectConsts(gen *ast.GenDecl, into map[string]ast.Expr) {
 // VARIABLE that shadows a constant is not modelled, and can only make this
 // judge a computed path as the constant — a false red, never a false green.
 func localConsts(body *ast.BlockStmt, pkg map[string]ast.Expr) map[string]ast.Expr {
-	out := map[string]ast.Expr{}
-	for k, v := range pkg {
-		out[k] = v
-	}
+	out := maps.Clone(pkg)
 	ast.Inspect(body, func(n ast.Node) bool {
 		if decl, ok := n.(*ast.DeclStmt); ok {
 			if gen, ok := decl.Decl.(*ast.GenDecl); ok {
@@ -203,13 +204,15 @@ func localConsts(body *ast.BlockStmt, pkg map[string]ast.Expr) map[string]ast.Ex
 }
 
 // stringValue is the value of a constant string expression — a literal, a named
-// constant, or a concatenation of them — and whether it is one.
-func stringValue(e ast.Expr, consts map[string]ast.Expr) (string, bool) {
-	return stringValueDepth(e, consts, 0)
-}
-
-func stringValueDepth(e ast.Expr, consts map[string]ast.Expr, depth int) (string, bool) {
-	if depth > 16 { // a constant defined in terms of itself does not compile; this is only a guard
+// constant, or a concatenation of them — and whether it is one. Call it with depth
+// 0.
+//
+// THE DEPTH BOUND IS NOT DECORATION. localConsts lays a function's constants over
+// the package's by name, so `const dir = dir + "/x"` — legal Go, the right-hand
+// dir being the package's — resolves here to itself. The bound turns that into
+// "not a constant" (listed as computed) instead of a hang.
+func stringValue(e ast.Expr, consts map[string]ast.Expr, depth int) (string, bool) {
+	if depth > 16 {
 		return "", false
 	}
 	switch e := e.(type) {
@@ -221,16 +224,16 @@ func stringValueDepth(e ast.Expr, consts map[string]ast.Expr, depth int) (string
 		return v, err == nil
 	case *ast.Ident:
 		if def, ok := consts[e.Name]; ok {
-			return stringValueDepth(def, consts, depth+1)
+			return stringValue(def, consts, depth+1)
 		}
 	case *ast.ParenExpr:
-		return stringValueDepth(e.X, consts, depth+1)
+		return stringValue(e.X, consts, depth+1)
 	case *ast.BinaryExpr:
 		if e.Op != token.ADD {
 			return "", false
 		}
-		l, lok := stringValueDepth(e.X, consts, depth+1)
-		r, rok := stringValueDepth(e.Y, consts, depth+1)
+		l, lok := stringValue(e.X, consts, depth+1)
+		r, rok := stringValue(e.Y, consts, depth+1)
 		return l + r, lok && rok
 	}
 	return "", false
@@ -246,7 +249,7 @@ func stringParts(e ast.Expr, consts map[string]ast.Expr) []string {
 		if !ok {
 			return true
 		}
-		if v, ok := stringValue(expr, consts); ok {
+		if v, ok := stringValue(expr, consts, 0); ok {
 			out = append(out, v)
 			return false
 		}
@@ -257,9 +260,6 @@ func stringParts(e ast.Expr, consts map[string]ast.Expr) []string {
 
 // lintPackages is every _test.go under the three lint directories, grouped by
 // the directory — the package — it is in.
-//
-// data/ is skipped by name: regtest's is the gitignored runtime state of a stack
-// (bitcoind, LND), never source, and can hold thousands of files.
 func lintPackages(t *testing.T) map[string][]sourceFile {
 	t.Helper()
 	pkgs := map[string][]sourceFile{}
@@ -269,7 +269,7 @@ func lintPackages(t *testing.T) map[string][]sourceFile {
 				return err
 			}
 			if d.IsDir() {
-				if name := d.Name(); name == "data" || name == "testdata" || name == "vendor" {
+				if slices.Contains(skippedDirs, d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -309,13 +309,7 @@ func TestNoLintReadsComposeText(t *testing.T) {
 	}
 	t.Logf("scanned %d files: %s", len(scanned), strings.Join(scanned, ", "))
 
-	for _, dir := range slices.Sorted(func(yield func(string) bool) {
-		for k := range pkgs {
-			if !yield(k) {
-				return
-			}
-		}
-	}) {
+	for _, dir := range slices.Sorted(maps.Keys(pkgs)) {
 		refused, all := scanReads(t, pkgs[dir])
 		for _, rc := range refused {
 			t.Errorf("%s: %s reads a compose file's text (%q); read it through composelint.Load "+
@@ -340,7 +334,7 @@ func TestEveryComposeFileIsNamedAsOne(t *testing.T) {
 				return err
 			}
 			if d.IsDir() {
-				if d.Name() == "data" {
+				if slices.Contains(skippedDirs, d.Name()) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -400,6 +394,8 @@ func TestTheComposeReadRuleCatches(t *testing.T) {
 		{name: "os under another import name", body: `fsos.OpenFile("compose.yaml", 0, 0)`, refused: `fsos.OpenFile("compose.yaml", 0, 0)`},
 		{name: "a read outside any function", body: `_ = 0`,
 			extra: "package lint\n\nimport \"os\"\n\nvar read = func() { os.ReadFile(\"docker-compose.yml\") }\n", refused: `os.ReadFile("docker-compose.yml")`},
+		{name: "a local const defined from the package const it shadows terminates, listed", body: "const dir = dir + \"/x\"\n\tos.ReadFile(dir)",
+			extra: "package lint\n\nconst dir = \"../deploy\"\n", computed: true},
 		{name: "a script is not compose", body: `os.ReadFile("exports.sh")`},
 		{name: "the Umbrel manifest is YAML and not compose", body: "const name = \"umbrel-app.yml\"\n\treadPackageFile(t, name)"},
 		{name: "a variable is listed, not judged", body: `name := t.Name()` + "\n\tos.ReadFile(name)", computed: true},
