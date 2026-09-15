@@ -7,8 +7,8 @@ would silently fall back to whatever the renderer happens to have. So the glyphs
 are cut from Archivo ExtraBold here and emitted as path data.
 
 The master, the favicon and the GitHub social preview come out of ONE set of
-constants below, so they cannot drift apart; the favicon differs only in how many
-bolts it draws, and the social preview only in the field it is centred on.
+constants below, so they cannot drift apart; the favicon differs in its bolts and
+description, and the social preview draws the three-bolt mark at 2x on a wider field.
 
 Design and the reasoning behind the fixed geometry:
 the icon design notes (private)
@@ -16,9 +16,10 @@ the icon design notes (private)
 Nothing here runs in CI. The four committed outputs (icon.svg, favicon.svg,
 apple-touch-icon.png, social-preview.svg) are build-once artifacts, so no
 rasteriser and no font download is a build dependency of the project — they are
-dependencies of *changing the mark*, which is rare and deliberate.
-social-preview.png is rendered beside its SVG but gitignored: it is uploaded by
-hand in the repository's settings, not read from the tree.
+dependencies of running this script, which is rare and deliberate. A rasteriser is
+needed on every run for social-preview.png, which is rendered beside its SVG but
+gitignored (it is uploaded by hand in the repository's settings, not read from the
+tree), and for the committed touch icon only when the mark changes.
 
 Requires fontTools (pip install fonttools) and, for the PNGs, any one of
 rsvg-convert, sips, inkscape or ImageMagick.
@@ -165,8 +166,8 @@ def build(bolts, title, desc, width=MARK_PX, height=MARK_PX, mark_scale=1):
 
 TOUCH_ICON_PX = 180
 
-# In preference order. rsvg-convert first because it is the one that is the same
-# on every machine; sips is macOS-only but needs no install, and takes only the
+# In preference order. rsvg-convert first because it is the one available on
+# every platform; sips is macOS-only but needs no install, and takes only the
 # longer edge (-Z), which keeps a non-square SVG's aspect, so it is given max(w, h).
 # Rasterisers do not agree to the byte, which is why main() re-renders the committed
 # PNG only when the mark itself changed.
@@ -194,7 +195,8 @@ def rasterise(src, dst, width, height):
 def main():
     ensure_font()
 
-    # README.md's <img alt> repeats this description; change the two together.
+    # README.md's <img alt> carries this description, prefixed "BrollyZapper: ";
+    # change the two together.
     three_bolts = "An upturned umbrella catching three lightning bolts, marked BZ"
     icon = build(BOLTS_THREE, "BrollyZapper", f"{three_bolts}.")
     favicon = build(
@@ -211,13 +213,16 @@ def main():
         SOCIAL_MARK_SCALE,
     )
 
-    master = HERE / "icon.svg"
-    previous_icon = master.read_text() if master.exists() else None
-    master.write_text(icon)
     favicon_svg = STATIC / "favicon.svg"
     favicon_svg.write_text(favicon)
     social_svg = HERE / "social-preview.svg"
     social_svg.write_text(social)
+    # The master is written last, immediately before the render it gates: a failure
+    # between writing it and rendering the touch icon would otherwise leave a changed
+    # master on disk, and the next run would skip the PNG as up to date.
+    master = HERE / "icon.svg"
+    previous_icon = master.read_text() if master.exists() else None
+    master.write_text(icon)
 
     # The committed touch icon is re-rendered only when the mark changed. Rasterisers
     # differ to the byte, so rendering it on every run made a re-run on a machine with
@@ -243,7 +248,7 @@ def main():
 
     for path in (master, favicon_svg, touch_icon, social_svg, social_png):
         print(f"{path.relative_to(ROOT)}: {path.stat().st_size} bytes")
-    print(f"(PNGs rendered with {tool})")
+    print(f"({social_png.name} rendered with {tool})")
 
 
 if __name__ == "__main__":
