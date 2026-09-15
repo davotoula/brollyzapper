@@ -355,6 +355,13 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 					raw, err := lnd.VolumeCredentials(cfg.CredentialsDir, lnd.SpendMacaroon).Macaroon()
 					return raw, err == nil
 				},
+				// The credential the receive client presents, read through the SAME
+				// source it dials with, so the rows describe the file in use
+				// (`0vk.11`).
+				ReceiveMacaroon: func() ([]byte, bool) {
+					raw, err := receiveCredentials.Macaroon()
+					return raw, err == nil
+				},
 				ServerIP: serverIP,
 				DataDir:  cfg.DataDir,
 				Domain: func(ctx context.Context) (string, bool, string) {

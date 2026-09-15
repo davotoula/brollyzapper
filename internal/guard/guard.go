@@ -809,11 +809,20 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 	} else {
 		g.observe(ctx, nil)
 		status.LNDReachable = true
-		if state.SpendRootKeyID != 0 {
-			status.SpendRootKeyRecorded = true
+		status.SpendRootKeyRecorded = state.SpendRootKeyID != 0
+		// ONE ListMacaroonIDs for both credentials, and only when there is a key to
+		// look for: a receive-only install now asks on every Status where it used to
+		// ask never, which is one read-only local call per ten-second page cache.
+		if state.SpendRootKeyID != 0 || state.ReceiveRootKeyID != 0 {
 			if ids, err := g.node.ListMacaroonIDs(ctx); err == nil {
-				status.SpendRootKeyChecked = true
-				status.SpendRootKeyListed = slices.Contains(ids, state.SpendRootKeyID)
+				if state.SpendRootKeyID != 0 {
+					status.SpendRootKeyChecked = true
+					status.SpendRootKeyListed = slices.Contains(ids, state.SpendRootKeyID)
+				}
+				if state.ReceiveRootKeyID != 0 {
+					status.ReceiveRootKeyChecked = true
+					status.ReceiveRootKeyListed = slices.Contains(ids, state.ReceiveRootKeyID)
+				}
 			}
 		}
 	}

@@ -117,6 +117,8 @@ func (c *SocketClient) Status(ctx context.Context) (lnd.BrokerStatus, error) {
 		SpendRootKeyListed:         resp.Status.SpendRootKeyListed,
 		SpendRootKeyChecked:        resp.Status.SpendRootKeyChecked,
 		SpendRootKeyRecorded:       resp.Status.SpendRootKeyRecorded,
+		ReceiveRootKeyChecked:      resp.Status.ReceiveRootKeyChecked,
+		ReceiveRootKeyListed:       resp.Status.ReceiveRootKeyListed,
 		SendingPermitted:           resp.Status.SendingPermitted,
 		SendingAllowedByDeployment: resp.Status.SendingAllowedByDeployment,
 		SendingLatched:             resp.Status.SendingLatched,

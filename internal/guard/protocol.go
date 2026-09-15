@@ -137,6 +137,18 @@ type Status struct {
 	// payment: a transient RPC error would tell the operator their macaroon "has
 	// already been revoked", which is a diagnosis pointing at the wrong repair.
 	SpendRootKeyChecked bool `json:"spend_root_key_checked"`
+	// ReceiveRootKeyChecked and ReceiveRootKeyListed are the same question
+	// asked about the RECEIVE credential's root key (`0vk.11`), for §11's
+	// receive rows.
+	//
+	// TWO FIELDS ON THE EXISTING OPERATION, not a new one: the answer is state
+	// the guard already holds, and the operation list is the boundary. Additive,
+	// so a guard that predates them decodes as false/false — which the server
+	// reads as NOT CHECKED, never as revoked (d46.25). There is no Recorded half:
+	// a receive credential with no recorded key is one the guard re-bakes on its
+	// own (d46.26), so the only answers the page needs are "asked" and "listed".
+	ReceiveRootKeyChecked bool `json:"receive_root_key_checked,omitempty"`
+	ReceiveRootKeyListed  bool `json:"receive_root_key_listed,omitempty"`
 	// SendingPermitted is whether this install may mint spend authority at all:
 	// the DEPLOYMENT ceiling and the OPERATOR's latch, together (tna.4, `06v`).
 	//
