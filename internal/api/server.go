@@ -314,7 +314,6 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		invoices:       opts.Invoices,
 		cap:            OpenInvoiceCap,
 		now:            opts.Now,
-		log:            opts.Log,
 	}
 	payRequest, callback := opts.LNURL.Handlers()
 	public := NewPublicMux(
@@ -337,7 +336,10 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		// The callback is the one that mints, so it is the one that is limited.
 		// The token is stamped OUTSIDE the gate so a refusal still carries it
 		// and the prober can tell "us, refusing" from "somebody else answering".
-		WithProbeToken(opts.ProbeToken, gate.Middleware(callback)),
+		//
+		// And the request id OUTSIDE both, so every line the gate and the handler
+		// write about this request carries it (o34.8).
+		withRequestID(opts.Log, WithProbeToken(opts.ProbeToken, gate.Middleware(callback))),
 	)
 
 	admin := NewAdminMux()

@@ -2,9 +2,32 @@ package api
 
 import (
 	"context"
+	"log/slog"
+	"net/http"
 
 	"github.com/davotoula/brollyzapper/internal/lnurl"
+	"github.com/davotoula/brollyzapper/internal/logging"
 )
+
+// withRequestID gives one public callback request its req_id, on a logger every
+// line of that request reaches through logging.FromContext (o34.8).
+//
+// §12 has had the helper since the foundation wave and nothing called it: the
+// LNURL callback — the first leg of a zap, the one a payment hash is born on —
+// logged without any request identity at all, so the gate's lines about a
+// request could not be joined to the line recording what it minted. OUTERMOST on
+// the callback, so the gate's own lines, which are written before any invoice
+// exists and so can never carry its hash, carry the id that joins them to the
+// mint line that does.
+//
+// The callback only. The lnurlp document mints nothing and has no hash to join,
+// and admin requests are an operator's own clicks.
+func withRequestID(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, _ := logging.WithRequestID(r.Context(), log)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
 type sessionContextKey struct{}
 

@@ -80,6 +80,10 @@ type PayResponse struct {
 type CallbackResponse struct {
 	PaymentRequest string   `json:"pr"`
 	Routes         []string `json:"routes"`
+	// PaymentHash is the minted invoice's hash, for the caller's log line and
+	// NEVER the wire (o34.8): LUD-06's response has two fields, and the bolt11
+	// already commits to the hash for anyone who decodes it.
+	PaymentHash string `json:"-"`
 }
 
 // identityTTL is how long one read of the configured identity is reused.
@@ -313,5 +317,6 @@ func (s *Service) Callback(ctx context.Context, name string, query url.Values,
 	}
 
 	// routes is always empty; it exists because LUD-06 requires the field.
-	return CallbackResponse{PaymentRequest: added.PaymentRequest, Routes: []string{}}, nil
+	return CallbackResponse{PaymentRequest: added.PaymentRequest, Routes: []string{},
+		PaymentHash: invoice.PaymentHash}, nil
 }
