@@ -108,11 +108,11 @@ The canonical file now pins the **0.1.21** images by digest — verified 2026-09
 stack brought up from empty volumes, both containers reporting `version 0.1.21`. `smoke.sh` passes
 as-is (clean chain, mint, pay, credit once, receipt read back off the relay), and so does every
 `authorise.sh` criterion, including §7's refusal naming the cap to move, which 0.1.16 could not
-pass. Before it, 0.1.10 (2026-08-22) and 0.1.16 (2026-08-31) were proved by `smoke.sh` alone from
-empty volumes, and before them it read 0.1.5, the first release publishing zap receipts. **Every
+pass. Before it, 0.1.10 (2026-08-22) and 0.1.16 (2026-08-31) were proved by `smoke.sh` from empty
+volumes, and before them it read 0.1.5, the first release publishing zap receipts. **Every
 bump is re-proved by a run rather than assumed** — a pin nobody has exercised is a pin that
-documents a version instead of testing one. The build override exists to run the *working tree* instead, for changes that have
-not been released yet.
+documents a version instead of testing one. The build override exists to run the *working tree*
+instead, for changes that have not been released yet.
 
 Everything else is pinned by digest too — LND, bitcoind and both relays — and
 `stack_lint_test.go` fails if any image goes back to a bare tag.
