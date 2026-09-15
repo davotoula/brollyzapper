@@ -140,11 +140,14 @@ def build(bolts, title, desc):
 
 TOUCH_ICON_PX = 180
 
-# In preference order. rsvg-convert first because it is the one that is the same
-# on every machine; sips is macOS-only but needs no install.
+# In preference order. sips first because the committed apple-touch-icon.png was
+# rendered by it: rasterisers do not agree to the byte, so with rsvg-convert also
+# installed, preferring it made a plain re-run rewrite a PNG whose mark had not changed.
+# Reorder only together with re-rendering the committed PNG by the new first choice.
+# sips is macOS-only but needs no install.
 RASTERISERS = (
-    ("rsvg-convert", lambda src, dst, px: ["rsvg-convert", "-w", str(px), "-h", str(px), str(src), "-o", str(dst)]),
     ("sips", lambda src, dst, px: ["sips", "-s", "format", "png", "-Z", str(px), str(src), "--out", str(dst)]),
+    ("rsvg-convert", lambda src, dst, px: ["rsvg-convert", "-w", str(px), "-h", str(px), str(src), "-o", str(dst)]),
     ("inkscape", lambda src, dst, px: ["inkscape", str(src), "-w", str(px), "-h", str(px), "-o", str(dst)]),
     ("magick", lambda src, dst, px: ["magick", "-background", "none", str(src), "-resize", f"{px}x{px}", str(dst)]),
 )
