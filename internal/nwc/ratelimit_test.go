@@ -255,6 +255,32 @@ func TestARateLimitFloodIsAuditedOnce(t *testing.T) {
 	}
 }
 
+// Rate-limit episodes do not spend the capability refusals' audit budget (found
+// by review). One paired client pausing and flooding opens an episode every few
+// seconds; on a shared budget it would silence every other pairing's RESTRICTED
+// rows for the rest of the hour.
+func TestRateLimitEpisodesCannotSilenceCapabilityRefusals(t *testing.T) {
+	h := newHarness(t)
+	for range MaxAuditedRefusalsPerHour + 5 {
+		h.exhaust(t, h.conn)
+		h.handle(t, MethodGetBalance, nil)
+		h.clock.at = h.clock.at.Add(time.Minute) // the bucket refills: the next flood is a new episode
+	}
+	if n := len(h.rateLimitedRows()); n != MaxAuditedRateLimitsPerHour {
+		t.Fatalf("premise: %d rate-limit rows, want the episode budget of %d spent", n, MaxAuditedRateLimitsPerHour)
+	}
+	if resp := h.handle(t, MethodPayInvoice, json.RawMessage(`{"invoice":"lnbc1x"}`)); resp.Error == nil ||
+		resp.Error.Code != CodeRestricted {
+		t.Fatalf("premise: pay_invoice without the pay group should be RESTRICTED, got %+v", resp)
+	}
+	for _, row := range h.audit.events() {
+		if row.event == logging.EventConnectionRefuse && row.attrs["code"] == CodeRestricted {
+			return
+		}
+	}
+	t.Error("a RESTRICTED refusal went unaudited after one client spent its rate-limit episodes")
+}
+
 // l3j criterion 4: make_invoice cannot mint above the one invoice ceiling this
 // app states, lnurl.MaxSendableMsat, and the refusal comes before the node is
 // asked for anything. At the ceiling it is served.

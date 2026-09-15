@@ -183,6 +183,10 @@ type Service struct {
 	// not be able to spend the budget that would have recorded the first panic.
 	// A panic is rarer and worth more.
 	panics *logging.RefusalBudget
+	// rateLimits is the hourly bound on rate-limit episode rows (l3j), SEPARATE
+	// from refusals for the same reason panics is: see
+	// MaxAuditedRateLimitsPerHour.
+	rateLimits *logging.RefusalBudget
 
 	// serving is every relay-session goroutine, so a shutdown waits for what is
 	// in flight. On the Service rather than a local in Run because reload starts
@@ -230,6 +234,7 @@ func New(db Connections, relays Relays, purse Wallet, invoices Invoices, node No
 		reminder: FailureReminderInterval, health: map[int64]*health{},
 		refusals:       logging.NewRefusalBudget(MaxAuditedRefusalsPerHour, now),
 		panics:         logging.NewRefusalBudget(MaxAuditedPanicsPerHour, now),
+		rateLimits:     logging.NewRefusalBudget(MaxAuditedRateLimitsPerHour, now),
 		demand:         opts.Demand,
 		attemptTimeout: ResponseAttemptTimeout, responseRetries: ResponseRetryDelays}
 }
