@@ -323,6 +323,15 @@ type Inputs struct {
 	// it (§5). The cause travels with the number because a number on its own
 	// sends the operator to the wrong place.
 	Shortfall func(ctx context.Context) (shortfallMsat int64, cause string, present bool)
+	// LastReconciliation is when the last reconciliation check finished and what
+	// it returned; a zero time is none yet (d46.25).
+	//
+	// Beside Shortfall because Shortfall is the WALLET's frozen state, which a
+	// check that could not run leaves untouched: on its own it renders the
+	// previous verdict under a tick for as long as the node stays away. Wired
+	// with Shortfall: the row treats a Shortfall with no LastReconciliation as
+	// never checked, never as fresh.
+	LastReconciliation func() (at time.Time, err error)
 	// UnresolvedPayments reports how many payments a previous run left in
 	// flight (§5's second freeze, u0u).
 	//
@@ -710,6 +719,17 @@ func spendChecks(in Inputs, broker brokerState) []Check {
 	// error into a spend refusal with a diagnosis pointing at the wrong repair.
 	// An unreachable node has its own row (guard.reachable, node.linked), which
 	// is where that belongs.
+	if broker.wired && broker.err != nil {
+		// NOT CHECKED IS NOT A PASS (d46.25, 0vk.1 F5). Both rows below are the
+		// guard's answer, and a guard that did not answer gave none: built OK and
+		// flipped only on a finding, they used to render "The guard is registered
+		// with your node" with a tick having asked nobody. They block NOTHING in
+		// this state — guard.reachable is the row that knows why, and it blocks.
+		for _, c := range []*Check{&rootKey, &middleware} {
+			c.OK, c.Blocks = false, BlocksNothing
+			c.Detail = "Not checked — the guard is not answering, so it could not be asked."
+		}
+	}
 	if status := broker.status; broker.answered() && status.SpendMacaroonPresent {
 		switch {
 		case !status.SpendRootKeyRecorded:
@@ -721,7 +741,12 @@ func spendChecks(in Inputs, broker brokerState) []Check {
 			rootKey.OK = false
 			rootKey.Detail = "the guard holds no root key for this macaroon, so it was " +
 				"either never baked here or has already been revoked"
-		case status.SpendRootKeyChecked && !status.SpendRootKeyListed:
+		case !status.SpendRootKeyChecked:
+			// Not checked, so not a pass — and not a finding either, which is the
+			// d24.6 half above: it blocks nothing.
+			rootKey.OK, rootKey.Blocks = false, BlocksNothing
+			rootKey.Detail = "Not checked — the guard could not ask your node which root keys it still lists."
+		case !status.SpendRootKeyListed:
 			rootKey.OK = false
 			rootKey.Detail = "the node no longer lists this macaroon's root key, so it has already been revoked"
 		}
@@ -763,6 +788,21 @@ func addressCheck(ctx context.Context, in Inputs) Check {
 	return c
 }
 
+// reconciliationCheck is §5's freeze, and when it was last looked at (d46.25).
+//
+// THE VERDICT IS THE WALLET'S; THE FRESHNESS IS THE RECONCILER'S. A frozen
+// shortfall is real whether or not the last check ran — the wallet refuses on
+// it — so it blocks sending in every case and the detail says how current it is.
+// No shortfall is only a pass when a check actually ran and succeeded: before
+// the first one, or after one that failed, nothing has compared the ceiling with
+// the node since, and the tick that used to stand there was the confidence §11
+// calls worse than no checklist.
+//
+// A FAILED CHECK BLOCKS NOTHING by itself (delegated, d46.25). §5's freeze is the
+// wallet's decision and this row reports it; it does not make one. Refusing to
+// send because LND did not answer a balance read would be an outage caused by
+// the check, which Check's own comment already rules out, and the payment that
+// needs LND will fail at LND regardless.
 func reconciliationCheck(ctx context.Context, in Inputs) Check {
 	c := Check{
 		ID:     CheckReconciliation,
@@ -773,14 +813,53 @@ func reconciliationCheck(ctx context.Context, in Inputs) Check {
 	if in.Shortfall == nil {
 		return c
 	}
-	if shortfall, cause, present := in.Shortfall(ctx); present {
+	// Read before the shortfall, so a check finishing between the two reads makes
+	// the freshness older than the verdict, never newer. Unwired is never-checked,
+	// not fresh: a report with no way to say when must not be able to say "now".
+	var at time.Time
+	var checkErr error
+	if in.LastReconciliation != nil {
+		at, checkErr = in.LastReconciliation()
+	}
+	shortfall, cause, present := in.Shortfall(ctx)
+	failed := ""
+	if !at.IsZero() && checkErr != nil {
+		failed = fmt.Sprintf("The last check failed at %s: %v", clock(at), checkErr)
+	}
+
+	if present {
 		c.OK = false
 		c.Detail = fmt.Sprintf("the wallet believes it may spend %d msat more than the node can "+
 			"send, so spending is frozen. %s. Correct it with an adjustment on the wallet page — "+
 			"the balance is never rewritten silently", shortfall, cause)
+		switch {
+		case at.IsZero():
+			c.Detail += ". Not re-checked since the app started; the freeze stands until a check clears it."
+		case failed != "":
+			c.Detail += ". " + failed + "; the freeze stands until a check succeeds."
+		default:
+			c.Detail += ". This is the verdict as of " + clock(at) + "."
+		}
+		return c
+	}
+	switch {
+	case at.IsZero():
+		c.OK, c.Blocks = false, BlocksNothing
+		c.Detail = "Not checked yet — reconciliation runs when the app starts and every five minutes. " +
+			"No shortfall is recorded, so spending is not frozen."
+	case failed != "":
+		c.OK, c.Blocks = false, BlocksNothing
+		c.Detail = failed + ". The last verdict stands: no shortfall recorded, so spending is not " +
+			"frozen — but nothing has compared the ceiling with the node since."
+	default:
+		c.Detail = "Within the node's balance, as of " + clock(at) + "."
 	}
 	return c
 }
+
+// clock is how this package states a time on the panel: the one format the Node
+// page's "as of" uses, so the two pages cannot describe one moment differently.
+func clock(at time.Time) string { return at.UTC().Format("15:04:05 UTC") }
 
 // unresolvedPaymentsCheck is §5's second freeze, made visible (1xp).
 //

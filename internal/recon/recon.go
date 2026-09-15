@@ -100,6 +100,13 @@ type Reconciler struct {
 	// places. After a restart the first check has no history and says so.
 	mu       sync.Mutex
 	previous *observation
+	// lastAt and lastErr are when the last Check finished and what it returned
+	// (d46.25). The panel's verdict is the wallet's frozen state, which a Check
+	// that could not run leaves exactly as it was — so without these, an
+	// unreachable node keeps whatever tick came before for as long as it stays
+	// away. Zero lastAt is "not checked since this process started".
+	lastAt  time.Time
+	lastErr error
 
 	// resolvePayments is the wiring-supplied resolver; see Options.
 	resolvePayments func(context.Context) error
@@ -129,7 +136,27 @@ func New(node Node, purse Wallet, auditor Auditor, opts Options) *Reconciler {
 }
 
 // Check runs one comparison and records or clears the shortfall.
+//
+// Every call is remembered, pass or fail, for LastCheck. HERE rather than in Run,
+// because startup calls Check directly before the loop begins, and that first
+// answer is the one the panel shows for the next five minutes.
 func (r *Reconciler) Check(ctx context.Context) error {
+	err := r.check(ctx)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastAt, r.lastErr = r.now(), err
+	return err
+}
+
+// LastCheck is when the last Check finished and what it returned, in the shape
+// preflight.Inputs.LastReconciliation wants. A zero time means none has run.
+func (r *Reconciler) LastCheck() (at time.Time, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastAt, r.lastErr
+}
+
+func (r *Reconciler) check(ctx context.Context) error {
 	balance, err := r.node.ChannelBalance(ctx)
 	if err != nil {
 		// An unreachable node is not a shortfall. Freezing spending because LND

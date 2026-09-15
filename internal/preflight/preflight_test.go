@@ -508,11 +508,15 @@ func TestAnUnaskedNodeDoesNotMeanARevokedRootKey(t *testing.T) {
 
 	report := preflight.Run(t.Context(), in)
 
-	for _, check := range report.Failed() {
-		if check.ID == preflight.CheckSpendRootKey {
-			t.Errorf("a node that could not be asked was reported as having revoked the key: "+
-				"%q — since d24.6 that refuses the payment too", check.Detail)
-		}
+	got := check(t, report, preflight.CheckSpendRootKey)
+	if got.Blocks == preflight.BlocksSending || strings.Contains(got.Detail, "revoked") {
+		t.Errorf("a node that could not be asked was reported as having revoked the key: "+
+			"%q (blocks %q) — since d24.6 that refuses the payment too", got.Detail, got.Blocks)
+	}
+	// And not a pass either (d46.25): nothing was learned about the key.
+	if got.OK || !strings.Contains(got.Detail, "Not checked") {
+		t.Errorf("an unasked node rendered the root-key row OK=%v %q; not checked is not a pass",
+			got.OK, got.Detail)
 	}
 }
 
@@ -857,5 +861,110 @@ func TestOneReportAsksTheGuardOnce(t *testing.T) {
 	}
 	if !check(t, report, preflight.CheckGuardReachable).OK {
 		t.Error("the reachability row failed against a guard that answered")
+	}
+}
+
+// d46.25 (0vk.1 F5): a guard that did not answer has not said anything about
+// the spend credential, and a row built OK and flipped only on a positive
+// finding renders a tick over a question nobody asked. "The guard is registered
+// with your node", with a tick, beside a guard that is not answering.
+func TestSpendRowsTheGuardMustAnswerAreNotAPassWhenItDoesNot(t *testing.T) {
+	in := inputs(t)
+	in.SpendMacaroon = func() ([]byte, bool) {
+		return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2033-01-01T00:00:00Z",
+			lnd.GuardCaveat("nonce")), true
+	}
+	in.BrokerStatus = func(context.Context) (lnd.BrokerStatus, error) {
+		return lnd.BrokerStatus{}, errors.New("dialling /credentials/guard.sock: connection refused")
+	}
+
+	report := preflight.Run(t.Context(), in)
+
+	for _, id := range []string{preflight.CheckGuardMiddleware, preflight.CheckSpendRootKey} {
+		got := check(t, report, id)
+		if got.OK {
+			t.Errorf("%s passed with a guard that did not answer; nobody was asked", id)
+		}
+		if !strings.Contains(got.Detail, "Not checked") {
+			t.Errorf("%s does not say it was not checked: %q", id, got.Detail)
+		}
+		// Not checked is not a finding: the row that knows WHY is guard.reachable,
+		// and it is the one that blocks.
+		if got.Blocks != preflight.BlocksNothing {
+			t.Errorf("%s blocks %q while unchecked; guard.reachable is the row that blocks", id, got.Blocks)
+		}
+	}
+	// guard_caveat is read from the FILE, which needs no guard, so it still has
+	// an answer — and a correctly baked macaroon passes it.
+	if got := check(t, report, preflight.CheckSpendGuardCaveat); !got.OK {
+		t.Errorf("the guard caveat row failed on a macaroon that carries the caveat: %q", got.Detail)
+	}
+	if check(t, report, preflight.CheckGuardReachable).OK {
+		t.Error("the fixture is wrong: guard.reachable passed")
+	}
+
+	// The broker answering: unchanged from before this bead.
+	in.BrokerStatus = func(context.Context) (lnd.BrokerStatus, error) {
+		return lnd.BrokerStatus{LNDReachable: true, SpendMacaroonPresent: true,
+			SpendRootKeyRecorded: true, SpendRootKeyChecked: true, SpendRootKeyListed: true,
+			MiddlewareRegistered: true}, nil
+	}
+	report = preflight.Run(t.Context(), in)
+	for _, id := range []string{preflight.CheckGuardMiddleware, preflight.CheckSpendRootKey,
+		preflight.CheckSpendGuardCaveat} {
+		if got := check(t, report, id); !got.OK {
+			t.Errorf("%s failed against a guard that answered healthy: %q", id, got.Detail)
+		}
+	}
+}
+
+// d46.25: the reconciliation row's four states. The seam test in internal/api
+// drives the failure through a real reconciler; this pins each state's verdict
+// and what it blocks, which the page alone cannot show.
+func TestTheReconciliationRowSaysHowCurrentItsVerdictIs(t *testing.T) {
+	checkedAt := time.Date(2026, 9, 15, 8, 46, 0, 0, time.UTC)
+	down := errors.New("recon: reading the node's balance: connection refused")
+	for _, tc := range []struct {
+		name       string
+		at         time.Time
+		err        error
+		frozen     bool
+		wantOK     bool
+		wantBlocks preflight.Capability
+		wantDetail []string
+	}{
+		{"never checked", time.Time{}, nil, false, false, preflight.BlocksNothing,
+			[]string{"Not checked yet", "not frozen"}},
+		{"checked and healthy", checkedAt, nil, false, true, preflight.BlocksSending,
+			[]string{"as of 08:46:00 UTC"}},
+		{"last check failed", checkedAt, down, false, false, preflight.BlocksNothing,
+			[]string{"failed at 08:46:00 UTC", "connection refused", "last verdict stands", "not frozen"}},
+		// A freeze is the wallet's and stands whatever the freshness: it blocks.
+		{"frozen, last check failed", checkedAt, down, true, false, preflight.BlocksSending,
+			[]string{"25000", "failed at 08:46:00 UTC", "connection refused", "freeze stands"}},
+		{"frozen, never re-checked", time.Time{}, nil, true, false, preflight.BlocksSending,
+			[]string{"25000", "Not re-checked"}},
+		{"frozen, checked", checkedAt, nil, true, false, preflight.BlocksSending,
+			[]string{"25000", "as of 08:46:00 UTC"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := inputs(t)
+			in.Shortfall = func(context.Context) (int64, string, bool) {
+				return 25_000, "a force close", tc.frozen
+			}
+			in.LastReconciliation = func() (time.Time, error) { return tc.at, tc.err }
+
+			got := check(t, preflight.Run(t.Context(), in), preflight.CheckReconciliation)
+
+			if got.OK != tc.wantOK || (!got.OK && got.Blocks != tc.wantBlocks) {
+				t.Errorf("OK=%v blocks %q, want OK=%v blocks %q (%q)",
+					got.OK, got.Blocks, tc.wantOK, tc.wantBlocks, got.Detail)
+			}
+			for _, want := range tc.wantDetail {
+				if !strings.Contains(got.Detail, want) {
+					t.Errorf("the detail does not say %q: %q", want, got.Detail)
+				}
+			}
+		})
 	}
 }

@@ -2,13 +2,16 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,10 +41,28 @@ type seamWallet interface {
 }
 
 // nodeBalance is a stand-in for LND reporting its spendable balance.
-type nodeBalance struct{ msat int64 }
+//
+// The mutex is for the tests that drive reconciler.Run on its own goroutine.
+type nodeBalance struct {
+	mu   sync.Mutex
+	msat int64
+	// down, when set, is what an unreachable LND answers instead.
+	down error
+}
 
 func (n *nodeBalance) ChannelBalance(context.Context) (*lnrpc.ChannelBalanceResponse, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.down != nil {
+		return nil, n.down
+	}
 	return &lnrpc.ChannelBalanceResponse{LocalBalance: &lnrpc.Amount{Msat: uint64(n.msat)}}, nil
+}
+
+func (n *nodeBalance) setDown(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.down = err
 }
 
 // Criterion 7, and the seam §13 now warns about: both halves of this wire
@@ -198,6 +219,32 @@ func TestAllocatingPastTheNodeShowsOnTheVeryNextSecurityRender(t *testing.T) {
 func newReconSeam(t *testing.T, demand chan struct{}) (*harness, *nodeBalance,
 	*recon.Reconciler, seamWallet) {
 	t.Helper()
+	h, node, reconciler, purse, _ := newReconSeamWithClock(t, demand)
+	return h, node, reconciler, purse
+}
+
+// seamClock is the reconciler's clock, moved by the test that asserts "as of".
+type seamClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *seamClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *seamClock) set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = at
+}
+
+func newReconSeamWithClock(t *testing.T, demand chan struct{}) (*harness, *nodeBalance,
+	*recon.Reconciler, seamWallet, *seamClock) {
+	t.Helper()
+	reconClock := &seamClock{at: authTime}
 	quiet := logging.New(io.Discard, logging.NewLevelVar(slog.LevelDebug))
 	node := &nodeBalance{msat: 1_000_000_000}
 	dataDir := dataDirAt700(t)
@@ -207,7 +254,7 @@ func newReconSeam(t *testing.T, demand chan struct{}) (*harness, *nodeBalance,
 	h := newHarness(t, func(opts *api.ServerOptions, db *store.Store) {
 		purse = wallet.New(db, wallet.Options{Now: func() time.Time { return authTime }})
 		reconciler = recon.New(node, purse, opts.Auditor, recon.Options{
-			Now: func() time.Time { return authTime }, Log: quiet,
+			Now: reconClock.now, Log: quiet,
 		})
 		opts.Wallet = purse
 		opts.Log = quiet
@@ -216,15 +263,16 @@ func newReconSeam(t *testing.T, demand chan struct{}) (*harness, *nodeBalance,
 		}
 		opts.Preflight = func(ctx context.Context) preflight.Report {
 			return preflight.Run(ctx, preflight.Inputs{
-				NodeState: func() lnd.State { return lnd.StateReady },
-				DataDir:   dataDir,
-				Domain:    func(context.Context) (string, bool, string) { return "zap.example", true, "" },
-				Shortfall: reconciler.Shortfall,
-				Now:       func() time.Time { return authTime },
+				NodeState:          func() lnd.State { return lnd.StateReady },
+				DataDir:            dataDir,
+				Domain:             func(context.Context) (string, bool, string) { return "zap.example", true, "" },
+				Shortfall:          reconciler.Shortfall,
+				LastReconciliation: reconciler.LastCheck,
+				Now:                func() time.Time { return authTime },
 			})
 		}
 	})
-	return h, node, reconciler, purse
+	return h, node, reconciler, purse, reconClock
 }
 
 // aPaymentHash is a distinct hash per call.
@@ -236,3 +284,86 @@ func newReconSeam(t *testing.T, demand chan struct{}) (*harness, *nodeBalance,
 var paymentHashSeq atomic.Int64
 
 func aPaymentHash() string { return fmt.Sprintf("%064x", paymentHashSeq.Add(1)) }
+
+// securityRow is one row of the Security panel's checks table: its verdict cell
+// and its detail, found by the row's title.
+//
+// Unescaped first, because every title with an apostrophe arrives as &#39; and a
+// search for the plain text would find nothing — which for a NEGATIVE assertion
+// reads as a pass.
+func securityRow(t *testing.T, panel, title string) (verdict, detail string) {
+	t.Helper()
+	panel = html.UnescapeString(panel)
+	at := strings.Index(panel, "<td>"+title)
+	if at < 0 {
+		t.Fatalf("the Security panel has no row titled %q:\n%s", title, panel)
+	}
+	row := panel[strings.LastIndex(panel[:at], "<tr>"):]
+	row = row[:strings.Index(row, "</tr>")]
+	cells := strings.SplitN(row, "<td>", 4)
+	if len(cells) < 3 {
+		t.Fatalf("the row titled %q has an unexpected shape:\n%s", title, row)
+	}
+	verdict = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(cells[1]), "</td>"))
+	if open := strings.Index(cells[2], "<small>"); open >= 0 {
+		detail = cells[2][open+len("<small>"):]
+		detail = detail[:strings.Index(detail, "</small>")]
+	}
+	return verdict, detail
+}
+
+const reconciliationTitle = "The wallet ceiling is within the node's balance"
+
+// d46.25 criteria 1 and 2: a reconciliation that could not run is NOT a pass.
+//
+// Before this bead the row read the wallet's frozen deficit and nothing else, so
+// an unreachable LND left whatever verdict came before standing under a green
+// tick, for as long as LND stayed away — §11's "checklist that bounds nothing".
+//
+// Driven through Run with a tick, because that is what fails on the box: the
+// loop logs the error and moves on, and nothing else learns of it.
+func TestAReconciliationThatCouldNotRunIsNotAPassOnTheSecurityPanel(t *testing.T) {
+	h, node, reconciler, _, clock := newReconSeamWithClock(t, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	tick := make(chan time.Time)
+	checked := make(chan error, 1)
+	go reconciler.Run(ctx, tick, nil, func(err error) { checked <- err })
+	cookie := h.login(t)
+
+	failedAt := time.Date(2026, 9, 15, 8, 46, 12, 0, time.UTC)
+	clock.set(failedAt)
+	node.setDown(errors.New("connection refused"))
+	tick <- failedAt
+	if err := <-checked; err == nil {
+		t.Fatal("the fixture is wrong: the tick against an unreachable node succeeded")
+	}
+
+	verdict, detail := securityRow(t, h.get(t, "/security", cookie).Body.String(), reconciliationTitle)
+	if verdict == "pass" {
+		t.Errorf("the reconciliation row reads pass after a check that failed (%q); nothing "+
+			"has compared the ceiling against the node", detail)
+	}
+	if !strings.Contains(detail, "connection refused") {
+		t.Errorf("the row does not name the failure: %q", detail)
+	}
+	if !strings.Contains(detail, "08:46:12") {
+		t.Errorf("the row does not say when the check failed: %q", detail)
+	}
+
+	// Criterion 2: LND back, one tick, and the row passes AS OF the new time.
+	recoveredAt := failedAt.Add(5 * time.Minute)
+	clock.set(recoveredAt)
+	node.setDown(nil)
+	tick <- recoveredAt
+	if err := <-checked; err != nil {
+		t.Fatalf("the tick after LND came back failed: %v", err)
+	}
+	verdict, detail = securityRow(t, h.get(t, "/security", cookie).Body.String(), reconciliationTitle)
+	if verdict != "pass" {
+		t.Errorf("the row reads %q after a successful check: %q", verdict, detail)
+	}
+	if !strings.Contains(detail, "as of 08:51:12") {
+		t.Errorf("the passing row does not say as of when: %q", detail)
+	}
+}
