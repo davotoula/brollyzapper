@@ -1,7 +1,10 @@
 # BrollyZapper
 
+<img src="assets/icon.svg" width="96" alt="BrollyZapper: an upturned umbrella catching three lightning bolts, marked BZ">
+
 [![CI](https://github.com/davotoula/brollyzapper/actions/workflows/ci.yml/badge.svg)](https://github.com/davotoula/brollyzapper/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/davotoula/brollyzapper/actions/workflows/codeql.yml/badge.svg)](https://github.com/davotoula/brollyzapper/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/davotoula/brollyzapper/badge)](https://scorecard.dev/viewer/?uri=github.com/davotoula/brollyzapper)
 [![Release](https://img.shields.io/github/v/release/davotoula/brollyzapper)](https://github.com/davotoula/brollyzapper/releases/latest)
 [![Go](https://img.shields.io/github/go-mod/go-version/davotoula/brollyzapper)](go.mod)
 [![Licence](https://img.shields.io/github/license/davotoula/brollyzapper)](LICENSE)

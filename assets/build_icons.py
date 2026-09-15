@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Build BrollyZapper's icon.svg and favicon.svg with the BZ letterforms outlined.
+"""Build BrollyZapper's icon.svg, favicon.svg and social preview with the BZ letterforms outlined.
 
 The shipped SVGs must not depend on a font being installed: umbrelOS renders
 icon.svg on machines that have never heard of Archivo, and a <text> element there
 would silently fall back to whatever the renderer happens to have. So the glyphs
 are cut from Archivo ExtraBold here and emitted as path data.
 
-The master and the favicon come out of ONE set of constants below, so they cannot
-drift apart; the favicon differs only in how many bolts it draws.
+The master, the favicon and the GitHub social preview come out of ONE set of
+constants below, so they cannot drift apart; the favicon differs in its bolts and
+description, and the social preview draws the three-bolt mark at 2x on a wider field.
 
 Design and the reasoning behind the fixed geometry:
 the icon design notes (private)
 
-Nothing here runs in CI. The three outputs are committed build-once artifacts,
-so no rasteriser and no font download is a build dependency of the project —
-they are dependencies of *changing the mark*, which is rare and deliberate.
+Nothing here runs in CI. The four committed outputs (icon.svg, favicon.svg,
+apple-touch-icon.png, social-preview.svg) are build-once artifacts, so no
+rasteriser and no font download is a build dependency of the project — they are
+dependencies of running this script, which is rare and deliberate. A rasteriser is
+needed on every run for social-preview.png, which is rendered beside its SVG but
+gitignored (it is uploaded by hand in the repository's settings, not read from the
+tree), and for the committed touch icon only when the mark changes.
 
-Requires fontTools (pip install fonttools) and, for the PNG, any one of
+Requires fontTools (pip install fonttools) and, for the PNGs, any one of
 rsvg-convert, sips, inkscape or ImageMagick.
 """
 
@@ -25,6 +30,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import textwrap
 import urllib.request
 
 from fontTools.pens.svgPathPen import SVGPathPen
@@ -123,70 +129,126 @@ def bolt_uses(bolts):
     )
 
 
-def build(bolts, title, desc):
+MARK_PX = 256
+
+# The GitHub social preview: the mark at 2x on one 1280×640 field. The 408px disc
+# stays clear of the edges a link card may crop; change the scale if a card crops it.
+SOCIAL_W, SOCIAL_H = 1280, 640
+SOCIAL_MARK_SCALE = 2
+
+
+def build(bolts, title, desc, width=MARK_PX, height=MARK_PX, mark_scale=1):
+    """Emit the mark, centred at mark_scale on a width×height field of the bleed.
+
+    At the defaults this is the square master's own markup, unwrapped, so widening
+    the field to the social preview could not change icon.svg or favicon.svg by a byte.
+    """
     bz = outline("BZ", BZ_SIZE, BZ_CENTRE_X, BZ_BASELINE)
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t d">
+    mark = f'''  <circle cx="{MARK_PX // 2}" cy="{MARK_PX // 2}" r="{DISC_R}" fill="{WHITE}"/>
+{bolt_uses(bolts)}
+  <path d="{CANOPY}" fill="{PURPLE_CANOPY}"/>
+  <path d="{bz}" fill="{WHITE}"/>'''
+    dx = (width - MARK_PX * mark_scale) / 2
+    dy = (height - MARK_PX * mark_scale) / 2
+    if dx or dy or mark_scale != 1:
+        mark = f'''  <g transform="translate({dx:g} {dy:g}) scale({mark_scale:g})">
+{textwrap.indent(mark, "  ")}
+  </g>'''
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-labelledby="t d">
   <title id="t">{title}</title>
   <desc id="d">{desc}</desc>
   <defs><path id="bolt" d="{BOLT}"/></defs>
-  <rect width="256" height="256" fill="{PURPLE_BLEED}"/>
-  <circle cx="128" cy="128" r="{DISC_R}" fill="{WHITE}"/>
-{bolt_uses(bolts)}
-  <path d="{CANOPY}" fill="{PURPLE_CANOPY}"/>
-  <path d="{bz}" fill="{WHITE}"/>
+  <rect width="{width}" height="{height}" fill="{PURPLE_BLEED}"/>
+{mark}
 </svg>
 '''
 
 
 TOUCH_ICON_PX = 180
 
-# In preference order. rsvg-convert first because it is the one that is the same
-# on every machine; sips is macOS-only but needs no install.
+# In preference order. rsvg-convert first because it is the one available on
+# every platform; sips is macOS-only but needs no install, and takes only the
+# longer edge (-Z), which keeps a non-square SVG's aspect, so it is given max(w, h).
+# Rasterisers do not agree to the byte, which is why main() re-renders the committed
+# PNG only when the mark itself changed.
 RASTERISERS = (
-    ("rsvg-convert", lambda src, dst, px: ["rsvg-convert", "-w", str(px), "-h", str(px), str(src), "-o", str(dst)]),
-    ("sips", lambda src, dst, px: ["sips", "-s", "format", "png", "-Z", str(px), str(src), "--out", str(dst)]),
-    ("inkscape", lambda src, dst, px: ["inkscape", str(src), "-w", str(px), "-h", str(px), "-o", str(dst)]),
-    ("magick", lambda src, dst, px: ["magick", "-background", "none", str(src), "-resize", f"{px}x{px}", str(dst)]),
+    ("rsvg-convert", lambda src, dst, w, h: ["rsvg-convert", "-w", str(w), "-h", str(h), str(src), "-o", str(dst)]),
+    ("sips", lambda src, dst, w, h: ["sips", "-s", "format", "png", "-Z", str(max(w, h)), str(src), "--out", str(dst)]),
+    ("inkscape", lambda src, dst, w, h: ["inkscape", str(src), "-w", str(w), "-h", str(h), "-o", str(dst)]),
+    ("magick", lambda src, dst, w, h: ["magick", "-background", "none", str(src), "-resize", f"{w}x{h}", str(dst)]),
 )
 
 
-def rasterise(src, dst, px):
-    """Render src to a px-square PNG, naming every alternative if none is present."""
+def rasterise(src, dst, width, height):
+    """Render src to a width×height PNG, naming every alternative if none is present."""
     for name, argv in RASTERISERS:
         if shutil.which(name):
-            subprocess.run(argv(src, dst, px), check=True, capture_output=True)
+            subprocess.run(argv(src, dst, width, height), check=True, capture_output=True)
             return name
     raise SystemExit(
         f"cannot render {dst.name}: no rasteriser found.\n"
         "Install any one of: " + ", ".join(name for name, _ in RASTERISERS) + ".\n"
-        "The SVGs above are written; only the PNG is missing."
+        f"Nothing was rendered to {dst.name}."
     )
 
 
 def main():
     ensure_font()
 
-    icon = build(
-        BOLTS_THREE,
-        "BrollyZapper",
-        "An upturned umbrella catching three lightning bolts, marked BZ.",
-    )
+    # README.md's <img alt> carries this description, prefixed "BrollyZapper: ";
+    # change the two together.
+    three_bolts = "An upturned umbrella catching three lightning bolts, marked BZ"
+    icon = build(BOLTS_THREE, "BrollyZapper", f"{three_bolts}.")
     favicon = build(
         BOLTS_ONE,
         "BrollyZapper",
         "An upturned umbrella catching a lightning bolt, marked BZ.",
     )
+    social = build(
+        BOLTS_THREE,
+        "BrollyZapper",
+        f"{three_bolts}, on a purple field.",
+        SOCIAL_W,
+        SOCIAL_H,
+        SOCIAL_MARK_SCALE,
+    )
 
+    favicon_svg = STATIC / "favicon.svg"
+    favicon_svg.write_text(favicon)
+    social_svg = HERE / "social-preview.svg"
+    social_svg.write_text(social)
+    # The master is written last, immediately before the render it gates: a failure
+    # between writing it and rendering the touch icon would otherwise leave a changed
+    # master on disk, and the next run would skip the PNG as up to date.
     master = HERE / "icon.svg"
+    previous_icon = master.read_text() if master.exists() else None
     master.write_text(icon)
-    (STATIC / "favicon.svg").write_text(favicon)
 
+    # The committed touch icon is re-rendered only when the mark changed. Rasterisers
+    # differ to the byte, so rendering it on every run made a re-run on a machine with
+    # a different rasteriser rewrite a PNG whose mark had not moved (found 0vk.22:
+    # sips rendered the committed one, rsvg-convert was installed later).
     touch_icon = STATIC / "apple-touch-icon.png"
-    tool = rasterise(master, touch_icon, TOUCH_ICON_PX)
+    if touch_icon.exists() and icon == previous_icon:
+        print(f"{touch_icon.relative_to(ROOT)}: mark unchanged, not re-rendered")
+    else:
+        try:
+            rasterise(master, touch_icon, TOUCH_ICON_PX, TOUCH_ICON_PX)
+        except BaseException:
+            # Put the old master back, so the next run still sees a changed mark
+            # and renders the PNG rather than skipping it as up to date.
+            if previous_icon is None:
+                master.unlink()
+            else:
+                master.write_text(previous_icon)
+            raise
+    # The social PNG is gitignored, so it is rendered every run.
+    social_png = HERE / "social-preview.png"
+    tool = rasterise(social_svg, social_png, SOCIAL_W, SOCIAL_H)
 
-    for path in (master, STATIC / "favicon.svg", touch_icon):
+    for path in (master, favicon_svg, touch_icon, social_svg, social_png):
         print(f"{path.relative_to(ROOT)}: {path.stat().st_size} bytes")
-    print(f"(PNG rendered with {tool})")
+    print(f"({social_png.name} rendered with {tool})")
 
 
 if __name__ == "__main__":
