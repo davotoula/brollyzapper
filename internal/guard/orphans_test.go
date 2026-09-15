@@ -567,3 +567,27 @@ func TestAnUnattendedSweepKeepsWhatTheNodeWouldNotRevoke(t *testing.T) {
 		t.Errorf("the next sweep did not come back for %d", orphan)
 	}
 }
+
+// The operator-triggered sweeps still write a row PER REVOKED KEY, which the
+// unattended sweep's one-row-per-pass shape must not have taken with it: since
+// the simplify pass both go through one loop and a flag chooses, and no test
+// before this one would have noticed the flag going the wrong way.
+func TestABakeStillAuditsEachKeyItRevokes(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Now().UTC()}
+	g := openGuardOnClock(t, node, d, clock, false)
+	if err := g.EnsureReceiveMacaroon(t.Context()); err != nil {
+		t.Fatalf("EnsureReceiveMacaroon: %v", err)
+	}
+	clock.pastTheRepeatGuard()
+	if err := g.BakeReceive(t.Context()); err != nil {
+		t.Fatalf("the superseding bake: %v", err)
+	}
+	for _, event := range g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
+		if event.Event == logging.EventMacaroonRevoke && event.Attrs["count"] == "" {
+			return
+		}
+	}
+	t.Error("a bake that revoked the key it superseded wrote no macaroon.revoke row for it")
+}
