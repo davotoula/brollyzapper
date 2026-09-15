@@ -138,10 +138,9 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 // Refusals keep their own lines, written before the publish, and do not carry the
 // timing: their question is which control refused, not how long delivery took.
 func (s *Service) reportAnswered(conn *connection, req Request, entered time.Time, sent delivery) {
-	handleMS := int64(0)
-	if !sent.began.IsZero() {
-		handleMS = sent.began.Sub(entered).Milliseconds()
-	}
+	// The server's share is the whole of it less the publish, which is also what
+	// it is when nothing was published at all.
+	handleMS := (time.Since(entered) - sent.took).Milliseconds()
 	s.log.Debug("an NWC request was answered", "connection", conn.row().ID, "method", req.Method,
 		"handle_ms", handleMS, "publish_ms", sent.took.Milliseconds(),
 		"relays", sent.relays, "accepted", sent.accepted)

@@ -21,14 +21,15 @@ func TestTheSecurityPageRendersTheReceiveCredentialRows(t *testing.T) {
 	}))
 	cookie := h.login(t)
 
-	security := html.UnescapeString(h.get(t, "/security", cookie).Body.String())
+	raw := h.get(t, "/security", cookie).Body.String()
+	security := html.UnescapeString(raw)
 	for _, title := range []string{
 		"The receive macaroon carries its caveats",
 		"The receive macaroon is locked to this container",
 		"The receive macaroon has not expired",
 		"The node still honours the receive root key",
 	} {
-		verdict, detail := securityRow(t, security, title)
+		verdict, detail := securityRow(t, raw, title)
 		if verdict == "pass" {
 			t.Errorf("%q passes with no receive macaroon to read: %q", title, detail)
 		}

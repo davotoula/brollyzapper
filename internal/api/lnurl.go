@@ -121,12 +121,9 @@ func LNURLHandlers(service LNURL, log *slog.Logger) (payRequest, callback http.H
 				// by the backstop, the per-sender limit and §7's open-invoice cap,
 				// and has already written a durable row. At DEBUG the trace would
 				// have a dark first leg on every default install.
-				// The amount as the service parsed it, so the key has the settlement
-				// line's type rather than a stranger's string.
-				amount, _ := lnurl.AmountMsat(r.URL.Query())
 				_, isZap := zap.SenderKey()
 				log.Info("invoice minted", logging.PaymentHash(minted.PaymentHash),
-					"amount_msat", amount, "zap", isZap)
+					"amount_msat", minted.AmountMsat, "zap", isZap)
 			}
 			return minted, err
 		})

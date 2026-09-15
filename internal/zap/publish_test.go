@@ -535,15 +535,7 @@ func TestTheReceiptLineSaysHowLongThePublishTook(t *testing.T) {
 
 	h.publisherWith(&slowPool{takes: takes}, &logged).PublishNow(t.Context(), hash)
 
-	line := ""
-	for _, candidate := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
-		if strings.Contains(candidate, "zap receipt published") {
-			line = candidate
-		}
-	}
-	if line == "" {
-		t.Fatalf("no receipt line was logged at all:\n%s", logged.String())
-	}
+	line := receiptLine(t, logged.String())
 	var record struct {
 		PublishMS int64 `json:"publish_ms"`
 	}
@@ -572,12 +564,8 @@ func TestTheReceiptLineNamesTheReceiptsTagsAndNoneOfTheirValues(t *testing.T) {
 	var record struct {
 		Tags string `json:"tags"`
 	}
-	for _, candidate := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
-		if strings.Contains(candidate, "zap receipt published") {
-			if err := json.Unmarshal([]byte(candidate), &record); err != nil {
-				t.Fatalf("the receipt line is not JSON: %s", candidate)
-			}
-		}
+	if line := receiptLine(t, logged.String()); json.Unmarshal([]byte(line), &record) != nil {
+		t.Fatalf("the receipt line is not JSON: %s", line)
 	}
 	names := strings.Split(record.Tags, ",")
 	for _, want := range []string{"bolt11", "description", "p", "preimage"} {
@@ -590,4 +578,21 @@ func TestTheReceiptLineNamesTheReceiptsTagsAndNoneOfTheirValues(t *testing.T) {
 	if preimage := strings.Repeat("9", 64); strings.Contains(logged.String(), preimage) {
 		t.Errorf("the preimage reached the log:\n%s", logged.String())
 	}
+}
+
+// receiptLine is the last "zap receipt published" line in a captured log, or a
+// failure saying there was none — so an absent line reads as absent rather than
+// as a line missing its fields.
+func receiptLine(t *testing.T, logged string) string {
+	t.Helper()
+	line := ""
+	for _, candidate := range strings.Split(strings.TrimSpace(logged), "\n") {
+		if strings.Contains(candidate, "zap receipt published") {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatalf("no receipt line was logged at all:\n%s", logged)
+	}
+	return line
 }

@@ -122,8 +122,8 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 	// interval is "we produced a response" to "a relay has it, or we stopped",
 	// which is the one the Amethyst stall report could not localise. The counts
 	// are the LAST attempt's — the one that delivered, or the last one refused.
-	sent.began = time.Now()
-	defer func() { sent.took = time.Since(sent.began) }()
+	began := time.Now()
+	defer func() { sent.took = time.Since(began) }()
 
 	for attempt := 0; ; attempt++ {
 		// THE FIRST ATTEMPT IS ALWAYS MADE. The budget bounds RETRIES, and that
@@ -176,11 +176,10 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 	return sent
 }
 
-// delivery is what publishing one response took: when it began, how long every
-// attempt and wait took together, and the last attempt's relay counts (k2z).
-// The zero value is a response that never reached a publish.
+// delivery is what publishing one response took: every attempt and wait
+// together, and the last attempt's relay counts (k2z). The zero value is a
+// response that never reached a publish.
 type delivery struct {
-	began            time.Time
 	took             time.Duration
 	relays, accepted int
 }

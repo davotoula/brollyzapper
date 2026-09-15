@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +60,7 @@ func TestOneGrepOnThePaymentHashReconstructsAllThreeLegs(t *testing.T) {
 	defer cancel()
 	var logged syncBuffer
 	log := logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
-	quiet := logging.New(io.Discard, logging.NewLevelVar(slog.LevelDebug))
+	quiet := quietLog()
 
 	node := lndtest.Start(t)
 	credentials := t.TempDir()
@@ -164,10 +163,16 @@ func TestOneGrepOnThePaymentHashReconstructsAllThreeLegs(t *testing.T) {
 	lines := func(chunk string) []map[string]any {
 		var out []map[string]any
 		for _, line := range strings.Split(strings.TrimSpace(chunk), "\n") {
-			var record map[string]any
-			if json.Unmarshal([]byte(line), &record) == nil {
-				out = append(out, record)
+			if line == "" {
+				continue
 			}
+			// A line that is not JSON fails rather than dropping out of "every
+			// line carries the hash".
+			var record map[string]any
+			if err := json.Unmarshal([]byte(line), &record); err != nil {
+				t.Fatalf("a captured line is not JSON: %q", line)
+			}
+			out = append(out, record)
 		}
 		return out
 	}

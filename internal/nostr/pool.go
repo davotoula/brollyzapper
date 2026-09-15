@@ -1051,22 +1051,21 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 		// what this releases is the relay's own context, and with it any
 		// half-open socket the dial left behind.
 		_ = relay.Close()
-		if errors.Is(context.Cause(dialCtx), errConnectBudget) {
-			return nil, fmt.Errorf("nostr: %s: %w after %s: %w",
-				url, errConnectBudget, connectBudget, err)
-		}
-		// THE SAME FACT WHEN THE CALLER'S DEADLINE CAME FIRST (k2z, from d1o's
-		// review). WithTimeoutCause keeps the PARENT's cause when the parent's
-		// deadline is the sooner one, and on the NWC path it always is: the
-		// attempt's five seconds are set before this dial's five. The relay still
-		// hung until a deadline ran out — the budget, shortened, as
-		// errConnectBudget's own comment describes — so it is the same outcome,
-		// and recording it not_connected would call the relay that cost the
-		// client its answer "fast and free". A parent CANCELLED rather than timed
-		// out is not this, and keeps the plain error.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("nostr: %s: %w at the caller's deadline: %w",
-				url, errConnectBudget, err)
+		// A DEADLINE, EITHER ONE (k2z, from d1o's review). WithTimeoutCause keeps
+		// the PARENT's cause when the parent's deadline is the sooner one, and on
+		// the NWC path it always is: the attempt's five seconds are set before
+		// this dial's five. The relay hung until a deadline ran out either way —
+		// the budget, shortened, as errConnectBudget's own comment describes — so
+		// it is one outcome, and the cause only chooses the wording. Recording the
+		// second as not_connected would call the relay that cost the client its
+		// answer "fast and free". A parent CANCELLED is not a deadline and keeps
+		// the plain error.
+		if errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
+			bound := fmt.Sprintf("after %s", connectBudget)
+			if !errors.Is(context.Cause(dialCtx), errConnectBudget) {
+				bound = "at the caller's deadline"
+			}
+			return nil, fmt.Errorf("nostr: %s: %w %s: %w", url, errConnectBudget, bound, err)
 		}
 		return nil, fmt.Errorf("nostr: connecting to %s: %w", url, err)
 	}
@@ -1158,6 +1157,10 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	start := time.Now()
 	targets := make([]string, 0, len(relays.urls))
 	results := make([]PublishResult, 0, len(relays.urls))
+	// One cost record beside every result, in the same order, because
+	// logRelayCosts reads the two by position (k2z): an unusable URL was never
+	// dialled, so its record is not_connected — no socket, and it cost nothing.
+	costs := make([]relayCost, 0, len(relays.urls))
 	for _, relay := range relays.urls {
 		normalised := gonostr.NormalizeURL(strings.TrimSpace(relay))
 		if normalised == "" || !gonostr.IsValidRelayURL(normalised) {
@@ -1166,6 +1169,7 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 			// others, which is the whole reason there is a list (d24.18).
 			results = append(results, PublishResult{Relay: relay,
 				Err: fmt.Errorf("nostr: %q is not a usable relay URL", relay)})
+			costs = append(costs, relayCost{outcome: "not_connected"})
 			continue
 		}
 		targets = append(targets, normalised)
@@ -1219,15 +1223,7 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	// half and discarded these; a pairing's dead relay costs a client its answer,
 	// which is the case they exist to name.
 	//
-	// ALIGNED BEFORE LOGGING, because logRelayCosts indexes the two slices by
-	// position: the unusable URLs above are rows with no dial behind them, so
-	// each gets a record of its own — not_connected, no socket and no cost —
-	// ahead of the dialled relays' records, in the same order as the results.
 	sent, sentCosts := p.sendAndDial(ctx, targets, event)
-	costs := make([]relayCost, len(results), len(results)+len(sentCosts))
-	for i := range costs {
-		costs[i] = relayCost{outcome: "not_connected"}
-	}
 	results = append(results, sent...)
 	p.logRelayCosts(time.Since(start), results, append(costs, sentCosts...))
 	return results

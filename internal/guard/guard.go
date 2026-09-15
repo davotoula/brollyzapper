@@ -815,14 +815,12 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 		// ask never, which is one read-only local call per ten-second page cache.
 		if state.SpendRootKeyID != 0 || state.ReceiveRootKeyID != 0 {
 			if ids, err := g.node.ListMacaroonIDs(ctx); err == nil {
-				if state.SpendRootKeyID != 0 {
-					status.SpendRootKeyChecked = true
-					status.SpendRootKeyListed = slices.Contains(ids, state.SpendRootKeyID)
+				// Checked only for a key there is; listed only if checked.
+				ask := func(id uint64) (checked, listed bool) {
+					return id != 0, id != 0 && slices.Contains(ids, id)
 				}
-				if state.ReceiveRootKeyID != 0 {
-					status.ReceiveRootKeyChecked = true
-					status.ReceiveRootKeyListed = slices.Contains(ids, state.ReceiveRootKeyID)
-				}
+				status.SpendRootKeyChecked, status.SpendRootKeyListed = ask(state.SpendRootKeyID)
+				status.ReceiveRootKeyChecked, status.ReceiveRootKeyListed = ask(state.ReceiveRootKeyID)
 			}
 		}
 	}
