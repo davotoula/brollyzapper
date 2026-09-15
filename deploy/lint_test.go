@@ -442,35 +442,6 @@ func TestTheServerHasAFixedAddressAndTheGuardBakesIt(t *testing.T) {
 // from umbrel/lint_test.go because the hazard is the deployment's, not
 // umbrelOS's: mounting LND's data directory whole also exposes wallet.db,
 // macaroons.db and channel.backup.
-// mountSource returns the host side of a compose short-syntax volume.
-//
-// IT CANNOT JUST CUT AT THE FIRST COLON, which is what this did until the
-// mounts gained compose's required-variable form: `${LND_DIR:?...}` puts a colon
-// INSIDE the source, so cutting at the first one yielded "${LND_DIR" and the
-// mount check reported that the guard mounts LND's directory whole — a false
-// alarm on a template that had just been made safer. Blank the interpolations
-// first; what is left has colons only where compose means them.
-func mountSource(volume string) string {
-	var out strings.Builder
-	depth := 0
-	for i := 0; i < len(volume); i++ {
-		switch {
-		case strings.HasPrefix(volume[i:], "${"):
-			depth++
-			out.WriteString("$_")
-			i++
-		case depth > 0 && volume[i] == '}':
-			depth--
-		case depth == 0:
-			out.WriteByte(volume[i])
-		}
-	}
-	source, _, _ := strings.Cut(out.String(), ":")
-	// The blanked form is only for FINDING the boundary; the caller wants the
-	// real text, so map the index back.
-	return volume[:len(volume)-len(out.String())+len(source)]
-}
-
 func TestTheGuardMountsTwoFilesAndNotTheDirectory(t *testing.T) {
 	compose, _ := loadCompose(t)
 	// `${LND_DIR` and not `${LND_DIR}`, because the mounts carry compose's
@@ -490,7 +461,7 @@ func TestTheGuardMountsTwoFilesAndNotTheDirectory(t *testing.T) {
 			"admin.macaroon): %v", len(fromLND), fromLND)
 	}
 	for _, v := range fromLND {
-		source := mountSource(v)
+		source := composelint.MountSource(v)
 		if !strings.HasSuffix(source, "tls.cert") && !strings.HasSuffix(source, "admin.macaroon") {
 			t.Errorf("the guard mounts %q out of LND's directory; only tls.cert and "+
 				"admin.macaroon may be mounted, and never the directory itself — it also "+

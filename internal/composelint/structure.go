@@ -210,6 +210,32 @@ var (
 	numericRE       = regexp.MustCompile(`^[0-9]+$`)
 )
 
+// MountSource is the host side of a compose short-syntax volume — everything
+// before the first colon that is not inside a `${…}` interpolation. A volume with
+// no such colon is all source.
+//
+// IT CANNOT JUST CUT AT THE FIRST COLON. `${LND_DIR:?msg}/tls.cert:/lnd/tls.cert:ro`
+// puts a colon INSIDE the source, so a first-colon cut yields "${LND_DIR" and a
+// mount check reports that the guard mounts LND's directory whole — a false alarm
+// deploy's lint raised on a template that had just been made safer. It lived there
+// as mountSource until the regtest and umbrel lints, which still cut at the first
+// colon, were moved onto this one reader (BrollyZap-20i.25).
+func MountSource(volume string) string {
+	depth := 0
+	for i := 0; i < len(volume); i++ {
+		switch {
+		case strings.HasPrefix(volume[i:], "${"):
+			depth++
+			i++
+		case depth > 0 && volume[i] == '}':
+			depth--
+		case depth == 0 && volume[i] == ':':
+			return volume[:i]
+		}
+	}
+	return volume
+}
+
 // CommandLine is a service's `command:`, which compose accepts in two spellings:
 // a YAML list, one argument per item, or a single string it splits like a shell.
 // A TYPE, so a caller's own struct decodes it in place.

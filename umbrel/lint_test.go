@@ -300,7 +300,7 @@ func TestTheGuardMountsTwoFilesAndNotTheDirectory(t *testing.T) {
 			len(fromLND), fromLND)
 	}
 	for _, volume := range fromLND {
-		source, _, _ := strings.Cut(volume, ":")
+		source := composelint.MountSource(volume)
 		if !strings.HasSuffix(source, "tls.cert") && !strings.HasSuffix(source, "admin.macaroon") {
 			t.Errorf("the guard mounts %q; only tls.cert and admin.macaroon, as files (spec §6, §20)", volume)
 		}
@@ -314,7 +314,7 @@ func TestEveryBindMountSourceIsCommitted(t *testing.T) {
 	compose, _ := loadCompose(t)
 	for name, service := range compose.Services {
 		for _, volume := range service.Volumes {
-			source, _, _ := strings.Cut(volume, ":")
+			source := composelint.MountSource(volume)
 			rest, found := strings.CutPrefix(source, "${APP_DATA_DIR}/")
 			if !found {
 				continue
