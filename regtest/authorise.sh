@@ -17,7 +17,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-TOOL_IMAGE="${TOOL_IMAGE:-alpine:3.20}"
+# Default: tools/sqlite/Dockerfile's FROM, stated once (0vk.59; script_lint_test.go says why).
+TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
+[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
 CRED_VOLUME="${CRED_VOLUME:-brollyregtest_credentials}"
 GUARD_DATA_VOLUME="${GUARD_DATA_VOLUME:-brollyregtest_guard-data}"
 # The compose service, not the container: `brollyzapper` here, `server` on

@@ -13,6 +13,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Default: tools/sqlite/Dockerfile's FROM, stated once (0vk.59; script_lint_test.go says why).
+TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
+[ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
 APP="${APP:-http://localhost:8080}"
 DBVOL="${DBVOL:-brollyregtest_server-data}"
 CRED_VOLUME="${CRED_VOLUME:-brollyregtest_credentials}"
@@ -95,16 +98,16 @@ lncli_recv()  { docker compose exec -T lnd lncli --network=regtest "$@"; }
 
 # cred_read / cred_write — the credential volume, in spend.sh's shape. The
 # round trip is hex so a macaroon survives a shell.
-cred_read()  { docker run --rm -v "$CRED_VOLUME:/c" alpine:3.20 \
+cred_read()  { docker run --rm -v "$CRED_VOLUME:/c" "$TOOL_IMAGE" \
                  sh -c "od -An -v -tx1 /c/$1 | tr -d ' \n'" 2>/dev/null || true; }
-cred_write() { docker run --rm -v "$CRED_VOLUME:/c" alpine:3.20 \
+cred_write() { docker run --rm -v "$CRED_VOLUME:/c" "$TOOL_IMAGE" \
                  sh -c "printf '%s' '$2' | sed 's/../\\\\x&/g' | xargs -0 printf > /c/$1"; }
 
 # guardctl <command> — the guard's socket, through the server's own client, the
 # way spend.sh does it. Baking with lncli would prove something about lncli.
 guardctl() {
   docker run --rm -v "$CRED_VOLUME:/credentials" -v "$WORK/guardctl:/guardctl:ro" \
-    alpine:3.20 /guardctl "$@"
+    "$TOOL_IMAGE" /guardctl "$@"
 }
 
 # GUARD_DATA_VOLUME is the guard's OWN volume — the one the server has no mount
@@ -119,7 +122,7 @@ GUARD_DATA_VOLUME="${GUARD_DATA_VOLUME:-brollyregtest_guard-data}"
 # make every call in this script look like something the server can do.
 guardctl_op() {
   docker run --rm -v "$CRED_VOLUME:/credentials" -v "$GUARD_DATA_VOLUME:/guard:ro" \
-    -v "$WORK/guardctl:/guardctl:ro" alpine:3.20 /guardctl "$@"
+    -v "$WORK/guardctl:/guardctl:ro" "$TOOL_IMAGE" /guardctl "$@"
 }
 
 # permit_sending — the operator's ceremony (`06v`), through guardctl.
@@ -144,7 +147,7 @@ app_log_count() { docker compose logs brollyzapper 2>&1 | grep -c "$1" || true; 
 # reaches the relay by its compose name exactly as the service does.
 nwc() {
   docker run --rm --net="container:$(docker compose ps -q brollyzapper)" \
-    -v "$WORK:/w" alpine:3.20 /w/nwctool "$@" 2>>"$WORK/client.err"
+    -v "$WORK:/w" "$TOOL_IMAGE" /w/nwctool "$@" 2>>"$WORK/client.err"
 }
 
 say "0. setup"
@@ -153,7 +156,7 @@ command -v jq >/dev/null || die "jq is not on PATH"
 docker compose ps -q brollyzapper >/dev/null 2>&1 || die "the stack is not up"
 docker build -q -t brollyregtest-sqlite tools/sqlite >/dev/null || die "could not build tools/sqlite"
 
-case "$(docker run --rm alpine:3.20 uname -m)" in
+case "$(docker run --rm "$TOOL_IMAGE" uname -m)" in
   aarch64|arm64) GOARCH=arm64 ;;
   x86_64|amd64)  GOARCH=amd64 ;;
   *) die "cannot map the container architecture to a GOARCH" ;;
@@ -174,7 +177,7 @@ ok "nwctool built (linux/$GOARCH, and for the host), guardctl and zaptool built"
 # sha256_hex hashes stdin in a container rather than on the host, because the
 # host tool is `shasum` on macOS and `sha256sum` on the CI runner and this has to
 # give the same answer on both.
-sha256_hex() { docker run --rm -i alpine:3.20 sha256sum | cut -d" " -f1; }
+sha256_hex() { docker run --rm -i "$TOOL_IMAGE" sha256sum | cut -d" " -f1; }
 
 # A connection, as §8's pairing URI describes one. Two fresh keypairs: the
 # service's (this connection's OWN, per NIP-47's privacy guidance) and the
@@ -386,7 +389,7 @@ guardctl revoke-spend >/dev/null 2>&1 || true
 # permitted again before a bake — same as it is for an operator.
 permit_sending
 guardctl bake-spend >/dev/null 2>&1 || die "the guard refused to bake the spend macaroon"
-docker run --rm -v "$CRED_VOLUME:/credentials" alpine:3.20 \
+docker run --rm -v "$CRED_VOLUME:/credentials" "$TOOL_IMAGE" \
   test -s /credentials/spend.macaroon || die "no spend.macaroon appeared in the credential volume"
 ok "a fresh spend macaroon was baked through the guard"
 
