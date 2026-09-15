@@ -181,17 +181,23 @@ func TestAStartupSweepRevokesAKeyNothingNames(t *testing.T) {
 		t.Fatalf("EnsureReceiveMacaroon: %v", err)
 	}
 	live := readGuardState(t, d.data).ReceiveRootKeyID
-	orphan := failAReceiveBakeAfterTheNodeMintedItsKey(t, node, g, d, clock)
+	// TWO, so one row per sweep and one row per key cannot both pass.
+	orphans := []uint64{
+		failAReceiveBakeAfterTheNodeMintedItsKey(t, node, g, d, clock),
+		failAReceiveBakeAfterTheNodeMintedItsKey(t, node, g, d, clock),
+	}
 
 	restarted := openGuardOnClock(t, node, d, clock, false)
 	sweepAsAtStartup(t, restarted)
 
-	if contains(node.ListedRootKeyIDs(), orphan) {
-		t.Errorf("the orphan %d is still listed at the node after a startup sweep (deleted: %v)",
-			orphan, node.DeletedRootKeyIDs())
-	}
-	if contains(pendingRootKeys(t, d), orphan) {
-		t.Errorf("the revoked orphan %d is still recorded as pending", orphan)
+	for _, orphan := range orphans {
+		if contains(node.ListedRootKeyIDs(), orphan) {
+			t.Errorf("the orphan %d is still listed at the node after a startup sweep (deleted: %v)",
+				orphan, node.DeletedRootKeyIDs())
+		}
+		if contains(pendingRootKeys(t, d), orphan) {
+			t.Errorf("the revoked orphan %d is still recorded as pending", orphan)
+		}
 	}
 	if contains(node.DeletedRootKeyIDs(), live) {
 		t.Errorf("the sweep revoked the live receive key %d", live)
@@ -201,13 +207,82 @@ func TestAStartupSweepRevokesAKeyNothingNames(t *testing.T) {
 	for _, event := range restarted.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
 		if event.Event == logging.EventMacaroonRevoke && event.Attrs["count"] != "" {
 			rows++
-			if event.Attrs["count"] != "1" {
-				t.Errorf("the sweep's row counts %q revoked, want 1", event.Attrs["count"])
+			if event.Attrs["count"] != "2" {
+				t.Errorf("the sweep's row counts %q revoked, want 2", event.Attrs["count"])
 			}
 		}
 	}
 	if rows != 1 {
 		t.Errorf("%d sweep rows in the trail, want exactly one", rows)
+	}
+}
+
+// A sidecar counts only BESIDE ITS CREDENTIAL. The kill switch removes
+// spend.macaroon and leaves its sidecar; when the node refused that revocation the
+// key is kept pending, and a sidecar still naming it must not spare it from every
+// later sweep — there is no credential left for it to protect.
+func TestASidecarWithNoCredentialSparesNothing(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Now().UTC()}
+	g := openGuardOnClock(t, node, d, clock, true)
+	if err := g.BakeSpend(t.Context()); err != nil {
+		t.Fatalf("BakeSpend: %v", err)
+	}
+	key := currentSpendRootKey(t, d)
+	// Kept pending by a bake whose revocation of it failed: supersede it once.
+	node.SetDeleteMacaroonIDError(key, errors.New("not now"))
+	clock.pastTheRepeatGuard()
+	if err := os.Remove(filepath.Join(d.credentials, lnd.SpendMacaroon)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.EnsureSpendMacaroon(t.Context()); err != nil {
+		t.Fatalf("the superseding bake: %v", err)
+	}
+	if !contains(pendingRootKeys(t, d), key) {
+		t.Fatalf("premise: the superseded key %d should be pending", key)
+	}
+	// The spend credential goes, and a STALE sidecar naming the old key is left
+	// where the new one was.
+	if err := os.Remove(filepath.Join(d.credentials, lnd.SpendMacaroon)); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(d.credentials, lnd.SpendMacaroon+guard.RootKeySidecarSuffix)
+	if err := os.WriteFile(stale, []byte(strconv.FormatUint(key, 10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	node.SetDeleteMacaroonIDError(key, nil)
+
+	sweepAsAtStartup(t, openGuardOnClock(t, node, d, clock, true))
+	if !contains(node.DeletedRootKeyIDs(), key) {
+		t.Errorf("a sidecar with no credential beside it spared %d from the sweep", key)
+	}
+}
+
+// And the kill switch is not softened by the sidecar rule. A FIRST spend bake that
+// died after writing the credential leaves the file and its sidecar naming K, no
+// current spend key, and K pending — tna.5 G4's shape. "Disable sending" must
+// revoke K: it is the spend credential's own key, and ending sending is exactly
+// the operation that must reach it.
+func TestTheKillSwitchRevokesTheSpendKeyItsOwnSidecarNames(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Now().UTC()}
+	g := openGuardOnClock(t, node, d, clock, true)
+	interruptAfterWriting(g, lnd.SpendMacaroon)
+	if err := g.BakeSpend(t.Context()); !errors.Is(err, errCrash) {
+		t.Fatalf("the interrupted bake returned %v, want the injected crash", err)
+	}
+	key := bakedUnder(t, filepath.Join(d.credentials, lnd.SpendMacaroon))
+	if readGuardState(t, d.data).SpendRootKeyID != 0 {
+		t.Fatal("premise: a first bake that died before its state write records no spend key")
+	}
+
+	restarted := openGuardOnClock(t, node, d, clock, true)
+	_ = restarted.RevokeSpend(t.Context()) // it reports the missing record as an error, by design
+	if !contains(node.DeletedRootKeyIDs(), key) {
+		t.Errorf("the kill switch left %d live — the spend credential's own key — because its "+
+			"sidecar named it", key)
 	}
 }
 
