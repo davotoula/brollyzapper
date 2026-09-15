@@ -2,6 +2,7 @@ package guard_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/netip"
@@ -490,5 +491,87 @@ func TestTheOperatorSweepsSpareTheOtherCredentialsLiveKey(t *testing.T) {
 	if !contains(pendingRootKeys(t, d), receiving) {
 		t.Errorf("the spared key %d was dropped from pending; nothing would ever sweep it once "+
 			"the receive credential is re-baked", receiving)
+	}
+}
+
+// Criterion 13's first half: a pending id the STATE names as current is spared.
+//
+// HAND-WRITTEN STATE, and that is the point rather than a shortcut. No real path
+// produces it — bake removes a key from the pending set in the same write that
+// records it as current (TestACurrentRootKeyIsNeverLeftPending) — so the spare is
+// defence in depth against a state from somewhere else: an older build, a restore,
+// a hand edit. A bake-driven fixture could not reach the branch, which is how a
+// mutation deleting it went unnoticed.
+func TestAnUnattendedSweepSparesAKeyTheStateNamesAsCurrent(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Now().UTC()}
+	g := openGuardOnClock(t, node, d, clock, false)
+	if err := g.EnsureReceiveMacaroon(t.Context()); err != nil {
+		t.Fatalf("EnsureReceiveMacaroon: %v", err)
+	}
+	live := readGuardState(t, d.data).ReceiveRootKeyID
+
+	path := filepath.Join(d.data, "guard-state.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// UseNumber: a root key id is a uint64, and a plain map would carry it as a
+	// float64 and write back a different key.
+	var state map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	state["pending_root_key_ids"] = []uint64{live}
+	if raw, err = json.Marshal(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// And the sidecar goes too, so it is the STATE that has to spare it — the
+	// sidecar would otherwise answer first. With no sidecar beside a credential
+	// the sweep stops altogether, so the credential goes as well: what is left is
+	// a state naming a current key that is also pending, and nothing on disk.
+	for _, name := range []string{lnd.ReceiveMacaroon + guard.RootKeySidecarSuffix, lnd.ReceiveMacaroon} {
+		if err := os.Remove(filepath.Join(d.credentials, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sweepAsAtStartup(t, openGuardOnClock(t, node, d, clock, false))
+	if contains(node.DeletedRootKeyIDs(), live) {
+		t.Errorf("the sweep revoked %d, which the state names as the current receive key", live)
+	}
+}
+
+// A key the node REFUSES to delete is kept pending, and no row says it was
+// revoked: the next sweep tries again (d24.10's keep-on-failure, unchanged).
+func TestAnUnattendedSweepKeepsWhatTheNodeWouldNotRevoke(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Now().UTC()}
+	g := openGuardOnClock(t, node, d, clock, false)
+	orphan := failAReceiveBakeAfterTheNodeMintedItsKey(t, node, g, d, clock)
+	node.SetDeleteMacaroonIDError(orphan, errors.New("not now"))
+
+	sweepAsAtStartup(t, g)
+	if !contains(pendingRootKeys(t, d), orphan) {
+		t.Fatalf("the sweep forgot %d after the node refused to revoke it; it is live at the node "+
+			"with no record anywhere", orphan)
+	}
+	for _, event := range g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
+		if event.Event == logging.EventMacaroonRevoke && event.Attrs["count"] != "" {
+			t.Errorf("a sweep that revoked nothing wrote a row claiming %s", event.Attrs["count"])
+		}
+	}
+
+	node.SetDeleteMacaroonIDError(orphan, nil)
+	sweepAsAtStartup(t, g)
+	if !contains(node.DeletedRootKeyIDs(), orphan) {
+		t.Errorf("the next sweep did not come back for %d", orphan)
 	}
 }
