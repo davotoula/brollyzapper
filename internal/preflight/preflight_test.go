@@ -722,6 +722,30 @@ func TestAnUnaskedNodeDoesNotMeanARevokedRootKey(t *testing.T) {
 	}
 }
 
+// The server reads a credential on disk that the guard's answer does not report:
+// the two are looking at different files, or the guard is a moment behind.
+// Neither is an answer about the key, so the row is not checked — for both
+// credentials, and without refusing a payment (as0.11's plant found this path
+// untested).
+func TestACredentialTheGuardDoesNotReportIsNotChecked(t *testing.T) {
+	in := inputs(t)
+	in.SpendMacaroon = func() ([]byte, bool) {
+		return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2026-12-01T00:00:00Z"), true
+	}
+	in.BrokerStatus = func(context.Context) (lnd.BrokerStatus, error) {
+		return lnd.BrokerStatus{LNDReachable: true}, nil
+	}
+	report := preflight.Run(t.Context(), in)
+	for _, id := range []string{preflight.CheckSpendRootKey, preflight.CheckReceiveRootKey} {
+		if got := check(t, report, id); got.State != preflight.NotChecked {
+			t.Errorf("%s is %v when the guard does not report the macaroon: %q", id, got.State, got.Detail)
+		}
+		if blocking(report, preflight.BlocksSending, id) {
+			t.Errorf("%s blocks sending on a question the guard did not answer", id)
+		}
+	}
+}
+
 // A spend macaroon the guard has no root key for blocks sending.
 //
 // It was never baked here, or was baked and revoked — which is what a stale copy
