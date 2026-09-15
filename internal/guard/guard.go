@@ -440,8 +440,27 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 	// credential that died in G3's window left its live key in this same pending
 	// set, and a receive bake that swept it would break sending, or the reverse.
 	// This credential's own sidecar names rootKeyID, which is spared anyway.
+	//
+	// AND WHEN THE OTHER CREDENTIAL HAS NO SIDECAR, NOTHING BUT THE SUPERSEDED KEY
+	// (PM ruling, 15 Sep 2026, from 2o1's go-review). Beside a present credential
+	// with no sidecar — an install upgraded from before sidecars — "names nothing"
+	// is a guess, and on the install whose last bake of that credential died in
+	// G3's window it is the wrong one: its live key is pending, and revoking it
+	// turns receiving or sending off in silence. previousKey is the one id this
+	// bake can prove is its own, so it still goes; the rest stay pending until a
+	// sweep that can tell — the other credential's next bake, which writes its
+	// sidecar. The unattended sweep makes the same refusal, whole (sweepOrphans).
+	//
+	// Sparing the whole pending set does exactly that: previousKey was this
+	// credential's CURRENT key, and a current key is never pending (the state write
+	// above removes rootKeyID in the same write that records it, and every earlier
+	// bake did the same), so it is outside the set and still revoked.
+	spare := g.sidecarRootKeys(receiveCredential, spendCredential)
+	if g.lacksSidecar(otherCredential(c)) {
+		spare = previous.PendingRootKeyIDs
+	}
 	kept, _ := g.sweepPending(ctx, c.kind, append(previous.PendingRootKeyIDs, previousKey), rootKeyID,
-		g.sidecarRootKeys(receiveCredential, spendCredential), true)
+		spare, true)
 	if err := g.state.update(func(st *State) {
 		st.PendingRootKeyIDs = slices.DeleteFunc(st.PendingRootKeyIDs, func(id uint64) bool {
 			return id != rootKeyID && !slices.Contains(kept, id)

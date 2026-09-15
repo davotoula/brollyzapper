@@ -591,3 +591,60 @@ func TestABakeStillAuditsEachKeyItRevokes(t *testing.T) {
 	}
 	t.Error("a bake that revoked the key it superseded wrote no macaroon.revoke row for it")
 }
+
+// PM ruling (15 Sep 2026, go-review CRITICAL): a bake's own sweep does not guess
+// beside the OTHER credential when that one has no sidecar.
+//
+// The shape: an install upgraded from before sidecars, whose last spend bake died
+// in G3's window — spend.macaroon baked under S2, the state still naming S1, S2
+// pending, and no sidecar to say which key the file uses. A routine receive
+// renewal then walks the shared pending set. Treating the missing sidecar as
+// "names nothing" revoked S2, the key the live spend credential depends on:
+// sending off in silence, and a ceremony to get it back. So while the other
+// credential is unaccounted for, the bake revokes only the key IT superseded,
+// which is provably its own, and leaves the rest pending for a sweep that can
+// tell.
+func TestABakeSparesPendingKeysBesideTheOtherCredentialWithNoSidecar(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	clock := &testClock{now: time.Now().UTC()}
+	g := openGuardOnClock(t, node, d, clock, true)
+	if err := g.EnsureReceiveMacaroon(t.Context()); err != nil {
+		t.Fatalf("EnsureReceiveMacaroon: %v", err)
+	}
+	superseded := readGuardState(t, d.data).ReceiveRootKeyID
+	if err := g.BakeSpend(t.Context()); err != nil {
+		t.Fatalf("the first spend bake: %v", err)
+	}
+	clock.pastTheRepeatGuard()
+	interruptAfterWriting(g, lnd.SpendMacaroon)
+	if err := g.BakeSpend(t.Context()); !errors.Is(err, errCrash) {
+		t.Fatalf("the interrupted spend bake returned %v, want the injected crash", err)
+	}
+	guard.SetCredentialWriter(g, guard.WriteCredential)
+	sending := bakedUnder(t, filepath.Join(d.credentials, lnd.SpendMacaroon))
+	if !contains(pendingRootKeys(t, d), sending) {
+		t.Fatalf("premise: the live spend key %d should be pending", sending)
+	}
+	// The install predates sidecars.
+	if err := os.Remove(filepath.Join(d.credentials, lnd.SpendMacaroon+guard.RootKeySidecarSuffix)); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.pastTheRepeatGuard()
+	if err := g.BakeReceive(t.Context()); err != nil {
+		t.Fatalf("the receive renewal: %v", err)
+	}
+
+	if contains(node.DeletedRootKeyIDs(), sending) {
+		t.Fatalf("a receive bake revoked %d, the key the spend credential on disk depends on, "+
+			"because that credential has no sidecar to say so", sending)
+	}
+	if !contains(pendingRootKeys(t, d), sending) {
+		t.Errorf("the spared key %d was dropped from pending; nothing would ever sweep it", sending)
+	}
+	if !contains(node.DeletedRootKeyIDs(), superseded) {
+		t.Errorf("the bake did not revoke %d, the receive key it superseded — that one is provably "+
+			"its own and must still go", superseded)
+	}
+}

@@ -56,6 +56,22 @@ func (g *Guard) noteSidecar(c credential, msg string, level slog.Level, err erro
 	g.log.Log(context.Background(), level, msg, attrs...)
 }
 
+// lacksSidecar is whether a credential is ON DISK with no readable sidecar — the
+// one state in which no sweep can tell that file's root key from an orphan.
+func (g *Guard) lacksSidecar(c credential) bool {
+	id, present := g.sidecarOf(c)
+	return present && id == 0
+}
+
+// otherCredential is the credential c is not, for a bake that must not guess
+// about its sibling.
+func otherCredential(c credential) credential {
+	if c.kind == receiveCredential.kind {
+		return spendCredential
+	}
+	return receiveCredential
+}
+
 // sidecarRootKeys is every root key id the named credentials' sidecars name, for
 // the sweeps to spare.
 func (g *Guard) sidecarRootKeys(credentials ...credential) []uint64 {
@@ -116,12 +132,11 @@ func (g *Guard) sweepOrphans(ctx context.Context) {
 	}
 	spare := []uint64{state.ReceiveRootKeyID, state.SpendRootKeyID}
 	for _, c := range []credential{receiveCredential, spendCredential} {
-		id, present := g.sidecarOf(c)
-		if present && id == 0 {
+		if g.lacksSidecar(c) {
 			return
 		}
-		spare = append(spare, id)
 	}
+	spare = append(spare, g.sidecarRootKeys(receiveCredential, spendCredential)...)
 
 	swept := state.PendingRootKeyIDs
 	kept, revoked := g.sweepPending(ctx, "orphaned", swept, 0, spare, false)
