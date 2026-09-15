@@ -2,6 +2,7 @@ package nwc
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -123,5 +124,29 @@ func TestTheGiveUpWarningSurvivesTheAnsweredLine(t *testing.T) {
 	}
 	if accepted, _ := lines[0]["accepted"].(float64); accepted != 0 {
 		t.Errorf("accepted=%v on a response no relay took, want 0", accepted)
+	}
+}
+
+// go-review of k2z: a response that could not be sealed was never published, so
+// nothing may say it was answered — the line is written after the publish, and
+// "relays=0" on it would read as a pairing with no relays rather than a
+// response that went nowhere. The ERROR line says what happened.
+func TestAResponseThatCouldNotBeSealedIsNotLoggedAsAnswered(t *testing.T) {
+	h := newHarness(t)
+	h.counting.mu.Lock()
+	h.counting.encryptErr = errors.New("the conversation key could not be derived")
+	h.counting.mu.Unlock()
+	// Built after the request is sealed by the CLIENT's identity, so only the
+	// service's reply fails.
+	h.handle(t, MethodGetBalance, nil)
+
+	if lines := answeredLines(t, h.logs.String()); len(lines) != 0 {
+		t.Errorf("%d answered lines for a response nothing published:\n%s", len(lines), h.logs.String())
+	}
+	if !loggedAt(t, h.logs.String(), "ERROR", "could not encrypt an NWC response") {
+		t.Errorf("the failure itself was not logged:\n%s", h.logs.String())
+	}
+	if got := len(h.relays.published()); got != 0 {
+		t.Fatalf("the fixture is wrong: %d publishes", got)
 	}
 }

@@ -123,6 +123,7 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 	// which is the one the Amethyst stall report could not localise. The counts
 	// are the LAST attempt's — the one that delivered, or the last one refused.
 	began := time.Now()
+	sent.published = true
 	defer func() { sent.took = time.Since(began) }()
 
 	for attempt := 0; ; attempt++ {
@@ -177,11 +178,13 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 }
 
 // delivery is what publishing one response took: every attempt and wait
-// together, and the last attempt's relay counts (k2z). The zero value is a
-// response that never reached a publish.
+// together, and the last attempt's relay counts (k2z). published says a publish
+// was begun at all; the zero value is a response that never reached one — an
+// encrypt or sign failure — which is not "answered" (go-review).
 type delivery struct {
 	took             time.Duration
 	relays, accepted int
+	published        bool
 }
 
 // publishOnce is one attempt, bounded by its own timeout.

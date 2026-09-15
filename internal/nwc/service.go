@@ -678,7 +678,7 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	s.reportOutcome(ctx, conn, req, resp)
 	// --- 6. encrypt and publish ---------------------------------------------
 	resp, answered, sent := s.respondAndMeasure(ctx, conn, event, scheme, resp, true)
-	if answered && resp.Error == nil {
+	if sent.published && resp.Error == nil {
 		s.reportAnswered(conn, req, entered, sent)
 	}
 	return resp, answered

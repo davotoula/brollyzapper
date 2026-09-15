@@ -300,13 +300,13 @@ func TestAnUnreachableNodeDoesNotFreezeSpending(t *testing.T) {
 // reads this.
 func TestShortfallIsThePreflightProducer(t *testing.T) {
 	r, _, _, _ := newReconciler(t, 500_000_000, 900_000_000)
-	if _, _, present := r.Shortfall(t.Context()); present {
+	if _, _, present, _ := r.Shortfall(t.Context()); present {
 		t.Error("a shortfall was reported before any check ran")
 	}
 	if err := r.Check(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	amount, cause, present := r.Shortfall(t.Context())
+	amount, cause, present, _ := r.Shortfall(t.Context())
 	if !present || amount != 400_000_000 {
 		t.Errorf("Shortfall = %d, %v; want 400000000, true", amount, present)
 	}

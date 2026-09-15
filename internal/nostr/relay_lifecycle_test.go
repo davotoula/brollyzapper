@@ -1272,3 +1272,23 @@ func TestASlowOrPartialConnectionPublishNamesWhatEachRelayCost(t *testing.T) {
 		t.Errorf("the unusable URL is recorded %+v, want not_connected — no socket, and it cost nothing", got)
 	}
 }
+
+// go-review of k2z: a dial begun AFTER the caller's deadline had already passed
+// cost nothing and waited for nothing, so it is not_connected — never
+// over_budget, which names the relay that ate the time.
+func TestADialWithNoTimeLeftIsNotRecordedAsOverBudget(t *testing.T) {
+	hole := newBlackHole(t)
+	pool, logged := loggedPool(t, func() []string { return nil })
+	defer pool.Close()
+
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	results := pool.PublishToConnection(ctx, signedNote(t), nostr.PairingRelays([]string{hole.url}))
+	if len(results) != 1 || results[0].OK() {
+		t.Fatalf("results = %+v, want one failure", results)
+	}
+
+	if got := costRecords(t, logged.String()).costFor(hole.url); got.Outcome != "not_connected" {
+		t.Errorf("a relay dialled with the deadline already gone is recorded %q, want not_connected", got.Outcome)
+	}
+}

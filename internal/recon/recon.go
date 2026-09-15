@@ -262,12 +262,19 @@ func (r *Reconciler) remember(walletMsat, nodeMsat int64) {
 //
 // The cause travels with the number because a number on its own sends the
 // operator to the wrong place (§9).
-func (r *Reconciler) Shortfall(ctx context.Context) (shortfallMsat int64, cause string, present bool) {
+//
+// A wallet that could not be read is an ERROR, not "not frozen" (go-review): the
+// two are different answers, and folding them rendered a pass on the panel with
+// the freeze state unread.
+func (r *Reconciler) Shortfall(ctx context.Context) (shortfallMsat int64, cause string, present bool, err error) {
 	deficit, frozen, err := r.wallet.Shortfall(ctx)
-	if err != nil || !frozen {
-		return 0, "", false
+	if err != nil {
+		return 0, "", false, err
 	}
-	return deficit.ShortfallMsat, deficit.Cause, true
+	if !frozen {
+		return 0, "", false, nil
+	}
+	return deficit.ShortfallMsat, deficit.Cause, true, nil
 }
 
 // Run checks on every tick and on every demand, until ctx ends.

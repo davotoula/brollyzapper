@@ -252,8 +252,8 @@ func TestTierTwoFlagsTheLightningAddressWhenTheProbeFails(t *testing.T) {
 
 func TestTierTwoFlagsAReconciliationShortfall(t *testing.T) {
 	in := inputs(t)
-	in.Shortfall = func(context.Context) (int64, string, bool) {
-		return 25_000, "another app on this node may have spent", true
+	in.Shortfall = func(context.Context) (int64, string, bool, error) {
+		return 25_000, "another app on this node may have spent", true, nil
 	}
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckReconciliation)
@@ -944,29 +944,34 @@ func TestTheReconciliationRowSaysHowCurrentItsVerdictIs(t *testing.T) {
 		name       string
 		at         time.Time
 		err        error
+		readErr    error
 		frozen     bool
 		wantOK     bool
 		wantBlocks preflight.Capability
 		wantDetail []string
 	}{
-		{"never checked", time.Time{}, nil, false, false, preflight.BlocksNothing,
+		{"never checked", time.Time{}, nil, nil, false, false, preflight.BlocksNothing,
 			[]string{"Not checked yet", "not frozen"}},
-		{"checked and healthy", checkedAt, nil, false, true, preflight.BlocksSending,
+		{"checked and healthy", checkedAt, nil, nil, false, true, preflight.BlocksSending,
 			[]string{"as of 08:46:00 UTC"}},
-		{"last check failed", checkedAt, down, false, false, preflight.BlocksNothing,
+		{"last check failed", checkedAt, down, nil, false, false, preflight.BlocksNothing,
 			[]string{"failed at 08:46:00 UTC", "connection refused", "last verdict stands", "not frozen"}},
 		// A freeze is the wallet's and stands whatever the freshness: it blocks.
-		{"frozen, last check failed", checkedAt, down, true, false, preflight.BlocksSending,
+		{"frozen, last check failed", checkedAt, down, nil, true, false, preflight.BlocksSending,
 			[]string{"25000", "failed at 08:46:00 UTC", "connection refused", "freeze stands"}},
-		{"frozen, never re-checked", time.Time{}, nil, true, false, preflight.BlocksSending,
+		{"frozen, never re-checked", time.Time{}, nil, nil, true, false, preflight.BlocksSending,
 			[]string{"25000", "Not re-checked"}},
-		{"frozen, checked", checkedAt, nil, true, false, preflight.BlocksSending,
+		{"frozen, checked", checkedAt, nil, nil, true, false, preflight.BlocksSending,
 			[]string{"25000", "as of 08:46:00 UTC"}},
+		// go-review: the freeze itself could not be read. A fresh node check says
+		// nothing about it, so this is not a pass "as of" that check.
+		{"freeze state unreadable", checkedAt, nil, errors.New("database is locked"), false, false,
+			preflight.BlocksNothing, []string{"Not checked", "database is locked"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := inputs(t)
-			in.Shortfall = func(context.Context) (int64, string, bool) {
-				return 25_000, "a force close", tc.frozen
+			in.Shortfall = func(context.Context) (int64, string, bool, error) {
+				return 25_000, "a force close", tc.frozen, tc.readErr
 			}
 			in.LastReconciliation = func() (time.Time, error) { return tc.at, tc.err }
 

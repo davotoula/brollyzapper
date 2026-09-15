@@ -332,7 +332,9 @@ type Inputs struct {
 	// Shortfall reports a reconciliation deficit and the likeliest reason for
 	// it (§5). The cause travels with the number because a number on its own
 	// sends the operator to the wrong place.
-	Shortfall func(ctx context.Context) (shortfallMsat int64, cause string, present bool)
+	// An error is "could not tell whether spending is frozen", which the row
+	// reports as not checked — never as no shortfall.
+	Shortfall func(ctx context.Context) (shortfallMsat int64, cause string, present bool, err error)
 	// LastReconciliation is when the last reconciliation check finished and what
 	// it returned; a zero time is none yet (d46.25).
 	//
@@ -958,7 +960,14 @@ func reconciliationCheck(ctx context.Context, in Inputs) Check {
 	if in.LastReconciliation != nil {
 		at, checkErr = in.LastReconciliation()
 	}
-	shortfall, cause, present := in.Shortfall(ctx)
+	shortfall, cause, present, readErr := in.Shortfall(ctx)
+	if readErr != nil {
+		// The FREEZE could not be read, and a node check however recent says
+		// nothing about it (go-review). Not a pass; not a finding either — the
+		// pay ladder reads the wallet itself and refuses on the same error.
+		notChecked(&c, "could not read whether spending is frozen: "+readErr.Error())
+		return c
+	}
 	failed := ""
 	if !at.IsZero() && checkErr != nil {
 		failed = fmt.Sprintf("The last check failed at %s: %v", clock(at), checkErr)

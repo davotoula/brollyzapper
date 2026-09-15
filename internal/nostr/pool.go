@@ -1040,6 +1040,12 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	// deadline shortens this rather than extending past it. That is the
 	// property go-nostr's hardcoded fifteen seconds lacked: it hangs off the
 	// pool's context, where no caller can reach it.
+	// NO TIME LEFT IS NOT A HUNG RELAY (go-review of k2z). A caller whose deadline
+	// has already gone gets a dial that fails at once, and labelling that the
+	// budget running out would name as costly a relay that cost nothing.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("nostr: connecting to %s: %w", url, err)
+	}
 	dialCtx, cancel := context.WithTimeoutCause(ctx, connectBudget, errConnectBudget)
 	defer cancel()
 
