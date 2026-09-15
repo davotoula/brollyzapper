@@ -299,13 +299,16 @@ func TestTheRenewalTickSweepsAnOrphanWithoutARestart(t *testing.T) {
 	}
 	tick := make(chan time.Time)
 	done := make(chan struct{})
-	started := make(chan struct{})
 	go func() {
 		defer close(done)
-		close(started)
 		g.RunRenewal(t.Context(), tick)
 	}()
-	<-started
+	// A BARRIER, not a tick for its own sake. The send on an unbuffered channel
+	// completes only once the loop is in its select, i.e. after the entry sweep —
+	// so the orphan below is made after that sweep has run, and only a TICK's
+	// sweep can revoke it. Without this the entry sweep, scheduled late, could do
+	// it and the test would pass with no tick sweep at all.
+	tick <- time.Now()
 	orphan := failAReceiveBakeAfterTheNodeMintedItsKey(t, node, g, d, clock)
 	tick <- time.Now()
 	close(tick)
