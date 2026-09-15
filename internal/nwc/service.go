@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	gonostr "github.com/nbd-wtf/go-nostr"
 
+	"github.com/davotoula/brollyzapper/internal/lnurl"
 	"github.com/davotoula/brollyzapper/internal/logging"
 	"github.com/davotoula/brollyzapper/internal/nostr"
 	"github.com/davotoula/brollyzapper/internal/store"
@@ -264,6 +266,10 @@ type connection struct {
 	// which is also the whole freshness window.
 	slots   chan struct{}
 	working sync.WaitGroup
+
+	// limit is this pairing's request rate limit (l3j), consulted in handle
+	// before the claim. Its zero value is a full bucket.
+	limit requestLimit
 
 	// The subscriptions are REPLACED on every reconnect, and read by the teardown
 	// on another goroutine, so they are behind a mutex rather than plain fields.
@@ -572,6 +578,26 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 			errorResponse(req.Method, CodeOther, "request expired"), false)
 	}
 
+	// --- 3a'. the rate limit, and NOT cached either (l3j) ---------------------
+	//
+	// HERE, and each neighbour is why. After the JSON, so the refusal names the
+	// method as every other error does. After freshness, so a stale request is
+	// told it expired rather than spending a token. And BEFORE THE CLAIM, for the
+	// reason freshness is: the claim writes the cache row, and bounding that write
+	// is half of what this limit is for — a refusal that wrote one would also
+	// answer the same id RATE_LIMITED from the cache for a day after the bucket
+	// had refilled.
+	//
+	// A sibling relay's copy of a request this bucket admitted a moment ago is not
+	// charged again; see requestLimit.admit. It goes on to the claim below, which
+	// dedupes it — the limiter does not need to know about the cache to agree with
+	// it.
+	if ok, episodeStarts := conn.limit.admit(event.ID, s.now()); !ok {
+		s.reportRateLimited(ctx, conn, req.Method, episodeStarts)
+		return s.respond(ctx, conn, event, scheme,
+			errorResponse(req.Method, CodeRateLimited, rateLimitedMessage), false)
+	}
+
 	// --- 3b. the durable cache, CLAIMED before the work ---------------------
 	//
 	// One statement decides "have I seen this?" and "am I the one handling it?".
@@ -805,6 +831,15 @@ func (s *Service) dispatch(ctx context.Context, conn *connection, req Request) R
 		}
 		if params.AmountMsat <= 0 {
 			return errorResponse(req.Method, CodeOther, "amount must be positive")
+		}
+		// THE SAME CEILING the LNURL callback mints under, and deliberately not a
+		// number of this package's own (l3j): an invoice this node will create is
+		// one fact, and two statements of it drift. Before the node is asked, so an
+		// absurd amount costs LND nothing.
+		if params.AmountMsat > lnurl.MaxSendableMsat {
+			return errorResponse(req.Method, CodeOther,
+				"amount is above this wallet's invoice ceiling of "+
+					strconv.FormatInt(lnurl.MaxSendableMsat, 10)+" msat")
 		}
 		invoice, err := s.invoices.Mint(ctx, params.AmountMsat, params.Description)
 		if err != nil {

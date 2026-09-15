@@ -176,6 +176,41 @@ func (s *Service) auditRefusal(ctx context.Context, connectionID int64, method M
 		slog.String("code", code))
 }
 
+// rateLimitedMessage is what a client over its request rate is told (l3j).
+const rateLimitedMessage = "too many requests; slow down and retry"
+
+// reportRateLimited says that a pairing is over its request rate — once per
+// EPISODE, not once per refused request (l3j).
+//
+// The episode's first refusal is audited and written to the connection's last
+// refusal, and every later one in the same episode logs at DEBUG and nothing more.
+// A flood is exactly the case where one line per request is the harm: this limit
+// exists to bound writes to an SD card, and a refusal that wrote an audit row, a
+// connection row and a WARN line each time would move the flood rather than stop
+// it. See requestLimit.admit for when an episode ends.
+//
+// AUDITED, which ruling 3 declines for QUOTA_EXCEEDED, and the difference is the
+// client. An honest client meeting its budget is routine; a client past sixty a
+// minute is not a wallet app being eager, and the operator should be able to find
+// out which pairing did it and when without debug mode. It shares the capability
+// refusals' hourly bound, and at one row per episode a flood cannot spend it.
+func (s *Service) reportRateLimited(ctx context.Context, conn *connection, method Method, episodeStarts bool) {
+	id := conn.row().ID
+	if !episodeStarts {
+		s.log.Debug("an NWC request was refused by the rate limit", "connection", id,
+			"method", method)
+		return
+	}
+	s.auditBounded(ctx, s.refusals, slog.LevelWarn,
+		"a paired client is over its request rate; its requests are refused until it slows down",
+		logging.EventConnectionRefuse,
+		[]any{"connection", id, "method", method, "code", CodeRateLimited},
+		slog.Int64("connection", id),
+		slog.String("method", string(method)),
+		slog.String("code", CodeRateLimited))
+	s.recordRefusal(ctx, id, &ResponseError{Code: CodeRateLimited, Message: rateLimitedMessage})
+}
+
 // auditBounded writes one event to §12's trail, or to the log alone when this
 // service has no sink or the hourly bound is spent.
 //
