@@ -165,15 +165,14 @@ def build(bolts, title, desc, width=MARK_PX, height=MARK_PX, mark_scale=1):
 
 TOUCH_ICON_PX = 180
 
-# In preference order. sips first because the committed apple-touch-icon.png was
-# rendered by it: rasterisers do not agree to the byte, so with rsvg-convert also
-# installed, preferring it made a plain re-run rewrite a PNG whose mark had not changed.
-# Reorder only together with re-rendering the committed PNG by the new first choice.
-# sips is macOS-only and takes only the longer edge (-Z), which keeps a non-square
-# SVG's aspect, so it is given max(w, h).
+# In preference order. rsvg-convert first because it is the one that is the same
+# on every machine; sips is macOS-only but needs no install, and takes only the
+# longer edge (-Z), which keeps a non-square SVG's aspect, so it is given max(w, h).
+# Rasterisers do not agree to the byte, which is why main() re-renders the committed
+# PNG only when the mark itself changed.
 RASTERISERS = (
-    ("sips", lambda src, dst, w, h: ["sips", "-s", "format", "png", "-Z", str(max(w, h)), str(src), "--out", str(dst)]),
     ("rsvg-convert", lambda src, dst, w, h: ["rsvg-convert", "-w", str(w), "-h", str(h), str(src), "-o", str(dst)]),
+    ("sips", lambda src, dst, w, h: ["sips", "-s", "format", "png", "-Z", str(max(w, h)), str(src), "--out", str(dst)]),
     ("inkscape", lambda src, dst, w, h: ["inkscape", str(src), "-w", str(w), "-h", str(h), "-o", str(dst)]),
     ("magick", lambda src, dst, w, h: ["magick", "-background", "none", str(src), "-resize", f"{w}x{h}", str(dst)]),
 )
@@ -188,7 +187,7 @@ def rasterise(src, dst, width, height):
     raise SystemExit(
         f"cannot render {dst.name}: no rasteriser found.\n"
         "Install any one of: " + ", ".join(name for name, _ in RASTERISERS) + ".\n"
-        "The SVGs above are written; only the PNG is missing."
+        f"Nothing was rendered to {dst.name}."
     )
 
 
@@ -213,16 +212,34 @@ def main():
     )
 
     master = HERE / "icon.svg"
+    previous_icon = master.read_text() if master.exists() else None
     master.write_text(icon)
     favicon_svg = STATIC / "favicon.svg"
     favicon_svg.write_text(favicon)
     social_svg = HERE / "social-preview.svg"
     social_svg.write_text(social)
 
+    # The committed touch icon is re-rendered only when the mark changed. Rasterisers
+    # differ to the byte, so rendering it on every run made a re-run on a machine with
+    # a different rasteriser rewrite a PNG whose mark had not moved (found 0vk.22:
+    # sips rendered the committed one, rsvg-convert was installed later).
     touch_icon = STATIC / "apple-touch-icon.png"
-    tool = rasterise(master, touch_icon, TOUCH_ICON_PX, TOUCH_ICON_PX)
+    if touch_icon.exists() and icon == previous_icon:
+        print(f"{touch_icon.relative_to(ROOT)}: mark unchanged, not re-rendered")
+    else:
+        try:
+            rasterise(master, touch_icon, TOUCH_ICON_PX, TOUCH_ICON_PX)
+        except BaseException:
+            # Put the old master back, so the next run still sees a changed mark
+            # and renders the PNG rather than skipping it as up to date.
+            if previous_icon is None:
+                master.unlink()
+            else:
+                master.write_text(previous_icon)
+            raise
+    # The social PNG is gitignored, so it is rendered every run.
     social_png = HERE / "social-preview.png"
-    rasterise(social_svg, social_png, SOCIAL_W, SOCIAL_H)
+    tool = rasterise(social_svg, social_png, SOCIAL_W, SOCIAL_H)
 
     for path in (master, favicon_svg, touch_icon, social_svg, social_png):
         print(f"{path.relative_to(ROOT)}: {path.stat().st_size} bytes")
