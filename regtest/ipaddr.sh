@@ -21,7 +21,10 @@ cd "$(dirname "$0")"
 # PAYER node after a `down -v` reshuffled them. The certificate carries
 # `--tlsextradomain=lnd`, which is what makes the name usable.
 LND_RPC="${LND_RPC:-lnd:10009}"
-LND_IMAGE="${LND_IMAGE:-lightninglabs/lnd:v0.21.1-beta}"
+# Default: docker-compose.yml's x-lnd-common image, stated once (0vk.61; script_lint_test.go
+# proves this resolves to the image the compose file parses to).
+LND_IMAGE="${LND_IMAGE:-$(awk '$1 == "x-lnd-common:" { in_lnd = 1; next } /^[^ #]/ { in_lnd = 0 } in_lnd && $1 == "image:" { print $2; exit }' docker-compose.yml 2>/dev/null || true)}"
+[ -n "$LND_IMAGE" ] || { echo "FAIL could not read the LND image from docker-compose.yml's x-lnd-common" >&2; exit 1; }
 # Root key ids for this script's macaroons, well clear of anything the app bakes.
 ROOT_KEY_BASE="${ROOT_KEY_BASE:-9040}"
 WORK=$(mktemp -d)

@@ -28,7 +28,10 @@ cd "$(dirname "$0")"
 # the wrong node and reports the wrong verdict. The certificate carries
 # `--tlsextradomain=lnd`, which is exactly what makes the name usable.
 LND_RPC="${LND_RPC:-lnd:10009}"
-LND_IMAGE="${LND_IMAGE:-lightninglabs/lnd:v0.21.1-beta}"
+# Default: docker-compose.yml's x-lnd-common image, stated once (0vk.61; script_lint_test.go
+# proves this resolves to the image the compose file parses to).
+LND_IMAGE="${LND_IMAGE:-$(awk '$1 == "x-lnd-common:" { in_lnd = 1; next } /^[^ #]/ { in_lnd = 0 } in_lnd && $1 == "image:" { print $2; exit }' docker-compose.yml 2>/dev/null || true)}"
+[ -n "$LND_IMAGE" ] || { echo "FAIL could not read the LND image from docker-compose.yml's x-lnd-common" >&2; exit 1; }
 # Default: tools/sqlite/Dockerfile's FROM, stated once (0vk.59; script_lint_test.go says why).
 TOOL_IMAGE="${TOOL_IMAGE:-$(awk '$1 == "FROM" { print $2; exit }' tools/sqlite/Dockerfile 2>/dev/null || true)}"
 [ -n "$TOOL_IMAGE" ] || { echo "FAIL could not read the tool image from tools/sqlite/Dockerfile's FROM line" >&2; exit 1; }
