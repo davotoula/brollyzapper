@@ -546,9 +546,18 @@ func TestASpendMacaroonWithNoRootKeyBehindItBlocksSending(t *testing.T) {
 
 	report := preflight.Run(t.Context(), in)
 
-	if got := check(t, report, preflight.CheckSpendRootKey); got.OK {
+	got := check(t, report, preflight.CheckSpendRootKey)
+	if got.OK {
 		t.Error("a spend macaroon with no root key behind it passed; it was either never " +
 			"baked here or has already been revoked")
+	}
+	// THE ROW ITSELF blocks, and says why. Since d46.25 an unchecked row is also
+	// not OK, so "not OK" alone no longer tells this finding from "not checked" —
+	// and the fixture's missing guard caveat blocks sending on its own, so the
+	// report-level check alone could not either.
+	if got.Blocks != preflight.BlocksSending || !strings.Contains(got.Detail, "no root key") {
+		t.Errorf("the root-key row blocks %q with %q; want sending, naming the missing root key",
+			got.Blocks, got.Detail)
 	}
 	if !report.Blocked(preflight.BlocksSending) {
 		t.Error("sending was not blocked")
