@@ -140,6 +140,11 @@ func TestTheGalleryFixtureShowsAHealthyInstall(t *testing.T) {
 		// waiting on the operator. Both were on the sending page before this list
 		// named them, because the fixture predates the fields they key on.
 		"does not permit sending", "Confirm this in a file only you can read",
+		// The third verdict (as0.11), and the Node page's unasked server line,
+		// which the gallery showed until this entry named it. Neither is a
+		// failure; neither is a healthy install that has finished looking at
+		// itself.
+		"not checked",
 	}
 
 	writeAssets(t, dir)
@@ -189,6 +194,11 @@ func galleryFixture(now time.Time) web.PageData {
 		{Kind: "invoice_in", State: "open", AmountMsat: 50_000, When: now.Add(-3 * day)},
 		{Kind: "zap", State: "settled", AmountMsat: 2_100, When: now.Add(-4 * day), Receipt: "published", ReceiptID: "a91e02…"},
 	}
+
+	// Node: the server's own credential has been answered, and works. The full
+	// fixture leaves it unasked, which renders "not checked yet" — right for
+	// reaching the branch, wrong on a store screenshot.
+	d.Node.ServerCheckedAt, d.Node.ServerReachable = now, true
 
 	// Sending: nothing in the way, and no ceremony mid-flight.
 	d.Sending.Blocked = nil
