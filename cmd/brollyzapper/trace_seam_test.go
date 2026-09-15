@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,13 +143,19 @@ func TestOneGrepOnThePaymentHashReconstructsAllThreeLegs(t *testing.T) {
 		State: lnrpc.Invoice_SETTLED, SettleIndex: 1, AmtPaidMsat: 21_000,
 		SettleDate: time.Now().Unix(),
 	})
-	go receipts.RunRetry(ctx, nil)
-	go runInvoiceStream(ctx, client, db, purse, receipts, log)
-	lndtest.WaitFor(t, "the receipt to be published", func() bool {
-		id, err := db.ZapReceiptID(ctx, hash)
-		return err == nil && id != ""
+	var legs sync.WaitGroup
+	legs.Go(func() { receipts.RunRetry(ctx, nil) })
+	legs.Go(func() { runInvoiceStream(ctx, client, db, purse, receipts, log) })
+	// ON THE LAST STEP: the receipt's LINE, not its row. The publisher records
+	// the receipt id before it logs, so waiting on the row and then reading the
+	// log is a race — lost once under -race before this waited on the line.
+	lndtest.WaitFor(t, "the receipt line to be logged", func() bool {
+		return strings.Contains(logged.String(), `"msg":"zap receipt published"`)
 	})
+	// Joined before reading, so nothing on either leg writes after the snapshot
+	// and neither goroutine outlives the client and store deferred above.
 	cancel()
+	legs.Wait()
 	everything := logged.String()
 	laterLegs := strings.TrimPrefix(everything, httpLeg)
 
