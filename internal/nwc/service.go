@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -543,7 +542,7 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	scheme, present, supported := requestedScheme(event.Tags)
 
 	s.log.Debug("handling an NWC request", "connection", conn.row().ID,
-		"event", event.ID, "kind", event.Kind, "tags", tagNames{event},
+		"event", event.ID, "kind", event.Kind, "tags", nostr.TagNames{Event: event},
 		"encryption", encryptionRequested(present, scheme, supported))
 
 	if !supported {
@@ -1230,33 +1229,6 @@ func nonNull(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 	return raw
-}
-
-// tagNames is the NAMES of an event's tags, sorted, for the one line that logs
-// an inbound request.
-//
-// Names only. A tag's value is chosen by the client and can be anything at all;
-// the name is what says which shape of request this is, and it is what the 0.1.11
-// investigation needed. Sorted so two requests carrying the same tags produce the
-// same line and a reader can compare them at a glance.
-//
-// A LogValuer rather than a function call, and that is not style: slog evaluates
-// its arguments EAGERLY, so `tagNames(event)` as an argument would allocate,
-// sort and join on every inbound request of every install — DEBUG is off on all
-// of them. Measured before changing it. LogValue runs only when a handler
-// actually formats the record, which is what makes this line free when nobody is
-// investigating. The same reason PayResult has one.
-type tagNames struct{ event *gonostr.Event }
-
-func (t tagNames) LogValue() slog.Value {
-	names := make([]string, 0, len(t.event.Tags))
-	for _, tag := range t.event.Tags {
-		if len(tag) > 0 {
-			names = append(names, tag[0])
-		}
-	}
-	slices.Sort(names)
-	return slog.StringValue(strings.Join(names, ","))
 }
 
 // requestedScheme is §8 step 2's reading of a request's tags: the scheme it

@@ -228,7 +228,12 @@ func (p *Publisher) attempt(ctx context.Context, zap store.SettledZap, pending s
 	p.drop(ctx, pending)
 	p.log.Info("zap receipt published", logging.PaymentHash(zap.PaymentHash),
 		"event_id", logging.Short(event.ID), "relays", len(results), "accepted", accepted,
-		"publish_ms", publishMS)
+		"publish_ms", publishMS,
+		// The receipt's tag NAMES, never their values — preimage is one (k2z, from
+		// the 0.1.21-rc1 trip). Nothing on the box retains a published receipt, and
+		// reading one back from public relays answered 1 query in 9 on that trip,
+		// so this is the only way a field check can see the receipt's shape.
+		"tags", nostr.TagNames{Event: event})
 }
 
 // reschedule queues the next attempt, or gives up once the window has passed.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -555,5 +556,38 @@ func TestTheReceiptLineSaysHowLongThePublishTook(t *testing.T) {
 	if floor := (takes / 2).Milliseconds(); record.PublishMS < floor {
 		t.Errorf("publish_ms = %d, want at least %d — the publish took %s and the line must "+
 			"say so:\n%s", record.PublishMS, floor, takes, line)
+	}
+}
+
+// k2z, from the 0.1.21-rc1 trip: the receipt line names the receipt's TAGS, so a
+// field check can verify the receipt's shape from the box — and never a tag's
+// VALUE, because one of them is the preimage.
+func TestTheReceiptLineNamesTheReceiptsTagsAndNoneOfTheirValues(t *testing.T) {
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged bytes.Buffer
+
+	h.publisherWith(&fakePool{}, &logged).PublishNow(t.Context(), hash)
+
+	var record struct {
+		Tags string `json:"tags"`
+	}
+	for _, candidate := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		if strings.Contains(candidate, "zap receipt published") {
+			if err := json.Unmarshal([]byte(candidate), &record); err != nil {
+				t.Fatalf("the receipt line is not JSON: %s", candidate)
+			}
+		}
+	}
+	names := strings.Split(record.Tags, ",")
+	for _, want := range []string{"bolt11", "description", "p", "preimage"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("the receipt line's tags %q do not name %q", record.Tags, want)
+		}
+	}
+	// The values must not be there: settleAs credits with this preimage, so if it
+	// reached the log in any form, this finds it.
+	if preimage := strings.Repeat("9", 64); strings.Contains(logged.String(), preimage) {
+		t.Errorf("the preimage reached the log:\n%s", logged.String())
 	}
 }
