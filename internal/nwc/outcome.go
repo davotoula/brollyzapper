@@ -88,7 +88,9 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 		// amount, the fee and the hash are in scope, and a second thin line here
 		// saying only "a payment was made" added nothing an operator could act
 		// on. Two INFO lines per payment is what the first version shipped.
-		s.log.Debug("an NWC request was answered", "connection", id, "method", req.Method)
+		//
+		// And ruling 5's DEBUG line is reportAnswered's, AFTER the publish, so it
+		// can say what the publish took (k2z).
 		return
 	}
 
@@ -112,6 +114,37 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 		s.log.Debug("an NWC request was refused", "connection", id,
 			"method", req.Method, "code", resp.Error.Code)
 	}
+}
+
+// reportAnswered is ruling 5's line for a request that succeeded, written once the
+// response has been published so that it carries the publish (k2z).
+//
+// ONE LINE, not a second one beside it joined on the event id: an operator greps
+// a box's journal for one record, and the Amethyst stall report of 28 Aug ended
+// on exactly the half this adds — it could see when the service answered, and
+// nothing about the publish that followed.
+//
+//   - handle_ms: entry to handle until the response was handed to the publish.
+//     The server's own share, a payment's trip to LND included.
+//   - publish_ms: from there until a relay took it or delivery stopped, every
+//     retry and its wait included.
+//   - relays, accepted: the last attempt's — the one that delivered, or the last
+//     one refused. accepted is never more than relays.
+//
+// Relay URLs are not on it: the WARNs name them when delivery fails, and the
+// pool's per-relay records do when a publish is slow or partial. No payload and
+// no client identity, as before.
+//
+// Refusals keep their own lines, written before the publish, and do not carry the
+// timing: their question is which control refused, not how long delivery took.
+func (s *Service) reportAnswered(conn *connection, req Request, entered time.Time, sent delivery) {
+	handleMS := int64(0)
+	if !sent.began.IsZero() {
+		handleMS = sent.began.Sub(entered).Milliseconds()
+	}
+	s.log.Debug("an NWC request was answered", "connection", conn.row().ID, "method", req.Method,
+		"handle_ms", handleMS, "publish_ms", sent.took.Milliseconds(),
+		"relays", sent.relays, "accepted", sent.accepted)
 }
 
 // recordRefusal remembers, ON THE CONNECTION, the last thing this pairing was

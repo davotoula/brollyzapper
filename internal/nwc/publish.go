@@ -106,7 +106,7 @@ var ResponseRetryDelays = []time.Duration{time.Second, 2 * time.Second}
 // from ITS timestamp rather than from ours. A request that has been in flight for
 // fifty-eight seconds gets one attempt, because there is no room for a second.
 func (s *Service) publishResponse(ctx context.Context, conn *connection, response gonostr.Event,
-	requestedAt time.Time) {
+	requestedAt time.Time) (sent delivery) {
 	// From the CLIENT'S timestamp, not from now: the clock the client is
 	// watching started when it published, and everything since — the relay hop,
 	// the ladder, a payment that ran to LND's own timeout — has already spent
@@ -118,6 +118,12 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 	// so a response sent to a subset is a response the client may never hear.
 	// Accepted by any ONE of them is delivery.
 	relays := nostr.PairingRelays(conn.row().Relays)
+	// MEASURED (k2z), across every attempt and every wait between them: the
+	// interval is "we produced a response" to "a relay has it, or we stopped",
+	// which is the one the Amethyst stall report could not localise. The counts
+	// are the LAST attempt's — the one that delivered, or the last one refused.
+	sent.began = time.Now()
+	defer func() { sent.took = time.Since(sent.began) }()
 
 	for attempt := 0; ; attempt++ {
 		// THE FIRST ATTEMPT IS ALWAYS MADE. The budget bounds RETRIES, and that
@@ -137,21 +143,23 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 			s.log.Warn("gave up retrying an NWC response; the client has stopped listening",
 				"connection", conn.row().ID, "relays", strings.Join(relays.URLs(), " "),
 				"attempts", attempt)
-			return
+			return sent
 		}
-		if nostr.Accepted(s.publishOnce(ctx, response, relays)) > 0 {
+		results := s.publishOnce(ctx, response, relays)
+		sent.relays, sent.accepted = len(results), nostr.Accepted(results)
+		if sent.accepted > 0 {
 			// A relay that took it does not need it again — and one answering
 			// "duplicate" HAS it, which a retry would report as a failure.
-			return
+			return sent
 		}
 		if attempt >= len(s.responseRetries) {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return sent
 		case <-conn.done:
-			return
+			return sent
 		case <-time.After(s.responseRetries[attempt]):
 		}
 	}
@@ -165,6 +173,16 @@ func (s *Service) publishResponse(ctx context.Context, conn *connection, respons
 	// thing that happens.
 	s.log.Warn("no relay accepted an NWC response", "connection", conn.row().ID,
 		"relays", strings.Join(relays.URLs(), " "), "attempts", len(s.responseRetries)+1)
+	return sent
+}
+
+// delivery is what publishing one response took: when it began, how long every
+// attempt and wait took together, and the last attempt's relay counts (k2z).
+// The zero value is a response that never reached a publish.
+type delivery struct {
+	began            time.Time
+	took             time.Duration
+	relays, accepted int
 }
 
 // publishOnce is one attempt, bounded by its own timeout.
