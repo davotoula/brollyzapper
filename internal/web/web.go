@@ -593,11 +593,48 @@ type SecurityView struct {
 
 // CheckRow is one preflight check as the page shows it.
 type CheckRow struct {
-	Title  string
-	OK     bool
-	Threat string
-	Detail string
+	Title   string
+	Verdict Verdict
+	Threat  string
+	Detail  string
+	// Blocks is what the control takes away on a failure. The page shows it only
+	// against FAIL: a not-checked row takes nothing, whatever this says.
 	Blocks string
+}
+
+// Failed reports whether the row is a failure, the one verdict whose Blocks the
+// page states.
+func (r CheckRow) Failed() bool { return r.Verdict == VerdictFail }
+
+// Passed reports whether the row passed.
+func (r CheckRow) Passed() bool { return r.Verdict == VerdictPass }
+
+// Verdict is a check's state in the Security page's first cell (as0.11).
+//
+// THREE, because "could not be evaluated" is neither: the cell used to know only
+// pass and FAIL, so every row the guard could not answer read FAIL. The zero
+// value is not checked, for the reason preflight.State's is — a row nobody gave
+// a verdict has not earned either word. internal/web imports nothing of the
+// app's, so this is the page's own statement of the three, mapped from
+// preflight's in one place (internal/api's Security handler).
+type Verdict int
+
+const (
+	VerdictNotChecked Verdict = iota
+	VerdictPass
+	VerdictFail
+)
+
+// String is the word in the cell. "not checked", lower case, is the Node page's
+// phrase for its probe line, so the two pages say one thing one way.
+func (v Verdict) String() string {
+	switch v {
+	case VerdictPass:
+		return "pass"
+	case VerdictFail:
+		return "FAIL"
+	}
+	return "not checked"
 }
 
 // AuditRow is one line of the §12 trail.

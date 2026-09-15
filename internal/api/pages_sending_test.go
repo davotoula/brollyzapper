@@ -159,7 +159,7 @@ func TestTheSendingPageShowsWhySendingIsBlocked(t *testing.T) {
 	h.report = preflight.Report{Checks: []preflight.Check{{
 		ID:     preflight.CheckSpendIPMatches,
 		Title:  "The spend macaroon is locked to this container",
-		OK:     false,
+		State:  preflight.Fail,
 		Detail: "the macaroon is locked to 10.21.0.99 but this container is 10.21.0.17",
 		Blocks: preflight.BlocksSending,
 	}}}

@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -109,6 +110,10 @@ func inputs(t *testing.T) preflight.Inputs {
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		t.Fatalf("securing the fixture data dir: %v", err)
 	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	// EVERY ROW-BEARING ACCESSOR WIRED, and healthy (as0.11): an unwired one reads
+	// not checked, so a fixture that left one out would not be a healthy install.
+	// TestAHealthyFixtureHasEveryRowPassing holds it to that.
 	return preflight.Inputs{
 		NodeState: func() lnd.State { return lnd.StateReady },
 		BrokerStatus: func(context.Context) (lnd.BrokerStatus, error) {
@@ -123,7 +128,14 @@ func inputs(t *testing.T) preflight.Inputs {
 		ServerIP: netip.MustParseAddr("10.21.0.17"),
 		DataDir:  dataDir,
 		Domain:   func(context.Context) (string, bool, string) { return "zap.example", true, "" },
-		Now:      func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		Shortfall: func(context.Context) (int64, string, bool, error) {
+			return 0, "", false, nil
+		},
+		LastReconciliation: func() (time.Time, error) { return now, nil },
+		UnresolvedPayments: func(context.Context) (int, error) { return 0, nil },
+		CertificateName:    func() *lnd.CertificateNameError { return nil },
+		ServerCredential:   func() preflight.ProbeResult { return preflight.ProbeResult{At: now} },
+		Now:                func() time.Time { return now },
 	}
 }
 
@@ -136,6 +148,12 @@ func check(t *testing.T, report preflight.Report, id string) preflight.Check {
 	}
 	t.Fatalf("no check with id %q; the report has %v", id, ids(report))
 	return preflight.Check{}
+}
+
+// blocking reports whether the row with id is among what the report says takes
+// capability away — the pay ladder's question, asked of one row.
+func blocking(report preflight.Report, capability preflight.Capability, id string) bool {
+	return slices.ContainsFunc(report.BlockedBy(capability), func(c preflight.Check) bool { return c.ID == id })
 }
 
 func ids(report preflight.Report) []string {
@@ -153,7 +171,7 @@ func TestTierTwoBlocksSendingWhenTheSpendMacaroonIsUnconstrained(t *testing.T) {
 
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckSpendCaveats)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("a spend macaroon with no caveats passed the caveat check")
 	}
 	if got.Blocks != preflight.BlocksSending {
@@ -174,7 +192,7 @@ func TestTierTwoBlocksSendingWhenTheIPLockIsForAnotherContainer(t *testing.T) {
 	}
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckSpendIPMatches)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("an ipaddr caveat for another address passed")
 	}
 	if !strings.Contains(got.Detail, "10.21.0.99") || !strings.Contains(got.Detail, "10.21.0.17") {
@@ -188,7 +206,7 @@ func TestTierTwoBlocksSendingWhenTheSpendMacaroonHasExpired(t *testing.T) {
 		return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2020-01-01T00:00:00Z"), true
 	}
 	report := preflight.Run(t.Context(), in)
-	if got := check(t, report, preflight.CheckSpendExpiry); got.OK {
+	if got := check(t, report, preflight.CheckSpendExpiry); got.State != preflight.Fail {
 		t.Error("an expired spend macaroon passed the expiry check")
 	}
 	// §11: receiving continues.
@@ -209,7 +227,7 @@ func TestTierTwoBlocksSendingWhenTheRootKeyIsAlreadyRevoked(t *testing.T) {
 			SpendRootKeyRecorded: true, SpendRootKeyChecked: true, SpendRootKeyListed: false}, nil
 	}
 	report := preflight.Run(t.Context(), in)
-	if got := check(t, report, preflight.CheckSpendRootKey); got.OK {
+	if got := check(t, report, preflight.CheckSpendRootKey); got.State != preflight.Fail {
 		t.Error("a spend root key the node no longer lists passed")
 	}
 }
@@ -221,7 +239,7 @@ func TestTierTwoBlocksSendingWhenTheGuardIsUnreachable(t *testing.T) {
 	}
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckGuardReachable)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("an unreachable guard passed")
 	}
 	if got.Blocks != preflight.BlocksSending {
@@ -236,7 +254,7 @@ func TestTierTwoFlagsTheLightningAddressWhenTheProbeFails(t *testing.T) {
 	}
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckLightningAddress)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("a failing self-probe passed")
 	}
 	if got.Blocks != preflight.BlocksAddress {
@@ -257,7 +275,7 @@ func TestTierTwoFlagsAReconciliationShortfall(t *testing.T) {
 	}
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckReconciliation)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("a reconciliation shortfall passed")
 	}
 	if got.Blocks != preflight.BlocksSending {
@@ -283,7 +301,7 @@ func TestTierTwoTightensAWideDataDirectory(t *testing.T) {
 
 	report := preflight.Run(t.Context(), in)
 	got := check(t, report, preflight.CheckDataDirMode)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("a world-readable data directory passed")
 	}
 	info, err := os.Stat(in.DataDir)
@@ -309,6 +327,183 @@ func TestAHealthyInstanceHasNoFailedChecks(t *testing.T) {
 	}
 	if report.Blocked(preflight.BlocksSending) || report.Blocked(preflight.BlocksAddress) {
 		t.Error("a healthy instance blocked a capability")
+	}
+}
+
+// as0.11: the fixture every other test starts from is a healthy install, row by
+// row. Failed() being empty is not that — a not-checked row is not a failure —
+// so this asserts Pass on each, which is what makes "one accessor nil turns
+// exactly these rows not checked" below mean anything.
+func TestAHealthyFixtureHasEveryRowPassing(t *testing.T) {
+	for _, c := range preflight.Run(t.Context(), inputs(t)).Checks {
+		if c.State != preflight.Pass {
+			t.Errorf("%s is %v on the healthy fixture: %q", c.ID, c.State, c.Detail)
+		}
+	}
+}
+
+// as0.11 criterion 7: an Inputs with nothing wired evaluates nothing. Every row
+// says not checked, and none is a pass, a fail or a reason to refuse a payment.
+// Before this bead nine of them rendered a tick over a question nobody put.
+func TestAnUnwiredReportChecksNothing(t *testing.T) {
+	report := preflight.Run(t.Context(), preflight.Inputs{})
+	if len(report.Checks) == 0 {
+		t.Fatal("an unwired report has no rows at all; the panel is a fixed list")
+	}
+	for _, c := range report.Checks {
+		if c.State != preflight.NotChecked {
+			t.Errorf("%s is %v with nothing wired: %q", c.ID, c.State, c.Detail)
+		}
+	}
+	for _, capability := range []preflight.Capability{preflight.BlocksSending, preflight.BlocksAddress,
+		preflight.BlocksRelink, preflight.BlocksReceiving} {
+		if report.Blocked(capability) {
+			t.Errorf("an unwired report blocks %q: %v", capability, report.BlockedBy(capability))
+		}
+	}
+}
+
+// as0.11 criterion 7, one accessor at a time: the healthy fixture with a single
+// Inputs field left out turns EXACTLY the rows that read it not checked, and
+// nothing else moves. The table is the inventory; a field missing from it is a
+// field whose absence nobody decided about, and the reflection below names it.
+func TestEachUnwiredAccessorLeavesExactlyItsRowsNotChecked(t *testing.T) {
+	spend := func() ([]byte, bool) {
+		return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2026-12-01T00:00:00Z", lnd.GuardCaveat("n")), true
+	}
+	spendStatus := func(context.Context) (lnd.BrokerStatus, error) {
+		return lnd.BrokerStatus{LNDReachable: true, ReceiveMacaroonPresent: true, ReceiveRootKeyChecked: true,
+			ReceiveRootKeyListed: true, SpendMacaroonPresent: true, SpendRootKeyRecorded: true,
+			SpendRootKeyChecked: true, SpendRootKeyListed: true, MiddlewareRegistered: true}, nil
+	}
+	spendRows := []string{preflight.CheckSpendCaveats, preflight.CheckSpendIPMatches, preflight.CheckSpendExpiry,
+		preflight.CheckSpendRootKey, preflight.CheckSpendGuardCaveat, preflight.CheckGuardMiddleware}
+	receiveRows := []string{preflight.CheckReceiveCaveats, preflight.CheckReceiveIPMatches,
+		preflight.CheckReceiveExpiry, preflight.CheckReceiveRootKey}
+	for _, tc := range []struct {
+		field string
+		unset func(*preflight.Inputs)
+		// withSpend puts a spend macaroon on disk first, so the rows that read the
+		// guard about it have something to be asked about.
+		withSpend bool
+		want      []string
+	}{
+		{"NodeState", func(in *preflight.Inputs) { in.NodeState = nil }, false,
+			// The certificate row is read only while the node is not Ready, and with
+			// no state that is not known; the address row needs the node's refusal.
+			[]string{preflight.CheckNodeLinked, preflight.CheckCredentialAddress}},
+		{"BrokerStatus", func(in *preflight.Inputs) { in.BrokerStatus = nil }, true,
+			[]string{preflight.CheckGuardReachable, preflight.CheckCredentialAddress,
+				preflight.CheckReceiveRootKey, preflight.CheckSpendRootKey, preflight.CheckGuardMiddleware}},
+		{"SpendMacaroon", func(in *preflight.Inputs) { in.SpendMacaroon = nil }, true, spendRows},
+		{"ReceiveMacaroon", func(in *preflight.Inputs) { in.ReceiveMacaroon = nil }, false, receiveRows},
+		{"ServerIP", func(in *preflight.Inputs) { in.ServerIP = netip.Addr{} }, true,
+			[]string{preflight.CheckReceiveIPMatches, preflight.CheckSpendIPMatches}},
+		{"DataDir", func(in *preflight.Inputs) { in.DataDir = "" }, false, []string{preflight.CheckDataDirMode}},
+		{"Domain", func(in *preflight.Inputs) { in.Domain = nil }, false, []string{preflight.CheckLightningAddress}},
+		{"Shortfall", func(in *preflight.Inputs) { in.Shortfall = nil }, false, []string{preflight.CheckReconciliation}},
+		// Wired with Shortfall; without it the row has no time, so never checked.
+		{"LastReconciliation", func(in *preflight.Inputs) { in.LastReconciliation = nil }, false,
+			[]string{preflight.CheckReconciliation}},
+		{"UnresolvedPayments", func(in *preflight.Inputs) { in.UnresolvedPayments = nil }, false,
+			[]string{preflight.CheckUnresolvedSpend}},
+		// Not read while the node is Ready — gRPC has answered it — so on the
+		// healthy fixture its absence moves nothing. The node-not-Ready half is
+		// TestTheCertificateRowIsNotCheckedWithNoAccessor.
+		{"CertificateName", func(in *preflight.Inputs) { in.CertificateName = nil }, false, nil},
+		{"ServerCredential", func(in *preflight.Inputs) { in.ServerCredential = nil }, false,
+			[]string{preflight.CheckServerCredential}},
+		// No row reads these. Repair is told about a chmod that happens anyway;
+		// GuardRejections and ProxiesDeclared feed a measurement and a blind spot,
+		// each of which already says nothing rather than something when absent;
+		// Now defaults to the clock.
+		{"Repair", func(in *preflight.Inputs) { in.Repair = nil }, false, nil},
+		{"GuardRejections", func(in *preflight.Inputs) { in.GuardRejections = nil }, false, nil},
+		{"ProxiesDeclared", func(in *preflight.Inputs) { in.ProxiesDeclared = nil }, false, nil},
+		{"Now", func(in *preflight.Inputs) { in.Now = nil }, false, nil},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			in := inputs(t)
+			if tc.withSpend {
+				in.SpendMacaroon, in.BrokerStatus = spend, spendStatus
+			}
+			tc.unset(&in)
+			for _, c := range preflight.Run(t.Context(), in).Checks {
+				want := preflight.Pass
+				if slices.Contains(tc.want, c.ID) {
+					want = preflight.NotChecked
+				}
+				if c.State != want {
+					t.Errorf("%s is %v with %s unset, want %v: %q", c.ID, c.State, tc.field, want, c.Detail)
+				}
+			}
+		})
+	}
+	t.Run("the table names every Inputs field", func(t *testing.T) {
+		var named []string
+		for _, f := range reflect.VisibleFields(reflect.TypeFor[preflight.Inputs]()) {
+			named = append(named, f.Name)
+		}
+		// Kept in step by hand, deliberately: a new field is a new decision about
+		// what its absence renders, and this is where that decision is written.
+		inventory := []string{"NodeState", "BrokerStatus", "SpendMacaroon", "ReceiveMacaroon", "ServerIP",
+			"DataDir", "Domain", "Shortfall", "LastReconciliation", "UnresolvedPayments", "Repair",
+			"GuardRejections", "ProxiesDeclared", "CertificateName", "ServerCredential", "Now"}
+		if !slices.Equal(named, inventory) {
+			t.Errorf("preflight.Inputs has fields %v; the inventory above covers %v", named, inventory)
+		}
+	})
+}
+
+// The certificate row's own unwired half: a node that is not Ready has not
+// answered the question, so with no way to read the certificate the row cannot.
+func TestTheCertificateRowIsNotCheckedWithNoAccessor(t *testing.T) {
+	in := inputs(t)
+	in.NodeState = func() lnd.State { return lnd.StateConnecting }
+	in.CertificateName = nil
+	if got := check(t, preflight.Run(t.Context(), in), preflight.CheckCertificateName); got.State != preflight.NotChecked {
+		t.Errorf("the certificate row with no accessor on a connecting node is %v: %q", got.State, got.Detail)
+	}
+}
+
+// as0.11 criterion 5: BlockedBy is the pay ladder's seam, and the third state
+// must not move it. A not-checked row takes nothing away WHATEVER its Blocks
+// says — the table gives one Blocks=sending on purpose, because a not-checked
+// row keeps the capability its control would take on a failure.
+func TestBlockedByAnswersOnlyForFailures(t *testing.T) {
+	report := preflight.Report{Checks: []preflight.Check{
+		{ID: "pass", State: preflight.Pass, Blocks: preflight.BlocksSending},
+		{ID: "fail-blocking", State: preflight.Fail, Blocks: preflight.BlocksSending},
+		{ID: "fail-nonblocking", State: preflight.Fail, Blocks: preflight.BlocksNothing},
+		{ID: "not-checked", State: preflight.NotChecked, Blocks: preflight.BlocksSending},
+		{ID: "not-checked-nonblocking", State: preflight.NotChecked, Blocks: preflight.BlocksNothing},
+	}}
+	for _, tc := range []struct {
+		capability preflight.Capability
+		want       []string
+	}{
+		{preflight.BlocksSending, []string{"fail-blocking"}},
+		{preflight.BlocksNothing, []string{"fail-nonblocking"}},
+		{preflight.BlocksAddress, nil},
+		{preflight.BlocksReceiving, nil},
+	} {
+		var got []string
+		for _, c := range report.BlockedBy(tc.capability) {
+			got = append(got, c.ID)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("BlockedBy(%q) = %v, want %v", tc.capability, got, tc.want)
+		}
+		if blocked := report.Blocked(tc.capability); blocked != (len(tc.want) > 0) {
+			t.Errorf("Blocked(%q) = %v, want %v", tc.capability, blocked, len(tc.want) > 0)
+		}
+	}
+	var failed []string
+	for _, c := range report.Failed() {
+		failed = append(failed, c.ID)
+	}
+	if want := []string{"fail-blocking", "fail-nonblocking"}; !slices.Equal(failed, want) {
+		t.Errorf("Failed() = %v, want %v; a not-checked row is not a failure", failed, want)
 	}
 }
 
@@ -400,17 +595,17 @@ func TestBlindSpotsDoNotAccumulateAcrossReports(t *testing.T) {
 // The node's own state is part of the same computation, so the degraded banner
 // and the security panel cannot disagree about whether the node is reachable.
 func TestNodeStateIsPartOfTheSameReport(t *testing.T) {
-	for state, wantOK := range map[lnd.State]bool{
-		lnd.StateReady:      true,
-		lnd.StateNotLinked:  false,
-		lnd.StateRelink:     false,
-		lnd.StateConnecting: false,
+	for state, want := range map[lnd.State]preflight.State{
+		lnd.StateReady:      preflight.Pass,
+		lnd.StateNotLinked:  preflight.Fail,
+		lnd.StateRelink:     preflight.Fail,
+		lnd.StateConnecting: preflight.Fail,
 	} {
 		in := inputs(t)
 		in.NodeState = func() lnd.State { return state }
 		report := preflight.Run(t.Context(), in)
-		if got := check(t, report, preflight.CheckNodeLinked); got.OK != wantOK {
-			t.Errorf("node state %q gave OK=%v, want %v", state, got.OK, wantOK)
+		if got := check(t, report, preflight.CheckNodeLinked); got.State != want {
+			t.Errorf("node state %q gave %v, want %v", state, got.State, want)
 		}
 	}
 }
@@ -460,7 +655,7 @@ func TestUnresolvedPaymentsGetTheirOwnDegradedRow(t *testing.T) {
 
 	report := preflight.Run(t.Context(), in)
 	row := check(t, report, preflight.CheckUnresolvedSpend)
-	if row.OK {
+	if row.State != preflight.Fail {
 		t.Fatal("two unresolved payments and the row is green; spending is held and the " +
 			"operator has no way to know why")
 	}
@@ -471,7 +666,7 @@ func TestUnresolvedPaymentsGetTheirOwnDegradedRow(t *testing.T) {
 	}
 	// And it is NOT the reconciliation row: no shortfall was reported, so that
 	// one must still be green.
-	if shortfall := check(t, report, preflight.CheckReconciliation); !shortfall.OK {
+	if shortfall := check(t, report, preflight.CheckReconciliation); shortfall.State != preflight.Pass {
 		t.Errorf("the reconciliation row went red for an unresolved payment (%q); it reports a "+
 			"deficit, and there is none — the operator would go looking for money that is "+
 			"not missing", shortfall.Detail)
@@ -479,7 +674,7 @@ func TestUnresolvedPaymentsGetTheirOwnDegradedRow(t *testing.T) {
 
 	// It clears when they resolve, with no operator action.
 	in.UnresolvedPayments = func(context.Context) (int, error) { return 0, nil }
-	if row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend); !row.OK {
+	if row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend); row.State != preflight.Pass {
 		t.Errorf("the row stayed red after the payments resolved: %q", row.Detail)
 	}
 }
@@ -491,7 +686,7 @@ func TestAnUnreadableUnresolvedCountIsNotGreen(t *testing.T) {
 	in.UnresolvedPayments = func(context.Context) (int, error) {
 		return 0, errors.New("the database is locked")
 	}
-	if row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend); row.OK {
+	if row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend); row.State != preflight.Fail {
 		t.Error("an unreadable count reported a green tick")
 	}
 }
@@ -516,14 +711,14 @@ func TestAnUnaskedNodeDoesNotMeanARevokedRootKey(t *testing.T) {
 	report := preflight.Run(t.Context(), in)
 
 	got := check(t, report, preflight.CheckSpendRootKey)
-	if got.Blocks == preflight.BlocksSending || strings.Contains(got.Detail, "revoked") {
+	if blocking(report, preflight.BlocksSending, got.ID) || strings.Contains(got.Detail, "revoked") {
 		t.Errorf("a node that could not be asked was reported as having revoked the key: "+
-			"%q (blocks %q) — since d24.6 that refuses the payment too", got.Detail, got.Blocks)
+			"%q (%v) — since d24.6 that refuses the payment too", got.Detail, got.State)
 	}
 	// And not a pass either (d46.25): nothing was learned about the key.
-	if got.OK || !strings.Contains(got.Detail, "Not checked") {
-		t.Errorf("an unasked node rendered the root-key row OK=%v %q; not checked is not a pass",
-			got.OK, got.Detail)
+	if got.State != preflight.NotChecked {
+		t.Errorf("an unasked node rendered the root-key row %v %q; not checked is not a pass",
+			got.State, got.Detail)
 	}
 }
 
@@ -547,15 +742,13 @@ func TestASpendMacaroonWithNoRootKeyBehindItBlocksSending(t *testing.T) {
 	report := preflight.Run(t.Context(), in)
 
 	got := check(t, report, preflight.CheckSpendRootKey)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("a spend macaroon with no root key behind it passed; it was either never " +
 			"baked here or has already been revoked")
 	}
-	// THE ROW ITSELF blocks, and says why. Since d46.25 an unchecked row is also
-	// not OK, so "not OK" alone no longer tells this finding from "not checked" —
-	// and the fixture's missing guard caveat blocks sending on its own, so the
-	// report-level check alone could not either.
-	if got.Blocks != preflight.BlocksSending || !strings.Contains(got.Detail, "no root key") {
+	// THE ROW ITSELF blocks, and says why: the fixture's missing guard caveat
+	// blocks sending on its own, so the report-level check alone could not tell.
+	if !blocking(report, preflight.BlocksSending, got.ID) || !strings.Contains(got.Detail, "no root key") {
 		t.Errorf("the root-key row blocks %q with %q; want sending, naming the missing root key",
 			got.Blocks, got.Detail)
 	}
@@ -584,14 +777,14 @@ func TestTierTwoBlocksSendingWhenTheSpendMacaroonPredatesTheGuardsEnforcement(t 
 	report := preflight.Run(t.Context(), in)
 
 	got := check(t, report, preflight.CheckSpendGuardCaveat)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("a spend macaroon with no guard caveat passed its row; payments made with it " +
 			"reach the node without the guard ever being asked")
 	}
 	// And the OTHER row is unaffected: the guard is registered, and telling the
 	// operator otherwise would send them to check a setting on their node when
 	// the fix is two clicks on this page (tna.2, Ruling C).
-	if other := check(t, report, preflight.CheckGuardMiddleware); !other.OK {
+	if other := check(t, report, preflight.CheckGuardMiddleware); other.State != preflight.Pass {
 		t.Errorf("the middleware row failed too (%q); two remedies means two rows, and a "+
 			"credential problem must not read as a node problem", other.Detail)
 	}
@@ -624,11 +817,11 @@ func TestTierTwoBlocksSendingWhenTheGuardIsNotRegisteredAsAMiddleware(t *testing
 	report := preflight.Run(t.Context(), in)
 
 	got := check(t, report, preflight.CheckGuardMiddleware)
-	if got.OK {
+	if got.State != preflight.Fail {
 		t.Error("the check passed while the guard was not registered; the node refuses this " +
 			"macaroon outright until it is")
 	}
-	if other := check(t, report, preflight.CheckSpendGuardCaveat); !other.OK {
+	if other := check(t, report, preflight.CheckSpendGuardCaveat); other.State != preflight.Pass {
 		t.Errorf("the caveat row failed too (%q); the macaroon is correctly baked, and telling "+
 			"the operator to re-bake it would be the wrong repair", other.Detail)
 	}
@@ -668,7 +861,7 @@ func TestTheSpendCapRowPassesWhenTheCaveatAndTheMiddlewareAgree(t *testing.T) {
 	report := preflight.Run(t.Context(), in)
 
 	for _, id := range []string{preflight.CheckSpendGuardCaveat, preflight.CheckGuardMiddleware} {
-		if got := check(t, report, id); !got.OK {
+		if got := check(t, report, id); got.State != preflight.Pass {
 			t.Errorf("a correctly baked macaroon with a registered middleware failed %s: %q",
 				id, got.Detail)
 		}
@@ -688,9 +881,12 @@ func TestTheSpendCapRowIsPresentOnAReceiveOnlyInstall(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		spend func() ([]byte, bool)
+		want  preflight.State
 	}{
-		{"no spend macaroon", func() ([]byte, bool) { return nil, false }},
-		{"no accessor at all", nil},
+		{"no spend macaroon", func() ([]byte, bool) { return nil, false }, preflight.Pass},
+		// as0.11: with no accessor nothing was read, which is not the receive-only
+		// pass — but the rows are still there.
+		{"no accessor at all", nil, preflight.NotChecked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := inputs(t)
@@ -699,8 +895,8 @@ func TestTheSpendCapRowIsPresentOnAReceiveOnlyInstall(t *testing.T) {
 			report := preflight.Run(t.Context(), in)
 
 			for _, id := range []string{preflight.CheckSpendGuardCaveat, preflight.CheckGuardMiddleware} {
-				if got := check(t, report, id); !got.OK {
-					t.Errorf("%s fails on a receive-only install: %q", id, got.Detail)
+				if got := check(t, report, id); got.State != tc.want {
+					t.Errorf("%s is %v, want %v: %q", id, got.State, tc.want, got.Detail)
 				}
 			}
 			if report.Blocked(preflight.BlocksSending) {
@@ -875,7 +1071,7 @@ func TestOneReportAsksTheGuardOnce(t *testing.T) {
 	if report.Spend == nil {
 		t.Error("the rolling window is absent, so the shared status did not reach spendWindow")
 	}
-	if !check(t, report, preflight.CheckGuardReachable).OK {
+	if check(t, report, preflight.CheckGuardReachable).State != preflight.Pass {
 		t.Error("the reachability row failed against a guard that answered")
 	}
 }
@@ -898,24 +1094,21 @@ func TestSpendRowsTheGuardMustAnswerAreNotAPassWhenItDoesNot(t *testing.T) {
 
 	for _, id := range []string{preflight.CheckGuardMiddleware, preflight.CheckSpendRootKey} {
 		got := check(t, report, id)
-		if got.OK {
-			t.Errorf("%s passed with a guard that did not answer; nobody was asked", id)
-		}
-		if !strings.Contains(got.Detail, "Not checked") {
-			t.Errorf("%s does not say it was not checked: %q", id, got.Detail)
+		if got.State != preflight.NotChecked {
+			t.Errorf("%s is %v with a guard that did not answer; nobody was asked", id, got.State)
 		}
 		// Not checked is not a finding: the row that knows WHY is guard.reachable,
 		// and it is the one that blocks.
-		if got.Blocks != preflight.BlocksNothing {
-			t.Errorf("%s blocks %q while unchecked; guard.reachable is the row that blocks", id, got.Blocks)
+		if blocking(report, preflight.BlocksSending, id) {
+			t.Errorf("%s blocks sending while unchecked; guard.reachable is the row that blocks", id)
 		}
 	}
 	// guard_caveat is read from the FILE, which needs no guard, so it still has
 	// an answer — and a correctly baked macaroon passes it.
-	if got := check(t, report, preflight.CheckSpendGuardCaveat); !got.OK {
+	if got := check(t, report, preflight.CheckSpendGuardCaveat); got.State != preflight.Pass {
 		t.Errorf("the guard caveat row failed on a macaroon that carries the caveat: %q", got.Detail)
 	}
-	if check(t, report, preflight.CheckGuardReachable).OK {
+	if check(t, report, preflight.CheckGuardReachable).State != preflight.Fail {
 		t.Error("the fixture is wrong: guard.reachable passed")
 	}
 
@@ -928,7 +1121,7 @@ func TestSpendRowsTheGuardMustAnswerAreNotAPassWhenItDoesNot(t *testing.T) {
 	report = preflight.Run(t.Context(), in)
 	for _, id := range []string{preflight.CheckGuardMiddleware, preflight.CheckSpendRootKey,
 		preflight.CheckSpendGuardCaveat} {
-		if got := check(t, report, id); !got.OK {
+		if got := check(t, report, id); got.State != preflight.Pass {
 			t.Errorf("%s failed against a guard that answered healthy: %q", id, got.Detail)
 		}
 	}
@@ -946,27 +1139,29 @@ func TestTheReconciliationRowSaysHowCurrentItsVerdictIs(t *testing.T) {
 		err        error
 		readErr    error
 		frozen     bool
-		wantOK     bool
-		wantBlocks preflight.Capability
+		want       preflight.State
 		wantDetail []string
 	}{
-		{"never checked", time.Time{}, nil, nil, false, false, preflight.BlocksNothing,
-			[]string{"Not checked yet", "not frozen"}},
-		{"checked and healthy", checkedAt, nil, nil, false, true, preflight.BlocksSending,
+		{"never checked", time.Time{}, nil, nil, false, preflight.NotChecked,
+			[]string{"none has finished yet", "not frozen"}},
+		{"checked and healthy", checkedAt, nil, nil, false, preflight.Pass,
 			[]string{"as of 08:46:00 UTC"}},
-		{"last check failed", checkedAt, down, nil, false, false, preflight.BlocksNothing,
+		// as0.11, delegated: NOT CHECKED rather than a fail. Nothing has compared
+		// the ceiling with the node since, which is what the state means, and the
+		// row that knows why the node did not answer is the one in the banner.
+		{"last check failed", checkedAt, down, nil, false, preflight.NotChecked,
 			[]string{"failed at 08:46:00 UTC", "connection refused", "last verdict stands", "not frozen"}},
 		// A freeze is the wallet's and stands whatever the freshness: it blocks.
-		{"frozen, last check failed", checkedAt, down, nil, true, false, preflight.BlocksSending,
+		{"frozen, last check failed", checkedAt, down, nil, true, preflight.Fail,
 			[]string{"25000", "failed at 08:46:00 UTC", "connection refused", "freeze stands"}},
-		{"frozen, never re-checked", time.Time{}, nil, nil, true, false, preflight.BlocksSending,
+		{"frozen, never re-checked", time.Time{}, nil, nil, true, preflight.Fail,
 			[]string{"25000", "Not re-checked"}},
-		{"frozen, checked", checkedAt, nil, nil, true, false, preflight.BlocksSending,
+		{"frozen, checked", checkedAt, nil, nil, true, preflight.Fail,
 			[]string{"25000", "as of 08:46:00 UTC"}},
 		// go-review: the freeze itself could not be read. A fresh node check says
 		// nothing about it, so this is not a pass "as of" that check.
-		{"freeze state unreadable", checkedAt, nil, errors.New("database is locked"), false, false,
-			preflight.BlocksNothing, []string{"Not checked", "database is locked"}},
+		{"freeze state unreadable", checkedAt, nil, errors.New("database is locked"), false,
+			preflight.NotChecked, []string{"database is locked"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := inputs(t)
@@ -975,11 +1170,14 @@ func TestTheReconciliationRowSaysHowCurrentItsVerdictIs(t *testing.T) {
 			}
 			in.LastReconciliation = func() (time.Time, error) { return tc.at, tc.err }
 
-			got := check(t, preflight.Run(t.Context(), in), preflight.CheckReconciliation)
+			report := preflight.Run(t.Context(), in)
+			got := check(t, report, preflight.CheckReconciliation)
 
-			if got.OK != tc.wantOK || (!got.OK && got.Blocks != tc.wantBlocks) {
-				t.Errorf("OK=%v blocks %q, want OK=%v blocks %q (%q)",
-					got.OK, got.Blocks, tc.wantOK, tc.wantBlocks, got.Detail)
+			// Only a fail blocks, and every fail here is the freeze, which blocks sending.
+			wantBlocks := tc.want == preflight.Fail
+			if got.State != tc.want || blocking(report, preflight.BlocksSending, got.ID) != wantBlocks {
+				t.Errorf("%v, blocks sending %v; want %v, %v (%q)", got.State,
+					blocking(report, preflight.BlocksSending, got.ID), tc.want, wantBlocks, got.Detail)
 			}
 			for _, want := range tc.wantDetail {
 				if !strings.Contains(got.Detail, want) {
@@ -1091,11 +1289,12 @@ func TestEachReceiveRowFailsOnItsOwnCondition(t *testing.T) {
 			report := preflight.Run(t.Context(), in)
 
 			got := check(t, report, tc.row)
-			if got.OK {
-				t.Fatalf("%s passed", tc.row)
+			want := preflight.Fail
+			if !tc.checked {
+				want = preflight.NotChecked
 			}
-			if said := strings.Contains(got.Detail, "Not checked"); said == tc.checked {
-				t.Errorf("%s detail %q: says not checked = %v, want %v", tc.row, got.Detail, said, !tc.checked)
+			if got.State != want {
+				t.Fatalf("%s is %v, want %v (%q)", tc.row, got.State, want, got.Detail)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(got.Detail, want) {
@@ -1122,8 +1321,8 @@ func TestReceiveRowsThatCannotBeEvaluatedAreNotAPass(t *testing.T) {
 		in.ReceiveMacaroon = func() ([]byte, bool) { return nil, false }
 		for _, id := range []string{preflight.CheckReceiveCaveats, preflight.CheckReceiveIPMatches,
 			preflight.CheckReceiveExpiry, preflight.CheckReceiveRootKey} {
-			if got := check(t, preflight.Run(t.Context(), in), id); got.OK || !strings.Contains(got.Detail, "Not checked") {
-				t.Errorf("%s with no receive macaroon: OK=%v %q", id, got.OK, got.Detail)
+			if got := check(t, preflight.Run(t.Context(), in), id); got.State != preflight.NotChecked {
+				t.Errorf("%s with no receive macaroon: %v %q", id, got.State, got.Detail)
 			}
 		}
 	})
@@ -1136,9 +1335,11 @@ func TestReceiveRowsThatCannotBeEvaluatedAreNotAPass(t *testing.T) {
 					return lndtest.Macaroon(t, "ipaddr 10.21.0.17", "time-before 2026-12-01T00:00:00Z"), true
 				}
 			}
-			got := check(t, preflight.Run(t.Context(), in), id)
-			if got.OK || !strings.Contains(got.Detail, "Not checked") || got.Blocks != preflight.BlocksNothing {
-				t.Errorf("%s with no discovered address: OK=%v blocks %q %q", id, got.OK, got.Blocks, got.Detail)
+			report := preflight.Run(t.Context(), in)
+			got := check(t, report, id)
+			if got.State != preflight.NotChecked || blocking(report, preflight.BlocksSending, id) {
+				t.Errorf("%s with no discovered address: %v, blocks sending %v, %q", id, got.State,
+					blocking(report, preflight.BlocksSending, id), got.Detail)
 			}
 		}
 	})
@@ -1148,8 +1349,8 @@ func TestReceiveRowsThatCannotBeEvaluatedAreNotAPass(t *testing.T) {
 			return lnd.BrokerStatus{}, errors.New("guard unreachable")
 		}
 		got := check(t, preflight.Run(t.Context(), in), preflight.CheckReceiveRootKey)
-		if got.OK || !strings.Contains(got.Detail, "Not checked") {
-			t.Errorf("the receive root-key row with no guard: OK=%v %q", got.OK, got.Detail)
+		if got.State != preflight.NotChecked {
+			t.Errorf("the receive root-key row with no guard: %v %q", got.State, got.Detail)
 		}
 	})
 }

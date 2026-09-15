@@ -21,9 +21,9 @@
   <tbody>
   {{range .Security.Checks}}
     <tr>
-      <td>{{if .OK}}pass{{else}}FAIL{{end}}</td>
+      <td>{{.Verdict}}</td>
       <td>{{.Title}}{{if .Detail}}<br><small>{{.Detail}}</small>{{end}}</td>
-      <td>{{if .OK}}—{{else}}{{if .Blocks}}{{.Blocks}}{{else}}nothing{{end}}{{end}}</td>
+      <td>{{if .Passed}}—{{else if and .Failed .Blocks}}{{.Blocks}}{{else}}nothing{{end}}</td>
       <td><small>{{.Threat}}</small></td>
     </tr>
   {{else}}

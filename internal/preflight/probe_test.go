@@ -135,8 +135,8 @@ func TestAServerCredentialNotYetCheckedIsNotAPass(t *testing.T) {
 	report := preflight.Run(t.Context(), in)
 
 	got := check(t, report, preflight.CheckServerCredential)
-	if got.OK {
-		t.Errorf("an unasked server credential passed: %+v", got)
+	if got.State != preflight.NotChecked {
+		t.Errorf("an unasked server credential is %v, want not checked: %+v", got.State, got)
 	}
 	if report.ServerCredential == nil || !report.ServerCredential.At.IsZero() {
 		t.Errorf("Report.ServerCredential = %+v, want present and not yet checked", report.ServerCredential)
@@ -167,8 +167,8 @@ func TestARefusedServerCredentialFailsWithItsTime(t *testing.T) {
 			in.ServerCredential = func() preflight.ProbeResult { return preflight.ProbeResult{At: at, Err: tc.err} }
 			got := check(t, preflight.Run(t.Context(), in), preflight.CheckServerCredential)
 
-			if got.OK {
-				t.Fatalf("a failed probe passed: %+v", got)
+			if got.State != preflight.Fail {
+				t.Fatalf("a failed probe is %v, want a fail: %+v", got.State, got)
 			}
 			if !strings.Contains(got.Detail, tc.want) {
 				t.Errorf("Detail = %q, want it to say %q", got.Detail, tc.want)
@@ -191,7 +191,7 @@ func TestAWorkingServerCredentialPassesWithItsTime(t *testing.T) {
 	in := inputs(t)
 	in.ServerCredential = func() preflight.ProbeResult { return preflight.ProbeResult{At: at} }
 	got := check(t, preflight.Run(t.Context(), in), preflight.CheckServerCredential)
-	if !got.OK || !strings.Contains(got.Detail, "as of 14:05:09 UTC") {
+	if got.State != preflight.Pass || !strings.Contains(got.Detail, "as of 14:05:09 UTC") {
 		t.Errorf("a working credential = %+v, want a pass carrying its time", got)
 	}
 }

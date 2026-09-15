@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -341,6 +342,23 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// Deferred AFTER node.Close, so it runs BEFORE it: a probe a render started
 	// is joined before the client it calls through is closed.
 	defer serverCredential.Close()
+	sources := preflightSources{
+		cfg:                cfg,
+		node:               node,
+		receiveCredentials: receiveCredentials,
+		db:                 db,
+		reconciler:         reconciler,
+		unresolvedPayments: purse.UnresolvedPayments,
+		serverIP:           serverIP,
+		serverCredential:   serverCredential,
+		proxiesDeclared:    func() bool { return handler != nil && handler.ProxiesDeclared() },
+		repair: func(what string) {
+			if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
+				logging.EventPreflightRepair, slog.String("detail", what)); err != nil {
+				log.Error("could not write the audit trail", "error", err.Error())
+			}
+		},
+	}
 	// ONE report, built from one set of inputs, differing in a single argument:
 	// where the guard's status comes from. The UI reads the cache; the ladder
 	// reads the socket. Two closures over one construction, so the policy cannot
@@ -348,60 +366,7 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// refuses their payment.
 	makeChecks := func(brokerStatus func(context.Context) (lnd.BrokerStatus, error)) func(context.Context) preflight.Report {
 		return func(ctx context.Context) preflight.Report {
-			return preflight.Run(ctx, preflight.Inputs{
-				NodeState:    node.State,
-				BrokerStatus: brokerStatus,
-				SpendMacaroon: func() ([]byte, bool) {
-					raw, err := lnd.VolumeCredentials(cfg.CredentialsDir, lnd.SpendMacaroon).Macaroon()
-					return raw, err == nil
-				},
-				// The credential the receive client presents, read through the SAME
-				// source it dials with, so the rows describe the file in use
-				// (`0vk.11`).
-				ReceiveMacaroon: func() ([]byte, bool) {
-					raw, err := receiveCredentials.Macaroon()
-					return raw, err == nil
-				},
-				ServerIP: serverIP,
-				DataDir:  cfg.DataDir,
-				Domain: func(ctx context.Context) (string, bool, string) {
-					domain, _, _ := db.Setting(ctx, api.SettingDomain)
-					ok, _, _ := db.Setting(ctx, api.SettingProbeOK)
-					reason, _, _ := db.Setting(ctx, api.SettingProbeReason)
-					return domain, ok == "true", reason
-				},
-				Shortfall: reconciler.Shortfall,
-				// When the verdict above was last checked, and whether that check
-				// failed (d46.25): the wallet's freeze outlives a check that could
-				// not run, so on its own it is a tick with no date.
-				LastReconciliation: reconciler.LastCheck,
-				// §5's SECOND freeze, its own row (1xp). Read through the
-				// wallet, which owns the cutoff, so the dashboard and the freeze
-				// cannot disagree about which payments count.
-				UnresolvedPayments: purse.UnresolvedPayments,
-				// §12's burst signal, counted in the trail the guard already
-				// relays into (tna.2). No second store: the guard.reject rows
-				// ARE the record, and a counter beside them would be two
-				// statements of one fact.
-				GuardRejections: func(ctx context.Context, since time.Time) (int, error) {
-					return db.CountAuditEventsSince(ctx, logging.EventGuardReject, since)
-				},
-				ProxiesDeclared: func() bool { return handler != nil && handler.ProxiesDeclared() },
-				// The certificate the receive client dials with, against the
-				// address it dials: the same decision lnd.Client makes before it
-				// dials, read for the panel (`20i.11`).
-				CertificateName: func() *lnd.CertificateNameError {
-					return lnd.CertificateNamesMatch(receiveCredentials.CertPath(), cfg.LNDAddress)
-				},
-				ServerCredential: serverCredential.Result,
-				Repair: func(what string) {
-					if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
-						logging.EventPreflightRepair, slog.String("detail", what)); err != nil {
-						log.Error("could not write the audit trail", "error", err.Error())
-					}
-				},
-				Now: time.Now,
-			})
+			return preflight.Run(ctx, sources.inputs(brokerStatus))
 		}
 	}
 	// The UI's, cached. The ladder's, straight to the guard.
@@ -557,6 +522,80 @@ const guardEventInterval = 5 * time.Minute
 // response's events to the relay. Polling once before the first tick is
 // deliberate — a bake raised at install time should be on the Security page
 // when the operator first opens it, not five minutes later.
+// preflightSources is everything §11's report reads in production, named so a
+// test can build the Inputs serve() builds (as0.11).
+//
+// An Inputs accessor left unset renders its rows NOT CHECKED rather than a pass,
+// which is the right default and the wrong thing to ship: on the box it would
+// read as a guard or a node that did not answer, forever. So the construction
+// lives here rather than in serve()'s closure, where no test reached it, and
+// TestProductionWiresEveryPreflightInput holds every field to being set.
+type preflightSources struct {
+	cfg                *config.Server
+	node               *lnd.Client
+	receiveCredentials lnd.CredentialSource
+	db                 *store.Store
+	reconciler         *recon.Reconciler
+	unresolvedPayments func(context.Context) (int, error)
+	serverIP           netip.Addr
+	serverCredential   *preflight.CredentialProbe
+	proxiesDeclared    func() bool
+	repair             func(what string)
+}
+
+// inputs is §11's Inputs over these sources, with the guard's status read
+// through brokerStatus — the one argument the page's report and the ladder's
+// differ in.
+func (p preflightSources) inputs(brokerStatus func(context.Context) (lnd.BrokerStatus, error)) preflight.Inputs {
+	return preflight.Inputs{
+		NodeState:    p.node.State,
+		BrokerStatus: brokerStatus,
+		SpendMacaroon: func() ([]byte, bool) {
+			raw, err := lnd.VolumeCredentials(p.cfg.CredentialsDir, lnd.SpendMacaroon).Macaroon()
+			return raw, err == nil
+		},
+		// The credential the receive client presents, read through the SAME
+		// source it dials with, so the rows describe the file in use (`0vk.11`).
+		ReceiveMacaroon: func() ([]byte, bool) {
+			raw, err := p.receiveCredentials.Macaroon()
+			return raw, err == nil
+		},
+		ServerIP: p.serverIP,
+		DataDir:  p.cfg.DataDir,
+		Domain: func(ctx context.Context) (string, bool, string) {
+			domain, _, _ := p.db.Setting(ctx, api.SettingDomain)
+			ok, _, _ := p.db.Setting(ctx, api.SettingProbeOK)
+			reason, _, _ := p.db.Setting(ctx, api.SettingProbeReason)
+			return domain, ok == "true", reason
+		},
+		Shortfall: p.reconciler.Shortfall,
+		// When the verdict above was last checked, and whether that check failed
+		// (d46.25): the wallet's freeze outlives a check that could not run, so on
+		// its own it is a tick with no date.
+		LastReconciliation: p.reconciler.LastCheck,
+		// §5's SECOND freeze, its own row (1xp). Read through the wallet, which
+		// owns the cutoff, so the dashboard and the freeze cannot disagree about
+		// which payments count.
+		UnresolvedPayments: p.unresolvedPayments,
+		// §12's burst signal, counted in the trail the guard already relays into
+		// (tna.2). No second store: the guard.reject rows ARE the record, and a
+		// counter beside them would be two statements of one fact.
+		GuardRejections: func(ctx context.Context, since time.Time) (int, error) {
+			return p.db.CountAuditEventsSince(ctx, logging.EventGuardReject, since)
+		},
+		ProxiesDeclared: p.proxiesDeclared,
+		// The certificate the receive client dials with, against the address it
+		// dials: the same decision lnd.Client makes before it dials, read for the
+		// panel (`20i.11`).
+		CertificateName: func() *lnd.CertificateNameError {
+			return lnd.CertificateNamesMatch(p.receiveCredentials.CertPath(), p.cfg.LNDAddress)
+		},
+		ServerCredential: p.serverCredential.Result,
+		Repair:           p.repair,
+		Now:              time.Now,
+	}
+}
+
 // serverCredentialProbe is the call behind the Node page's server line: GetInfo
 // on the receive client (`20i.21`).
 //

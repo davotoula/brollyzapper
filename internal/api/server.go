@@ -508,10 +508,16 @@ func (s *Server) checks(ctx context.Context) preflight.Report {
 // words an operator can act on. It computes nothing of its own, which is what
 // stops it disagreeing with the Security panel.
 //
-// A line is said once. Rows that could not be evaluated for the same reason share
-// the sentence — an install the guard has not linked yet has four receive rows
-// with nothing to read (`0vk.11`) — and a banner repeating it four times reads as
-// four problems.
+// NOT-CHECKED ROWS ARE NOT LISTED, not even as a count (as0.11, delegated). The
+// banner is "what is wrong now"; "not yet known" belongs on the Security page,
+// which says it row by row. And the row that knows WHY a question could not be
+// put — node.linked, guard.reachable — is a failure, so it is already here: an
+// install the guard has not linked yet is told so once, not once per receive row
+// with nothing to read.
+//
+// A line is said once. Two failures can share a sentence — the spend and receive
+// credentials fail the same caveat checks in the same words — and a banner
+// repeating it reads as two problems where the operator has one thing to fix.
 func degraded(report preflight.Report) []string {
 	var missing []string
 	for _, c := range report.Failed() {

@@ -13,8 +13,9 @@ import (
 // credential's four rows, each with its threat, from the real report.
 //
 // And the banner half: an install the guard has not linked yet has four receive
-// rows with nothing to read, for one reason. The banner says it once — four
-// copies of one sentence read as four problems.
+// rows with nothing to read, for one reason. Since as0.11 they are NOT CHECKED,
+// which the banner does not list at all — the reason is node.linked's failure,
+// and that is said once.
 func TestTheSecurityPageRendersTheReceiveCredentialRows(t *testing.T) {
 	h := newHarness(t, livePreflight(lnd.StateNotLinked, func(in *preflight.Inputs) {
 		in.ReceiveMacaroon = func() ([]byte, bool) { return nil, false }
@@ -30,8 +31,8 @@ func TestTheSecurityPageRendersTheReceiveCredentialRows(t *testing.T) {
 		"The node still honours the receive root key",
 	} {
 		verdict, detail := securityRow(t, raw, title)
-		if verdict == "pass" {
-			t.Errorf("%q passes with no receive macaroon to read: %q", title, detail)
+		if verdict != "not checked" {
+			t.Errorf("%q reads %q with no receive macaroon to read, want not checked: %q", title, verdict, detail)
 		}
 	}
 	if !strings.Contains(security, "Receive macaroon exfiltrated") {
@@ -39,7 +40,12 @@ func TestTheSecurityPageRendersTheReceiveCredentialRows(t *testing.T) {
 	}
 
 	wallet := html.UnescapeString(h.get(t, "/", cookie).Body.String())
-	if n := strings.Count(wallet, "there is no receive macaroon yet"); n != 1 {
-		t.Errorf("the degraded banner says the receive macaroon is missing %d times, want once", n)
+	if n := strings.Count(wallet, "There is no receive macaroon yet"); n != 0 {
+		t.Errorf("the degraded banner lists the not-checked receive rows %d times; not yet known is "+
+			"not a failure, and the Security page is where it is said", n)
+	}
+	if n := strings.Count(wallet, "No credentials for your Lightning node yet"); n != 1 {
+		t.Errorf("the degraded banner names the unlinked node %d times, want once — it is the row "+
+			"that knows why the receive rows could not be read", n)
 	}
 }
