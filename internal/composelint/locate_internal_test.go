@@ -7,8 +7,8 @@ import (
 )
 
 // A comment the parser reported and the source does not carry is REPORTED, not
-// dropped: Parse refuses the document on it. The two sources differ here only so
-// the placement has something to fail on; in Parse they are one file.
+// dropped: Load refuses the document on it. The two sources differ here only so
+// the placement has something to fail on; in Load they are one file.
 func TestAnUnplaceableCommentIsReported(t *testing.T) {
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte("# an INTERIM note\nservices: {}\n"), &root); err != nil {

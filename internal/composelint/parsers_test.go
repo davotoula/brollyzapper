@@ -114,7 +114,7 @@ func TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode(t *testing.T) {
 		want: []string{"DATA_DIR"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := slices.Sorted(maps.Keys(composelint.Parse(t, "fixture", []byte(tc.raw), nil).InterpolatedNames()))
+			got := slices.Sorted(maps.Keys(fixture(t, tc.raw).InterpolatedNames()))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("InterpolatedNames(%q) = %v, want %v", tc.raw, got, tc.want)
 			}
@@ -153,7 +153,7 @@ func TestInterpolatedDefaultsReadsOnlyARealDefault(t *testing.T) {
 		want: map[string][]string{},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := composelint.Parse(t, "fixture", []byte(tc.raw), nil).Defaults()
+			got := fixture(t, tc.raw).Defaults()
 			if !maps.EqualFunc(got, tc.want, slices.Equal) {
 				t.Errorf("Defaults(%q) = %q, want %q", tc.raw, got, tc.want)
 			}

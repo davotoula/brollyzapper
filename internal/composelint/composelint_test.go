@@ -2,12 +2,24 @@ package composelint_test
 
 import (
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/davotoula/brollyzapper/internal/composelint"
 )
+
+// fixture is a document from a table row's text, through Load as every lint
+// reads one — Parse is unexported so that no lint can hand in text it read itself.
+func fixture(t *testing.T, raw string) *composelint.Document {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixture.yml")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return composelint.Load(t, path, nil)
+}
 
 // The three compose files this package reads for the lints, from here.
 var realComposeFiles = []string{
@@ -53,13 +65,13 @@ func TestCommentsFindEveryWholeLineCommentOnItsLine(t *testing.T) {
 // A `#` inside a quoted value is part of the value, and a trailing comment is a
 // comment on the line it trails.
 func TestCommentsAreOnlyWhatTheParserCallsAComment(t *testing.T) {
-	doc := composelint.Parse(t, "fixture", []byte(
+	doc := fixture(t,
 		"services:\n"+
 			"  s:\n"+
 			"    # above the environment\n"+
 			"    environment:\n"+
 			"      A: \"x # not a comment\"  # a trailing one\n"+
-			"      B: \"# nor this\"\n"), nil)
+			"      B: \"# nor this\"\n")
 	want := []composelint.Comment{
 		{Text: "# above the environment", Line: 3},
 		{Text: "# a trailing one", Line: 5},
@@ -77,7 +89,7 @@ func TestCommentsAreOnlyWhatTheParserCallsAComment(t *testing.T) {
 // What sits between two keys is the entries between them, never comments or
 // blanks — and the lines say which came first.
 func TestKeysBetweenIsEntriesInDocumentOrder(t *testing.T) {
-	doc := composelint.Parse(t, "fixture", []byte(
+	doc := fixture(t,
 		"services:\n"+
 			"  server:\n"+
 			"    environment:\n"+
@@ -85,7 +97,7 @@ func TestKeysBetweenIsEntriesInDocumentOrder(t *testing.T) {
 			"      # the platform owns it\n"+
 			"\n"+
 			"      OTHER: x\n"+
-			"      ADMIN_PASSWORD_MANAGED: \"true\"\n"), nil)
+			"      ADMIN_PASSWORD_MANAGED: \"true\"\n")
 
 	got, err := doc.KeysBetween([]string{"services", "server", "environment"}, "ADMIN_PASSWORD", "ADMIN_PASSWORD_MANAGED")
 	if err != nil {
@@ -111,8 +123,8 @@ func TestKeysBetweenIsEntriesInDocumentOrder(t *testing.T) {
 
 // A folded double-quoted scalar is one value, and an anchor name is reported.
 func TestScalarsFoldAndAnchorsAreSeen(t *testing.T) {
-	doc := composelint.Parse(t, "fixture", []byte(
-		"services:\n  s:\n    environment: &ENV_anchor\n      A: \"${LND_D\\\n        IR}\"\n"), nil)
+	doc := fixture(t,
+		"services:\n  s:\n    environment: &ENV_anchor\n      A: \"${LND_D\\\n        IR}\"\n")
 	if !doc.InterpolatedNames()["LND_DIR"] {
 		t.Errorf("a folded scalar was not read as one interpolation: %v", doc.InterpolatedNames())
 	}
@@ -123,8 +135,8 @@ func TestScalarsFoldAndAnchorsAreSeen(t *testing.T) {
 
 // The key and the comment block above it.
 func TestKeyCarriesTheCommentAboveIt(t *testing.T) {
-	doc := composelint.Parse(t, "fixture", []byte(
-		"services:\n  guard:\n    # runs as 65532 by default\n    user: \"1000:1000\"\n"), nil)
+	doc := fixture(t,
+		"services:\n  guard:\n    # runs as 65532 by default\n    user: \"1000:1000\"\n")
 	key, ok := doc.Key("services", "guard", "user")
 	if !ok || key.Line != 4 || !strings.Contains(key.Comment, "65532") {
 		t.Errorf("Key = %+v, %v; want line 4 carrying the comment above it", key, ok)
@@ -140,7 +152,7 @@ func TestKeyCarriesTheCommentAboveIt(t *testing.T) {
 // "no networks: at all". Folding shared settings into an x- anchor is the obvious
 // next tidy of regtest's stack, so this is the shape that would meet it.
 func TestLookupsFollowMergeKeys(t *testing.T) {
-	doc := composelint.Parse(t, "fixture", []byte(
+	doc := fixture(t,
 		"x-common: &common\n"+
 			"  networks:\n"+
 			"    brolly:\n"+
@@ -149,7 +161,7 @@ func TestLookupsFollowMergeKeys(t *testing.T) {
 			"services:\n"+
 			"  a:\n"+
 			"    <<: *common\n"+
-			"    image: x\n"), nil)
+			"    image: x\n")
 
 	networks, err := doc.Networks("a")
 	if err != nil || len(networks["brolly"].Aliases) != 1 {
