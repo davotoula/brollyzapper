@@ -24,6 +24,9 @@
 # URL and sha256 in that script, so it is reproducible rather than vendored —
 # 112KB of someone else's font that is needed only when the mark changes.
 /assets/*.ttf
+# The 1280×640 PNG the same script renders from social-preview.svg. It is uploaded
+# by hand in the repository's settings and never read from the tree, so it is not committed.
+/assets/social-preview.png
 # Private to this working tree: the design specs, briefs and field reports, the
 # issue tracker, coding-agent instructions and session scratch. The code is
 # public; the process around it is not. scripts/public-scan.sh refuses a commit

@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Build BrollyZapper's icon.svg and favicon.svg with the BZ letterforms outlined.
+"""Build BrollyZapper's icon.svg, favicon.svg and social preview with the BZ letterforms outlined.
 
 The shipped SVGs must not depend on a font being installed: umbrelOS renders
 icon.svg on machines that have never heard of Archivo, and a <text> element there
 would silently fall back to whatever the renderer happens to have. So the glyphs
 are cut from Archivo ExtraBold here and emitted as path data.
 
-The master and the favicon come out of ONE set of constants below, so they cannot
-drift apart; the favicon differs only in how many bolts it draws.
+The master, the favicon and the GitHub social preview come out of ONE set of
+constants below, so they cannot drift apart; the favicon differs only in how many
+bolts it draws, and the social preview only in the field it is centred on.
 
 Design and the reasoning behind the fixed geometry:
 the icon design notes (private)
 
-Nothing here runs in CI. The three outputs are committed build-once artifacts,
-so no rasteriser and no font download is a build dependency of the project —
-they are dependencies of *changing the mark*, which is rare and deliberate.
+Nothing here runs in CI. The four committed outputs (icon.svg, favicon.svg,
+apple-touch-icon.png, social-preview.svg) are build-once artifacts, so no
+rasteriser and no font download is a build dependency of the project — they are
+dependencies of *changing the mark*, which is rare and deliberate.
+social-preview.png is rendered beside its SVG but gitignored: it is uploaded by
+hand in the repository's settings, not read from the tree.
 
-Requires fontTools (pip install fonttools) and, for the PNG, any one of
+Requires fontTools (pip install fonttools) and, for the PNGs, any one of
 rsvg-convert, sips, inkscape or ImageMagick.
 """
 
@@ -25,6 +29,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import textwrap
 import urllib.request
 
 from fontTools.pens.svgPathPen import SVGPathPen
@@ -123,17 +128,40 @@ def bolt_uses(bolts):
     )
 
 
-def build(bolts, title, desc):
+MARK_PX = 256
+
+# The GitHub social preview: the mark centred on one bleed-coloured field. Not the
+# master padded after rasterising — that would carry the master's own square inside
+# a second field — but the same elements drawn at SOCIAL_MARK_SCALE on a wider
+# field. At 2 the disc is 408px of 640, clear of the edges a link card may crop;
+# change it only if a card crops the disc or the mark reads small in one.
+SOCIAL_W, SOCIAL_H = 1280, 640
+SOCIAL_MARK_SCALE = 2
+
+
+def build(bolts, title, desc, width=MARK_PX, height=MARK_PX, mark_scale=1):
+    """Emit the mark, centred at mark_scale on a width×height field of the bleed.
+
+    At the defaults this is the square master's own markup, unwrapped, so widening
+    the field to the social preview could not change icon.svg or favicon.svg by a byte.
+    """
     bz = outline("BZ", BZ_SIZE, BZ_CENTRE_X, BZ_BASELINE)
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t d">
+    mark = f'''  <circle cx="128" cy="128" r="{DISC_R}" fill="{WHITE}"/>
+{bolt_uses(bolts)}
+  <path d="{CANOPY}" fill="{PURPLE_CANOPY}"/>
+  <path d="{bz}" fill="{WHITE}"/>'''
+    if (width, height, mark_scale) != (MARK_PX, MARK_PX, 1):
+        dx = (width - MARK_PX * mark_scale) / 2
+        dy = (height - MARK_PX * mark_scale) / 2
+        mark = f'''  <g transform="translate({dx:g} {dy:g}) scale({mark_scale:g})">
+{textwrap.indent(mark, "  ")}
+  </g>'''
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-labelledby="t d">
   <title id="t">{title}</title>
   <desc id="d">{desc}</desc>
   <defs><path id="bolt" d="{BOLT}"/></defs>
-  <rect width="256" height="256" fill="{PURPLE_BLEED}"/>
-  <circle cx="128" cy="128" r="{DISC_R}" fill="{WHITE}"/>
-{bolt_uses(bolts)}
-  <path d="{CANOPY}" fill="{PURPLE_CANOPY}"/>
-  <path d="{bz}" fill="{WHITE}"/>
+  <rect width="{width}" height="{height}" fill="{PURPLE_BLEED}"/>
+{mark}
 </svg>
 '''
 
@@ -144,20 +172,21 @@ TOUCH_ICON_PX = 180
 # rendered by it: rasterisers do not agree to the byte, so with rsvg-convert also
 # installed, preferring it made a plain re-run rewrite a PNG whose mark had not changed.
 # Reorder only together with re-rendering the committed PNG by the new first choice.
-# sips is macOS-only but needs no install.
+# sips is macOS-only and takes only the longer edge (-Z), which keeps a non-square
+# SVG's aspect, so it is given max(w, h).
 RASTERISERS = (
-    ("sips", lambda src, dst, px: ["sips", "-s", "format", "png", "-Z", str(px), str(src), "--out", str(dst)]),
-    ("rsvg-convert", lambda src, dst, px: ["rsvg-convert", "-w", str(px), "-h", str(px), str(src), "-o", str(dst)]),
-    ("inkscape", lambda src, dst, px: ["inkscape", str(src), "-w", str(px), "-h", str(px), "-o", str(dst)]),
-    ("magick", lambda src, dst, px: ["magick", "-background", "none", str(src), "-resize", f"{px}x{px}", str(dst)]),
+    ("sips", lambda src, dst, w, h: ["sips", "-s", "format", "png", "-Z", str(max(w, h)), str(src), "--out", str(dst)]),
+    ("rsvg-convert", lambda src, dst, w, h: ["rsvg-convert", "-w", str(w), "-h", str(h), str(src), "-o", str(dst)]),
+    ("inkscape", lambda src, dst, w, h: ["inkscape", str(src), "-w", str(w), "-h", str(h), "-o", str(dst)]),
+    ("magick", lambda src, dst, w, h: ["magick", "-background", "none", str(src), "-resize", f"{w}x{h}", str(dst)]),
 )
 
 
-def rasterise(src, dst, px):
-    """Render src to a px-square PNG, naming every alternative if none is present."""
+def rasterise(src, dst, width, height):
+    """Render src to a width×height PNG, naming every alternative if none is present."""
     for name, argv in RASTERISERS:
         if shutil.which(name):
-            subprocess.run(argv(src, dst, px), check=True, capture_output=True)
+            subprocess.run(argv(src, dst, width, height), check=True, capture_output=True)
             return name
     raise SystemExit(
         f"cannot render {dst.name}: no rasteriser found.\n"
@@ -180,16 +209,31 @@ def main():
         "An upturned umbrella catching a lightning bolt, marked BZ.",
     )
 
+    social = build(
+        BOLTS_THREE,
+        "BrollyZapper",
+        "An upturned umbrella catching three lightning bolts, marked BZ, on a purple field.",
+        SOCIAL_W,
+        SOCIAL_H,
+        SOCIAL_MARK_SCALE,
+    )
+
     master = HERE / "icon.svg"
     master.write_text(icon)
     (STATIC / "favicon.svg").write_text(favicon)
+    social_svg = HERE / "social-preview.svg"
+    social_svg.write_text(social)
 
     touch_icon = STATIC / "apple-touch-icon.png"
-    tool = rasterise(master, touch_icon, TOUCH_ICON_PX)
+    tool = rasterise(master, touch_icon, TOUCH_ICON_PX, TOUCH_ICON_PX)
+    # Uploaded by hand in the repository's settings, never committed: .gitignore
+    # holds it out of the tree, so the script works in any checkout.
+    social_png = HERE / "social-preview.png"
+    rasterise(social_svg, social_png, SOCIAL_W, SOCIAL_H)
 
-    for path in (master, STATIC / "favicon.svg", touch_icon):
+    for path in (master, STATIC / "favicon.svg", touch_icon, social_svg, social_png):
         print(f"{path.relative_to(ROOT)}: {path.stat().st_size} bytes")
-    print(f"(PNG rendered with {tool})")
+    print(f"(PNGs rendered with {tool})")
 
 
 if __name__ == "__main__":
