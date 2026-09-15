@@ -380,54 +380,55 @@ func TestEachUnwiredAccessorLeavesExactlyItsRowsNotChecked(t *testing.T) {
 		preflight.CheckSpendRootKey, preflight.CheckSpendGuardCaveat, preflight.CheckGuardMiddleware}
 	receiveRows := []string{preflight.CheckReceiveCaveats, preflight.CheckReceiveIPMatches,
 		preflight.CheckReceiveExpiry, preflight.CheckReceiveRootKey}
-	for _, tc := range []struct {
+	type unset struct {
 		field string
-		unset func(*preflight.Inputs)
 		// withSpend puts a spend macaroon on disk first, so the rows that read the
 		// guard about it have something to be asked about.
 		withSpend bool
 		want      []string
-	}{
-		{"NodeState", func(in *preflight.Inputs) { in.NodeState = nil }, false,
+	}
+	table := []unset{
+		{"NodeState", false,
 			// The certificate row is read only while the node is not Ready, and with
 			// no state that is not known; the address row needs the node's refusal.
 			[]string{preflight.CheckNodeLinked, preflight.CheckCredentialAddress}},
-		{"BrokerStatus", func(in *preflight.Inputs) { in.BrokerStatus = nil }, true,
+		{"BrokerStatus", true,
 			[]string{preflight.CheckGuardReachable, preflight.CheckCredentialAddress,
 				preflight.CheckReceiveRootKey, preflight.CheckSpendRootKey, preflight.CheckGuardMiddleware}},
-		{"SpendMacaroon", func(in *preflight.Inputs) { in.SpendMacaroon = nil }, true, spendRows},
-		{"ReceiveMacaroon", func(in *preflight.Inputs) { in.ReceiveMacaroon = nil }, false, receiveRows},
-		{"ServerIP", func(in *preflight.Inputs) { in.ServerIP = netip.Addr{} }, true,
+		{"SpendMacaroon", true, spendRows},
+		{"ReceiveMacaroon", false, receiveRows},
+		{"ServerIP", true,
 			[]string{preflight.CheckReceiveIPMatches, preflight.CheckSpendIPMatches}},
-		{"DataDir", func(in *preflight.Inputs) { in.DataDir = "" }, false, []string{preflight.CheckDataDirMode}},
-		{"Domain", func(in *preflight.Inputs) { in.Domain = nil }, false, []string{preflight.CheckLightningAddress}},
-		{"Shortfall", func(in *preflight.Inputs) { in.Shortfall = nil }, false, []string{preflight.CheckReconciliation}},
+		{"DataDir", false, []string{preflight.CheckDataDirMode}},
+		{"Domain", false, []string{preflight.CheckLightningAddress}},
+		{"Shortfall", false, []string{preflight.CheckReconciliation}},
 		// Wired with Shortfall; without it the row has no time, so never checked.
-		{"LastReconciliation", func(in *preflight.Inputs) { in.LastReconciliation = nil }, false,
+		{"LastReconciliation", false,
 			[]string{preflight.CheckReconciliation}},
-		{"UnresolvedPayments", func(in *preflight.Inputs) { in.UnresolvedPayments = nil }, false,
+		{"UnresolvedPayments", false,
 			[]string{preflight.CheckUnresolvedSpend}},
 		// Not read while the node is Ready — gRPC has answered it — so on the
 		// healthy fixture its absence moves nothing. The node-not-Ready half is
 		// TestTheCertificateRowIsNotCheckedWithNoAccessor.
-		{"CertificateName", func(in *preflight.Inputs) { in.CertificateName = nil }, false, nil},
-		{"ServerCredential", func(in *preflight.Inputs) { in.ServerCredential = nil }, false,
+		{"CertificateName", false, nil},
+		{"ServerCredential", false,
 			[]string{preflight.CheckServerCredential}},
 		// No row reads these. Repair is told about a chmod that happens anyway;
 		// GuardRejections and ProxiesDeclared feed a measurement and a blind spot,
 		// each of which already says nothing rather than something when absent;
 		// Now defaults to the clock.
-		{"Repair", func(in *preflight.Inputs) { in.Repair = nil }, false, nil},
-		{"GuardRejections", func(in *preflight.Inputs) { in.GuardRejections = nil }, false, nil},
-		{"ProxiesDeclared", func(in *preflight.Inputs) { in.ProxiesDeclared = nil }, false, nil},
-		{"Now", func(in *preflight.Inputs) { in.Now = nil }, false, nil},
-	} {
+		{"Repair", false, nil},
+		{"GuardRejections", false, nil},
+		{"ProxiesDeclared", false, nil},
+		{"Now", false, nil},
+	}
+	for _, tc := range table {
 		t.Run(tc.field, func(t *testing.T) {
 			in := inputs(t)
 			if tc.withSpend {
 				in.SpendMacaroon, in.BrokerStatus = spend, spendStatus
 			}
-			tc.unset(&in)
+			reflect.ValueOf(&in).Elem().FieldByName(tc.field).SetZero()
 			for _, c := range preflight.Run(t.Context(), in).Checks {
 				want := preflight.Pass
 				if slices.Contains(tc.want, c.ID) {
@@ -440,17 +441,12 @@ func TestEachUnwiredAccessorLeavesExactlyItsRowsNotChecked(t *testing.T) {
 		})
 	}
 	t.Run("the table names every Inputs field", func(t *testing.T) {
-		var named []string
+		// A new field is a new decision about what its absence renders, and the
+		// table above is where that decision is written.
 		for _, f := range reflect.VisibleFields(reflect.TypeFor[preflight.Inputs]()) {
-			named = append(named, f.Name)
-		}
-		// Kept in step by hand, deliberately: a new field is a new decision about
-		// what its absence renders, and this is where that decision is written.
-		inventory := []string{"NodeState", "BrokerStatus", "SpendMacaroon", "ReceiveMacaroon", "ServerIP",
-			"DataDir", "Domain", "Shortfall", "LastReconciliation", "UnresolvedPayments", "Repair",
-			"GuardRejections", "ProxiesDeclared", "CertificateName", "ServerCredential", "Now"}
-		if !slices.Equal(named, inventory) {
-			t.Errorf("preflight.Inputs has fields %v; the inventory above covers %v", named, inventory)
+			if !slices.ContainsFunc(table, func(tc unset) bool { return tc.field == f.Name }) {
+				t.Errorf("preflight.Inputs.%s has no row in the table; decide what its absence renders", f.Name)
+			}
 		}
 	})
 }
@@ -487,10 +483,7 @@ func TestBlockedByAnswersOnlyForFailures(t *testing.T) {
 		{preflight.BlocksAddress, nil},
 		{preflight.BlocksReceiving, nil},
 	} {
-		var got []string
-		for _, c := range report.BlockedBy(tc.capability) {
-			got = append(got, c.ID)
-		}
+		got := ids(preflight.Report{Checks: report.BlockedBy(tc.capability)})
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("BlockedBy(%q) = %v, want %v", tc.capability, got, tc.want)
 		}
@@ -498,10 +491,7 @@ func TestBlockedByAnswersOnlyForFailures(t *testing.T) {
 			t.Errorf("Blocked(%q) = %v, want %v", tc.capability, blocked, len(tc.want) > 0)
 		}
 	}
-	var failed []string
-	for _, c := range report.Failed() {
-		failed = append(failed, c.ID)
-	}
+	failed := ids(preflight.Report{Checks: report.Failed()})
 	if want := []string{"fail-blocking", "fail-nonblocking"}; !slices.Equal(failed, want) {
 		t.Errorf("Failed() = %v, want %v; a not-checked row is not a failure", failed, want)
 	}

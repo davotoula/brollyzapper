@@ -144,7 +144,6 @@ func serverCredentialCheck(in Inputs) (Check, *ProbeResult) {
 		ID:     CheckServerCredential,
 		Title:  "The app's own credential works against your node",
 		Threat: "Server credential refused while the guard's is accepted — the Node page's reachability line is the guard's view, so a server that cannot use its own receive macaroon (its address lock, on a container with more than one network) is otherwise invisible until a payment is due.",
-		State:  Pass,
 		Blocks: BlocksNothing,
 	}
 	if in.ServerCredential == nil {
@@ -159,7 +158,7 @@ func serverCredentialCheck(in Inputs) (Check, *ProbeResult) {
 	}
 	asOf := "as of " + clock(result.At)
 	if result.Err == nil {
-		c.Detail = "Your node accepted it, " + asOf + "."
+		c.State, c.Detail = Pass, "Your node accepted it, "+asOf+"."
 		return c, &result
 	}
 	c.State = Fail

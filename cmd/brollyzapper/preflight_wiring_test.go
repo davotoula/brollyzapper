@@ -23,13 +23,9 @@ import (
 // sources are zero-valued, and a method value on a nil pointer is non-nil until
 // it runs.
 func TestProductionWiresEveryPreflightInput(t *testing.T) {
-	sources := preflightSources{
-		cfg:                &config.Server{DataDir: "/data"},
-		unresolvedPayments: func(context.Context) (int, error) { return 0, nil },
-		serverIP:           netip.MustParseAddr("10.21.0.17"),
-		proxiesDeclared:    func() bool { return false },
-		repair:             func(string) {},
-	}
+	sources := newPreflightSources(&config.Server{DataDir: "/data"}, nil, nil, nil, nil,
+		func(context.Context) (int, error) { return 0, nil }, netip.MustParseAddr("10.21.0.17"), nil,
+		func() bool { return false }, func(string) {})
 	brokerStatus := func(context.Context) (lnd.BrokerStatus, error) { return lnd.BrokerStatus{}, nil }
 
 	in := reflect.ValueOf(sources.inputs(brokerStatus))

@@ -138,9 +138,10 @@ func blindSpots(in Inputs) []string {
 // three consumers of one convention, and none of them could be told by the
 // compiler.
 //
-// THE ZERO VALUE IS NOT CHECKED. A row that nobody gave a verdict is exactly
-// that, so every constructor states Pass explicitly, and a row built and
-// forgotten reads "not checked" rather than a tick or a cross it never earned.
+// THE ZERO VALUE IS NOT CHECKED, and every row is built with it. A row passes
+// only where its evidence was read, so a path that returns without a verdict —
+// an accessor nobody wired, a branch someone adds later — reads "not checked"
+// rather than the tick d46.25 found standing over questions nobody put.
 type State int
 
 const (
@@ -551,13 +552,13 @@ func nodeCheck(state lnd.State, addressRefused bool) Check {
 		ID:     CheckNodeLinked,
 		Title:  "Connected to your Lightning node",
 		Threat: "Server compromised, receive-only install — the baked macaroon is what bounds it, and an unlinked node means there is no baked macaroon in play.",
-		State:  Pass,
 		Blocks: BlocksNothing,
 	}
 	switch state {
 	case "":
 		notChecked(&c, unwired)
 	case lnd.StateReady:
+		c.State = Pass
 	case lnd.StateNotLinked:
 		c.State, c.Detail = Fail, "No credentials for your Lightning node yet — the guard writes them once it can reach LND."
 	case lnd.StateRelink:
@@ -594,7 +595,6 @@ func credentialAddressCheck(state lnd.State, broker brokerState) (Check, string)
 		ID:     CheckCredentialAddress,
 		Title:  "Your node accepts the app's credential from this container's address",
 		Threat: "Credential exfiltrated — the ipaddr caveat is what makes a stolen copy useless elsewhere, and the same lock refuses this container when the address it connects from is not the one the credential names.",
-		State:  Pass,
 		Blocks: BlocksRelink,
 	}
 	// NOT CHECKED only when the node's refusal is possible and the guard's half
@@ -614,8 +614,8 @@ func credentialAddressCheck(state lnd.State, broker brokerState) (Check, string)
 	// still blocked re-linking would have the handler refuse the button it shows.
 	// The guard relays the address it locks credentials to, so an empty one means
 	// no lock is configured — a state in which it refuses to bake at all.
-	if !broker.answered() || broker.status.RefusalKind != guard.KindAddressMismatch ||
-		state != lnd.StateRelink || address == "" {
+	if state != lnd.StateRelink || broker.status.RefusalKind != guard.KindAddressMismatch || address == "" {
+		c.State = Pass
 		return c, ""
 	}
 	c.State = Fail
@@ -641,10 +641,10 @@ func certificateNameCheck(in Inputs, state lnd.State) Check {
 		ID:     CheckCertificateName,
 		Title:  "Your node's certificate names the address this app dials",
 		Threat: "Not a security threat but a silent failure: gRPC refuses a certificate that does not name the dial address, so the app never connects, and the handshake error names TLS rather than the two-line fix.",
-		State:  Pass,
 		Blocks: BlocksNothing,
 	}
 	if state == lnd.StateReady {
+		c.State = Pass
 		return c
 	}
 	if in.CertificateName == nil {
@@ -653,6 +653,7 @@ func certificateNameCheck(in Inputs, state lnd.State) Check {
 	}
 	mismatch := in.CertificateName()
 	if mismatch == nil {
+		c.State = Pass
 		return c
 	}
 	c.State = Fail
@@ -667,7 +668,6 @@ func guardCheck(broker brokerState) Check {
 		ID:     CheckGuardReachable,
 		Title:  "The guard is answering",
 		Threat: "Server baking itself a broader macaroon — the guard is the container boundary that prevents it, and an unreachable guard means no macaroon can be baked or revoked.",
-		State:  Pass,
 		Blocks: BlocksSending,
 	}
 	if !broker.wired {
@@ -677,7 +677,9 @@ func guardCheck(broker brokerState) Check {
 	if broker.err != nil {
 		c.State = Fail
 		c.Detail = "The guard is not answering on its socket, so macaroons cannot be baked, checked or revoked."
+		return c
 	}
+	c.State = Pass
 	return c
 }
 
@@ -777,13 +779,14 @@ var receiveCredential = credentialKind{
 //
 // NOT CHECKED IS NOT A PASS (d46.25). Every row that could not be evaluated —
 // no credential to read where one is expected, no address to compare with, a
-// guard that did not answer, a node the guard could not ask — says so, is not OK,
-// and blocks nothing: the row that knows WHY (node.linked, guard.reachable) is
-// the one that blocks.
+// guard that did not answer, a node the guard could not ask — says so, is not a
+// pass, and blocks nothing: the row that knows WHY (node.linked, guard.reachable)
+// is the one that blocks. Rows start not checked and pass only where the
+// evidence was read (as0.11), so a path that forgets a verdict cannot tick.
 func credentialChecks(kind credentialKind, cred credentialRead, in Inputs, broker brokerState) []Check {
 	rows := make([]Check, 4)
 	for i := range rows {
-		rows[i] = Check{ID: kind.ids[i], Title: kind.titles[i], Threat: kind.threats[i], State: Pass, Blocks: kind.blocks}
+		rows[i] = Check{ID: kind.ids[i], Title: kind.titles[i], Threat: kind.threats[i], Blocks: kind.blocks}
 	}
 	caveats, ipMatch, expiry, rootKey := &rows[0], &rows[1], &rows[2], &rows[3]
 
@@ -797,7 +800,7 @@ func credentialChecks(kind credentialKind, cred credentialRead, in Inputs, broke
 	if !cred.present {
 		for i := range rows {
 			if kind.absentIsAPass {
-				rows[i].Detail = kind.absent
+				rows[i].State, rows[i].Detail = Pass, kind.absent
 			} else {
 				notChecked(&rows[i], kind.absent)
 			}
@@ -811,6 +814,8 @@ func credentialChecks(kind credentialKind, cred credentialRead, in Inputs, broke
 	// stops requiring something (§6, d46.26).
 	if err := lnd.RequireHardening(raw); err != nil {
 		caveats.State, caveats.Detail = Fail, err.Error()
+	} else {
+		caveats.State = Pass
 	}
 	switch locked, ok := lnd.CaveatValue(raw, lnd.CaveatIPAddr); {
 	case !ok:
@@ -822,26 +827,29 @@ func credentialChecks(kind credentialKind, cred credentialRead, in Inputs, broke
 		ipMatch.State = Fail
 		ipMatch.Detail = fmt.Sprintf("the macaroon is locked to %s but this container is %s; "+
 			"the static IP in the package and the caveat disagree", locked, in.ServerIP)
+	default:
+		ipMatch.State = Pass
 	}
-	if when, ok := lnd.Expiry(raw); ok {
-		if !in.Now().Before(when) {
-			expiry.State = Fail
-			expiry.Detail = fmt.Sprintf("the macaroon expired at %s; %s", when.Format(time.RFC3339), kind.expired)
-		}
-	} else {
+	switch when, ok := lnd.Expiry(raw); {
+	case !ok:
 		expiry.State, expiry.Detail = Fail, "the macaroon carries no time-before caveat"
+	case !in.Now().Before(when):
+		expiry.State = Fail
+		expiry.Detail = fmt.Sprintf("the macaroon expired at %s; %s", when.Format(time.RFC3339), kind.expired)
+	default:
+		expiry.State = Pass
 	}
 
 	// CHECKED as well as not-listed. A node that could not be asked has not said
 	// anything about this key, and since d24.6 the spend row refuses payments — so
 	// treating "we could not ask" as "already revoked" would turn a transient RPC
 	// error into a spend refusal with a diagnosis pointing at the wrong repair.
-	if broker.wired && broker.err != nil {
-		notChecked(rootKey, guardDown)
-		return rows
-	}
-	if !broker.wired {
+	switch {
+	case !broker.wired:
 		notChecked(rootKey, unwired)
+		return rows
+	case broker.err != nil:
+		notChecked(rootKey, guardDown)
 		return rows
 	}
 	answer := kind.rootKey(broker.status)
@@ -864,6 +872,8 @@ func credentialChecks(kind credentialKind, cred credentialRead, in Inputs, broke
 		notChecked(rootKey, "The guard has not confirmed with your node which root keys it still lists.")
 	case !answer.listed:
 		rootKey.State, rootKey.Detail = Fail, kind.revoked
+	default:
+		rootKey.State = Pass
 	}
 	return rows
 }
@@ -907,7 +917,9 @@ func notChecked(c *Check, why string) {
 
 // spendChecks are §11's spend-macaroon rows: the four shared with the receive
 // credential, and two of its own. With no spend macaroon baked — the
-// receive-only default — they pass: there is nothing unconstrained.
+// receive-only default — they pass: there is nothing unconstrained. As in
+// credentialChecks, the two of its own start not checked and pass only on
+// evidence (as0.11).
 func spendChecks(in Inputs, broker brokerState) []Check {
 	// §11's Tier 2, from P4. TWO ROWS, and Wave 31 shipped them as one — which
 	// was wrong for the reason tna.4 had already established about the two
@@ -926,13 +938,13 @@ func spendChecks(in Inputs, broker brokerState) []Check {
 		ID:     CheckSpendGuardCaveat,
 		Title:  "Payments this app makes go through the guard",
 		Threat: "Server compromised with sending enabled — the working ceiling is the server's own check and a compromised server skips it. The guard's rolling cap is enforced inside LND's request path, and it applies only to a macaroon carrying the caveat that routes it there.",
-		State:  Pass, Blocks: BlocksSending,
+		Blocks: BlocksSending,
 	}
 	middleware := Check{
 		ID:     CheckGuardMiddleware,
 		Title:  "The guard is registered with your node",
 		Threat: "Guard down with sending enabled — LND rejects a custom caveat with no middleware behind it, so the spend macaroon stops working entirely. That is the fail-closed direction, and it is a state the page must name rather than leave as an unexplained payment failure.",
-		State:  Pass, Blocks: BlocksSending,
+		Blocks: BlocksSending,
 	}
 	// The set, named ONCE: the shared four, then these two, on every return path.
 	// A row that reaches some paths and not others drops silently from whichever
@@ -952,10 +964,13 @@ func spendChecks(in Inputs, broker brokerState) []Check {
 		return rows()
 	}
 	if !cred.present {
-		guardCaveat.Detail, middleware.Detail = spendCredential.absent, spendCredential.absent
+		guardCaveat.State, guardCaveat.Detail = Pass, spendCredential.absent
+		middleware.State, middleware.Detail = Pass, spendCredential.absent
 		return rows()
 	}
-	if !lnd.HasGuardCaveat(cred.raw) {
+	if lnd.HasGuardCaveat(cred.raw) {
+		guardCaveat.State = Pass
+	} else {
 		guardCaveat.State = Fail
 		guardCaveat.Detail = "this macaroon was baked before the guard enforced the spend limit, " +
 			"so payments made with it are not counted against it; turning sending off and on " +
@@ -970,17 +985,18 @@ func spendChecks(in Inputs, broker brokerState) []Check {
 		// your node" with a tick having asked nobody. guard.reachable is the row
 		// that knows why, and it blocks.
 		notChecked(&middleware, guardDown)
-	}
-	// The OTHER cause of a failing spend-cap row (tna.1), and it is not "the cap
-	// is unenforced" — it is "the macaroon does not work". LND rejects a custom
-	// caveat with no middleware behind it, so sending is already broken and this
-	// row's job is to name the reason rather than leave an unexplained payment
-	// failure.
-	if broker.answered() && broker.status.SpendMacaroonPresent && !broker.status.MiddlewareRegistered {
+	case broker.status.SpendMacaroonPresent && !broker.status.MiddlewareRegistered:
+		// The OTHER cause of a failing spend-cap row (tna.1), and it is not "the
+		// cap is unenforced" — it is "the macaroon does not work". LND rejects a
+		// custom caveat with no middleware behind it, so sending is already broken
+		// and this row's job is to name the reason rather than leave an unexplained
+		// payment failure.
 		middleware.State = Fail
 		middleware.Detail = "the guard is not registered with your node as an RPC " +
 			"middleware, so your node will refuse this macaroon outright until it is; " +
 			"the guard retries on its own, and rpcmiddleware.enable must be set on the node"
+	default:
+		middleware.State = Pass
 	}
 	return rows()
 }
@@ -990,7 +1006,7 @@ func addressCheck(ctx context.Context, in Inputs) Check {
 		ID:     CheckLightningAddress,
 		Title:  "Your lightning address reaches this instance",
 		Threat: "Not a security threat but a silent failure: a domain pointing at something else breaks receipt verification with no visible error. Receiving by invoice is unaffected.",
-		State:  Pass, Blocks: BlocksAddress,
+		Blocks: BlocksAddress,
 	}
 	if in.Domain == nil {
 		notChecked(&c, unwired)
@@ -1004,6 +1020,8 @@ func addressCheck(ctx context.Context, in Inputs) Check {
 			"Nostr Wallet Connect works without one."
 	case !probeOK:
 		c.State, c.Detail = Fail, reason
+	default:
+		c.State = Pass
 	}
 	return c
 }
@@ -1028,7 +1046,7 @@ func reconciliationCheck(ctx context.Context, in Inputs) Check {
 		ID:     CheckReconciliation,
 		Title:  "The wallet ceiling is within the node's balance",
 		Threat: "Hostile or buggy NWC client, and operator over-allocation — §5 freezes spending on a shortfall rather than recomputing the ceiling.",
-		State:  Pass, Blocks: BlocksSending,
+		Blocks: BlocksSending,
 	}
 	if in.Shortfall == nil {
 		notChecked(&c, unwired)
@@ -1082,7 +1100,7 @@ func reconciliationCheck(ctx context.Context, in Inputs) Check {
 		notChecked(&c, failed+". The last verdict stands: no shortfall recorded, so spending is not "+
 			"frozen — but nothing has compared the ceiling with the node since.")
 	default:
-		c.Detail = "Within the node's balance, as of " + clock(at) + "."
+		c.State, c.Detail = Pass, "Within the node's balance, as of "+clock(at)+"."
 	}
 	return c
 }
@@ -1108,7 +1126,7 @@ func unresolvedPaymentsCheck(ctx context.Context, in Inputs) Check {
 		ID:     CheckUnresolvedSpend,
 		Title:  "No payments are waiting to be resolved",
 		Threat: "A crash mid-payment — §6 forbids reversing a reservation whose fate is unknown, so the ceiling holds it until the node says what happened.",
-		State:  Pass, Blocks: BlocksSending,
+		Blocks: BlocksSending,
 	}
 	if in.UnresolvedPayments == nil {
 		notChecked(&c, unwired)
@@ -1130,7 +1148,9 @@ func unresolvedPaymentsCheck(ctx context.Context, in Inputs) Check {
 			"soon as the node answers, and reconciliation keeps asking. The exception is a "+
 			"payment the log names as DISPATCHED with no record at the node — that one does "+
 			"not clear itself and needs you (§6)", count)
+		return c
 	}
+	c.State = Pass
 	return c
 }
 
@@ -1141,7 +1161,7 @@ func dataDirCheck(in Inputs) Check {
 		ID:     CheckDataDirMode,
 		Title:  "The data directory is private",
 		Threat: "Database or credential volume stolen — §4 stores the zap-receipt signing key and the NWC secrets unencrypted, and the mitigation is filesystem-level.",
-		State:  Pass, Blocks: BlocksNothing,
+		Blocks: BlocksNothing,
 	}
 	if in.DataDir == "" {
 		notChecked(&c, unwired)
@@ -1160,7 +1180,9 @@ func dataDirCheck(in Inputs) Check {
 		} else if in.Repair != nil {
 			in.Repair(c.Detail)
 		}
+		return c
 	}
+	c.State = Pass
 	return c
 }
 

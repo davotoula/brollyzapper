@@ -342,31 +342,25 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// Deferred AFTER node.Close, so it runs BEFORE it: a probe a render started
 	// is joined before the client it calls through is closed.
 	defer serverCredential.Close()
-	sources := preflightSources{
-		cfg:                cfg,
-		node:               node,
-		receiveCredentials: receiveCredentials,
-		db:                 db,
-		reconciler:         reconciler,
-		unresolvedPayments: purse.UnresolvedPayments,
-		serverIP:           serverIP,
-		serverCredential:   serverCredential,
-		proxiesDeclared:    func() bool { return handler != nil && handler.ProxiesDeclared() },
-		repair: func(what string) {
+	sources := newPreflightSources(cfg, node, receiveCredentials, db, reconciler, purse.UnresolvedPayments,
+		serverIP, serverCredential,
+		func() bool { return handler != nil && handler.ProxiesDeclared() },
+		func(what string) {
 			if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
 				logging.EventPreflightRepair, slog.String("detail", what)); err != nil {
 				log.Error("could not write the audit trail", "error", err.Error())
 			}
-		},
-	}
+		})
 	// ONE report, built from one set of inputs, differing in a single argument:
 	// where the guard's status comes from. The UI reads the cache; the ladder
 	// reads the socket. Two closures over one construction, so the policy cannot
 	// come to differ between the page an operator looks at and the check that
 	// refuses their payment.
 	makeChecks := func(brokerStatus func(context.Context) (lnd.BrokerStatus, error)) func(context.Context) preflight.Report {
+		// Built once: every field is an accessor, read fresh by each Run.
+		in := sources.inputs(brokerStatus)
 		return func(ctx context.Context) preflight.Report {
-			return preflight.Run(ctx, sources.inputs(brokerStatus))
+			return preflight.Run(ctx, in)
 		}
 	}
 	// The UI's, cached. The ladder's, straight to the guard.
@@ -515,21 +509,15 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 // long the guard's undrained ring has to hold events.
 const guardEventInterval = 5 * time.Minute
 
-// runGuardEvents polls the guard so its security events reach audit_events
-// whether or not anyone is watching.
-//
-// The collection is a side effect of the call: the socket client hands every
-// response's events to the relay. Polling once before the first tick is
-// deliberate — a bake raised at install time should be on the Security page
-// when the operator first opens it, not five minutes later.
 // preflightSources is everything §11's report reads in production, named so a
 // test can build the Inputs serve() builds (as0.11).
 //
 // An Inputs accessor left unset renders its rows NOT CHECKED rather than a pass,
 // which is the right default and the wrong thing to ship: on the box it would
 // read as a guard or a node that did not answer, forever. So the construction
-// lives here rather than in serve()'s closure, where no test reached it, and
-// TestProductionWiresEveryPreflightInput holds every field to being set.
+// lives here rather than in serve()'s closure, where no test reached it:
+// newPreflightSources makes an omitted source a compile error, and
+// TestProductionWiresEveryPreflightInput holds inputs() to setting every field.
 type preflightSources struct {
 	cfg                *config.Server
 	node               *lnd.Client
@@ -541,6 +529,18 @@ type preflightSources struct {
 	serverCredential   *preflight.CredentialProbe
 	proxiesDeclared    func() bool
 	repair             func(what string)
+}
+
+// newPreflightSources takes every source POSITIONALLY, so a serve() that stops
+// supplying one fails to compile rather than shipping a row that says not checked
+// on every install (as0.11) — a struct literal would take the omission silently.
+func newPreflightSources(cfg *config.Server, node *lnd.Client, receiveCredentials lnd.CredentialSource,
+	db *store.Store, reconciler *recon.Reconciler, unresolvedPayments func(context.Context) (int, error),
+	serverIP netip.Addr, serverCredential *preflight.CredentialProbe, proxiesDeclared func() bool,
+	repair func(what string)) preflightSources {
+	return preflightSources{cfg: cfg, node: node, receiveCredentials: receiveCredentials, db: db,
+		reconciler: reconciler, unresolvedPayments: unresolvedPayments, serverIP: serverIP,
+		serverCredential: serverCredential, proxiesDeclared: proxiesDeclared, repair: repair}
 }
 
 // inputs is §11's Inputs over these sources, with the guard's status read
@@ -615,6 +615,13 @@ func serverCredentialProbe(node *lnd.Client, creds lnd.CredentialSource) func(co
 	}
 }
 
+// runGuardEvents polls the guard so its security events reach audit_events
+// whether or not anyone is watching.
+//
+// The collection is a side effect of the call: the socket client hands every
+// response's events to the relay. Polling once before the first tick is
+// deliberate — a bake raised at install time should be on the Security page
+// when the operator first opens it, not five minutes later.
 func runGuardEvents(ctx context.Context, broker *api.CachedBroker, log *slog.Logger) {
 	poll := func() {
 		if _, err := broker.Status(ctx); err != nil && ctx.Err() == nil {
