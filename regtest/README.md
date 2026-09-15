@@ -110,7 +110,8 @@ as-is (clean chain, mint, pay, credit once, receipt read back off the relay), an
 `authorise.sh` criterion, including §7's refusal naming the cap to move, which 0.1.16 could not
 pass. Before it, 0.1.10 (2026-08-22) and 0.1.16 (2026-08-31) were proved by `smoke.sh` from empty
 volumes, and before them it read 0.1.5, the first release publishing zap receipts. **Every
-bump is re-proved by a run rather than assumed** — a pin nobody has exercised is a pin that
+bump is re-proved by a run rather than assumed — `smoke.sh` and `authorise.sh` at minimum, since
+0.1.16 passed the first while failing the second** — a pin nobody has exercised is a pin that
 documents a version instead of testing one. The build override exists to run the *working tree*
 instead, for changes that have not been released yet.
 
