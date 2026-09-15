@@ -72,6 +72,15 @@ func TestTheCIWorkflowParsesAndRunsTheWholeGate(t *testing.T) {
 		}
 	}
 
+	// qag. `make fuzz` finds its targets rather than naming them, which the
+	// anchor list above cannot say: "contains" has no "does not contain".
+	fuzz := expandTarget(t, "fuzz")
+	clean(t, checkFuzzRecipe(fuzz))
+	catches(t, checkFuzzRecipe("go test -run '^$' -fuzz FuzzParseZapRequest -fuzztime 10s ./internal/lnurl/\n"),
+		"enumerate")
+	catches(t, checkFuzzRecipe(fuzz+"go test -run '^$' -fuzz FuzzParseZapRequest ./internal/lnurl/\n"),
+		"FuzzParseZapRequest")
+
 	// The planted half: a gate missing a command, and a workflow that has
 	// acquired a secret.
 	catches(t, checkGateScript("go build ./...\n", ""), "never runs")
@@ -160,6 +169,33 @@ func TestTheToolModuleVulnVerdict(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fuzzTargetName is a Fuzz function's name as a recipe would spell it — the
+// prefix followed by the rest of an identifier. The enumeration's own `'^Fuzz'`
+// pattern is followed by a quote, and does not match.
+var fuzzTargetName = regexp.MustCompile(`\bFuzz[A-Za-z0-9_]+`)
+
+// checkFuzzRecipe is qag's rule over `make fuzz`'s expanded recipe: it
+// ENUMERATES the targets with `go test -list`, and it names none of them.
+//
+// Both halves, because each alone is satisfiable by the defect. A recipe that
+// listed AND named a target literally would pass the first; a recipe that named
+// nothing and ran nothing would pass the second. The outcome being prevented is a
+// second target that never runs while the gate stays green — which is what the
+// Makefile did when it named its single target.
+func checkFuzzRecipe(recipe string) []problem {
+	var found []problem
+	if !strings.Contains(recipe, "go test -list '^Fuzz'") || !strings.Contains(recipe, "-fuzztime") {
+		found = append(found, problem{"Makefile", 0,
+			"`make fuzz` does not enumerate its targets with `go test -list '^Fuzz'` and fuzz each " +
+				"for FUZZTIME; a target it does not enumerate never runs"})
+	}
+	for _, name := range fuzzTargetName.FindAllString(recipe, -1) {
+		found = append(found, problem{"Makefile", 0, fmt.Sprintf(
+			"`make fuzz` names %s literally; enumerate instead, or the next target added never runs", name)})
+	}
+	return found
 }
 
 // checkGateScript is every assertion about what the workflow RUNS, over the

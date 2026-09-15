@@ -19,7 +19,7 @@ make cross          # both binaries, linux/amd64 + linux/arm64
 gofmt -l . | grep -v '^internal/lnd/lnrpc/'   # generated code is not ours to format
 go mod tidy -diff
 make vuln           # govulncheck: root symbol scan + regtest tool modules vs regtest/tools/vuln-accepted.txt
-make fuzz           # re-exercises the fuzz corpus, ~10s
+make fuzz           # every Fuzz* target (found by go test -list), ~10s each
 make public-scan    # see "Privacy" below
 ```
 

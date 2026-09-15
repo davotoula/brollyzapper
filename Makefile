@@ -34,15 +34,27 @@ test:
 vet:
 	go vet ./...
 
-# The one fuzz target, on the app's principal untrusted-input surface: a zap
-# request is hex, JSON, tags and a signature, arriving from anyone on the
-# internet over the public route group.
+# EVERY fuzz target in the module, each for FUZZTIME, found rather than named
+# (qag). The recipe names no target on purpose: when it named its single one, a
+# second target added without editing this file would never have run, and the
+# gate would have stayed green while covering nothing. internal/arch asserts the
+# recipe enumerates and names no Fuzz function.
 #
-# go test fuzzes ONE target per invocation, so it is named here rather than
-# discovered. `-run ^$` keeps this to fuzzing: the ordinary tests are the `test`
-# target's job and running them twice slows the gate for nothing.
+# Enumerated by `go test -list`, which prints a package's matching names and then
+# its `ok` line, so each run of names belongs to the package on the line after
+# it. Per package and per target because `go test -fuzz` accepts ONE package and
+# a pattern matching ONE target; the name is anchored so FuzzX cannot also match
+# FuzzXY. `-run ^$` keeps this to fuzzing: the ordinary tests are the `test`
+# target's job. A listing that fails, or finds nothing at all, is a failure — an
+# empty loop would otherwise be a green run of nothing.
 fuzz:
-	go test -run '^$$' -fuzz FuzzParseZapRequest -fuzztime $(FUZZTIME) ./internal/lnurl/
+	@list=$$(go test -list '^Fuzz' ./...) || { echo "$$list"; exit 1; }; \
+	targets=$$(echo "$$list" | awk '/^Fuzz/ { names[++n] = $$1 } /^ok/ { for (i = 1; i <= n; i++) print $$2, names[i]; n = 0 }'); \
+	[ -n "$$targets" ] || { echo "make fuzz: go test -list found no fuzz targets"; exit 1; }; \
+	echo "$$targets" | while read -r pkg target; do \
+		echo "==> $$target ($$pkg)"; \
+		go test -run '^$$' -fuzz "^$$target\$$" -fuzztime $(FUZZTIME) "$$pkg" || exit 1; \
+	done
 
 check: build vet test
 

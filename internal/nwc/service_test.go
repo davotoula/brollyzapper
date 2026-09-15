@@ -536,7 +536,7 @@ func TestReadsAndMakeInvoiceWorkWhileSpendingIsHeld(t *testing.T) {
 // --- harness ---------------------------------------------------------------
 
 type harness struct {
-	t        *testing.T
+	t        testing.TB
 	db       *store.Store
 	relays   *fakeRelays
 	wallet   *fakeWallet
@@ -737,7 +737,7 @@ func (h *harness) addConnection(name, relay string, change func(row *store.NWCCo
 // the single testRelay; a test that is about the LIST passes its own, because
 // the relays are written at creation and are deliberately not editable
 // afterwards — changing them is a re-pair, not an update (§9 item 4).
-func newHarness(t *testing.T, relays ...string) *harness {
+func newHarness(t testing.TB, relays ...string) *harness {
 	t.Helper()
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -840,24 +840,24 @@ func (h *harness) handle(t *testing.T, method Method, params json.RawMessage) Re
 	return resp
 }
 
-func (h *harness) request(t *testing.T, from nostr.Identity, method Method,
+func (h *harness) request(t testing.TB, from nostr.Identity, method Method,
 	params json.RawMessage) *gonostr.Event {
 	return h.requestAt(t, from, method, params, h.clock.at)
 }
 
-func (h *harness) requestAt(t *testing.T, from nostr.Identity, method Method,
+func (h *harness) requestAt(t testing.TB, from nostr.Identity, method Method,
 	params json.RawMessage, at time.Time) *gonostr.Event {
 	return h.requestWith(t, from, nostr.NIP44, method, params, at)
 }
 
-func (h *harness) requestWith(t *testing.T, from nostr.Identity, scheme nostr.Encryption,
+func (h *harness) requestWith(t testing.TB, from nostr.Identity, scheme nostr.Encryption,
 	method Method, params json.RawMessage, at time.Time) *gonostr.Event {
 	return h.requestTo(t, h.conn, from, scheme, method, params, at)
 }
 
 // requestTo is requestWith addressed to a particular pairing, which the scoping
 // test needs and h.conn cannot express.
-func (h *harness) requestTo(t *testing.T, conn *connection, from nostr.Identity,
+func (h *harness) requestTo(t testing.TB, conn *connection, from nostr.Identity,
 	scheme nostr.Encryption, method Method, params json.RawMessage,
 	at time.Time) *gonostr.Event {
 	t.Helper()
@@ -902,7 +902,7 @@ func (h *harness) open(t *testing.T, event gonostr.Event) string {
 	return plaintext
 }
 
-func sign(t *testing.T, id nostr.Identity, event *gonostr.Event) {
+func sign(t testing.TB, id nostr.Identity, event *gonostr.Event) {
 	t.Helper()
 	if err := id.Sign(event); err != nil {
 		t.Fatalf("signing: %v", err)
