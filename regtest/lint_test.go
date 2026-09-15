@@ -275,7 +275,7 @@ func TestGuardDoesMountTheMacaroonAsASingleFile(t *testing.T) {
 		found = true
 		// Spec §6, §20: the FILE, never the directory. Mounting the directory
 		// would expose wallet.db, macaroons.db and channel.backup alongside it.
-		if !strings.HasSuffix(strings.Split(v, ":")[0], "admin.macaroon") {
+		if !strings.HasSuffix(composelint.MountSource(v), "admin.macaroon") {
 			t.Errorf("guard mounts %q; the source must be the macaroon file itself", v)
 		}
 	}

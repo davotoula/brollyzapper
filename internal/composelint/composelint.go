@@ -72,12 +72,15 @@ func Load(t testing.TB, path string, into any) *Document {
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	return Parse(t, path, src, into)
+	return parse(t, path, src, into)
 }
 
-// Parse is Load for a document the test already holds — a table row's fixture.
-// path only labels messages.
-func Parse(t testing.TB, path string, src []byte, into any) *Document {
+// parse is Load after the read. path only labels messages.
+//
+// UNEXPORTED ON PURPOSE (BrollyZap-20i.24): a Parse that took bytes was a route
+// back to a lint reading the compose file's text itself and handing it in. A
+// fixture is a file in t.TempDir() given to Load.
+func parse(t testing.TB, path string, src []byte, into any) *Document {
 	t.Helper()
 	var root yaml.Node
 	if err := yaml.Unmarshal(src, &root); err != nil {

@@ -52,6 +52,25 @@ func TestSplitPortReadsTheSpellingsItClaims(t *testing.T) {
 	}
 }
 
+// TestMountSourceReadsTheSpellingsItClaims is the parser table for the colon
+// that is not a separator. The first two rows are the reason MountSource exists;
+// the last is the one deploy's index-mapping copy got wrong.
+func TestMountSourceReadsTheSpellingsItClaims(t *testing.T) {
+	for _, tc := range []struct{ volume, source string }{
+		{"${LND_DIR:?set LND_DIR}/tls.cert:/lnd/tls.cert:ro", "${LND_DIR:?set LND_DIR}/tls.cert"},
+		{"${DATA_DIR:-./data}/guard:/guard", "${DATA_DIR:-./data}/guard"},
+		{"./data/lnd/tls.cert:/lnd/tls.cert:ro", "./data/lnd/tls.cert"},
+		{"${APP_DATA_DIR}/data:/data", "${APP_DATA_DIR}/data"},
+		{"data:/x", "data"},
+		{"guard-data", "guard-data"},
+		{"./data:${TARGET:-/x}:ro", "./data"},
+	} {
+		if got := composelint.MountSource(tc.volume); got != tc.source {
+			t.Errorf("MountSource(%q) = %q, want %q", tc.volume, got, tc.source)
+		}
+	}
+}
+
 // TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode is what makes the rule
 // above survive a revert.
 //
@@ -95,7 +114,7 @@ func TestInterpolatedNamesReadsBothSpellingsAndOnlyTheCode(t *testing.T) {
 		want: []string{"DATA_DIR"},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := slices.Sorted(maps.Keys(composelint.Parse(t, "fixture", []byte(tc.raw), nil).InterpolatedNames()))
+			got := slices.Sorted(maps.Keys(fixture(t, tc.raw).InterpolatedNames()))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("InterpolatedNames(%q) = %v, want %v", tc.raw, got, tc.want)
 			}
@@ -134,7 +153,7 @@ func TestInterpolatedDefaultsReadsOnlyARealDefault(t *testing.T) {
 		want: map[string][]string{},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := composelint.Parse(t, "fixture", []byte(tc.raw), nil).Defaults()
+			got := fixture(t, tc.raw).Defaults()
 			if !maps.EqualFunc(got, tc.want, slices.Equal) {
 				t.Errorf("Defaults(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
