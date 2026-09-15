@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -439,6 +438,10 @@ func (c *connection) close() {
 //  5. Dispatch.
 //  6. Encrypt and publish to the same relay.
 func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.Event) (Response, bool) {
+	// handle_ms starts here (k2z): the server's share of an answer is everything
+	// from the event reaching this function to its response being handed to the
+	// publish, the ladder and a payment to LND included.
+	entered := time.Now()
 	// --- 1. authorize, before any crypto -----------------------------------
 	if event.PubKey != conn.row().ClientPubkey {
 		// Silently. §8: UNAUTHORIZED must never leak whether a connection
@@ -539,7 +542,7 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	scheme, present, supported := requestedScheme(event.Tags)
 
 	s.log.Debug("handling an NWC request", "connection", conn.row().ID,
-		"event", event.ID, "kind", event.Kind, "tags", tagNames{event},
+		"event", event.ID, "kind", event.Kind, "tags", nostr.TagNames{Event: event},
 		"encryption", encryptionRequested(present, scheme, supported))
 
 	if !supported {
@@ -674,7 +677,11 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	// created without the pay group.
 	s.reportOutcome(ctx, conn, req, resp)
 	// --- 6. encrypt and publish ---------------------------------------------
-	return s.respond(ctx, conn, event, scheme, resp, true)
+	resp, answered, sent := s.respondAndMeasure(ctx, conn, event, scheme, resp, true)
+	if sent.published && resp.Error == nil {
+		s.reportAnswered(conn, req, entered, sent)
+	}
+	return resp, answered
 }
 
 // advertised is what one connection may actually call — Supported() minus the
@@ -744,27 +751,34 @@ func extensions(conn *connection) string {
 // for ever).
 func (s *Service) respond(ctx context.Context, conn *connection, event *gonostr.Event,
 	scheme nostr.Encryption, resp Response, claimed bool) (Response, bool) {
+	resp, answered, _ := s.respondAndMeasure(ctx, conn, event, scheme, resp, claimed)
+	return resp, answered
+}
+
+// respondAndMeasure is respond, reporting what the publish took — for the one
+// caller whose log line carries it (k2z).
+func (s *Service) respondAndMeasure(ctx context.Context, conn *connection, event *gonostr.Event,
+	scheme nostr.Encryption, resp Response, claimed bool) (Response, bool, delivery) {
 	encoded, err := encode(resp)
 	if err != nil {
 		s.log.Error("could not encode an NWC response", "error", err.Error())
-		return resp, false
+		return resp, false, delivery{}
 	}
 	if claimed {
 		if err := s.store.CompleteNWCRequest(ctx, event.ID, encoded, s.now()); err != nil {
 			s.log.Error("could not record an NWC response for replay", "error", err.Error())
 		}
 	}
-	s.publishCached(ctx, conn, event, scheme, encoded)
-	return resp, true
+	return resp, true, s.publishCached(ctx, conn, event, scheme, encoded)
 }
 
 // publishCached seals a rendered response and sends it to the connection's relay.
 func (s *Service) publishCached(ctx context.Context, conn *connection, event *gonostr.Event,
-	scheme nostr.Encryption, encoded string) {
+	scheme nostr.Encryption, encoded string) delivery {
 	sealed, err := conn.identity.Encrypt(scheme, event.PubKey, encoded)
 	if err != nil {
 		s.log.Error("could not encrypt an NWC response", "error", err.Error())
-		return
+		return delivery{}
 	}
 	response := gonostr.Event{
 		Kind:      KindResponse,
@@ -778,13 +792,13 @@ func (s *Service) publishCached(ctx context.Context, conn *connection, event *go
 	}
 	if err := conn.identity.Sign(&response); err != nil {
 		s.log.Error("could not sign an NWC response", "error", err.Error())
-		return
+		return delivery{}
 	}
 	// RETRIED, and bounded by what the client can still hear (d24.25). See
 	// publishResponse: one attempt and a WARN was the whole delivery policy, and
 	// both field trips logged the WARN — which is a spinner on the phone for a
 	// request that was handled and a payment that may have moved.
-	s.publishResponse(ctx, conn, response, event.CreatedAt.Time())
+	return s.publishResponse(ctx, conn, response, event.CreatedAt.Time())
 }
 
 // dispatch runs one permitted method (§8 step 5).
@@ -1215,33 +1229,6 @@ func nonNull(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 	return raw
-}
-
-// tagNames is the NAMES of an event's tags, sorted, for the one line that logs
-// an inbound request.
-//
-// Names only. A tag's value is chosen by the client and can be anything at all;
-// the name is what says which shape of request this is, and it is what the 0.1.11
-// investigation needed. Sorted so two requests carrying the same tags produce the
-// same line and a reader can compare them at a glance.
-//
-// A LogValuer rather than a function call, and that is not style: slog evaluates
-// its arguments EAGERLY, so `tagNames(event)` as an argument would allocate,
-// sort and join on every inbound request of every install — DEBUG is off on all
-// of them. Measured before changing it. LogValue runs only when a handler
-// actually formats the record, which is what makes this line free when nobody is
-// investigating. The same reason PayResult has one.
-type tagNames struct{ event *gonostr.Event }
-
-func (t tagNames) LogValue() slog.Value {
-	names := make([]string, 0, len(t.event.Tags))
-	for _, tag := range t.event.Tags {
-		if len(tag) > 0 {
-			names = append(names, tag[0])
-		}
-	}
-	slices.Sort(names)
-	return slog.StringValue(strings.Join(names, ","))
 }
 
 // requestedScheme is §8 step 2's reading of a request's tags: the scheme it

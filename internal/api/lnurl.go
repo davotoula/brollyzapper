@@ -9,6 +9,7 @@ import (
 	"net/url"
 
 	"github.com/davotoula/brollyzapper/internal/lnurl"
+	"github.com/davotoula/brollyzapper/internal/logging"
 )
 
 // LNURLRoutes supplies the public group's two endpoints.
@@ -94,13 +95,37 @@ func LNURLHandlers(service LNURL, log *slog.Logger) (payRequest, callback http.H
 		// LND settles a payment hash once, so the second payment is gone with
 		// nothing recorded.
 		w.Header().Set("Cache-Control", "no-store")
+		// The REQUEST's logger, carrying req_id, which NewServer attaches outside
+		// the gate (o34.8). Served by anything other than NewServer, FromContext
+		// is slog's default: the application logger in a process cliboot started,
+		// plain stderr in a test — where every line of this request then leaves
+		// the logger the test is reading. The trace seam test in cmd goes dark,
+		// not merely id-less, when the middleware is removed.
+		log := logging.FromContext(r.Context())
 		answer(w, r, log, func() (any, error) {
 			// The parse callbackGate already did. Repeating it here would
 			// verify the same signature a second time, and — worse — would
 			// hash bytes re-read from the query rather than the bytes whose
 			// signature was checked.
-			return service.Callback(r.Context(), r.PathValue("name"), r.URL.Query(),
-				zapFrom(r.Context()))
+			zap := zapFrom(r.Context())
+			minted, err := service.Callback(r.Context(), r.PathValue("name"), r.URL.Query(), zap)
+			if err == nil {
+				// LEG ONE OF THE TRACE (o34.8): the line a grep on the payment hash
+				// finds first, and the one whose req_id joins the gate's lines
+				// above it. Nothing on this path logged a success before, so a zap
+				// could be followed from its settlement onwards and never back to
+				// the request that minted it.
+				//
+				// INFO, where the refusals beside it are DEBUG, and the difference
+				// is cost: a refusal is free to a stranger, while a mint is bounded
+				// by the backstop, the per-sender limit and §7's open-invoice cap,
+				// and has already written a durable row. At DEBUG the trace would
+				// have a dark first leg on every default install.
+				_, isZap := zap.SenderKey()
+				log.Info("invoice minted", logging.PaymentHash(minted.PaymentHash),
+					"amount_msat", minted.AmountMsat, "zap", isZap)
+			}
+			return minted, err
 		})
 	})
 	return payRequest, callback

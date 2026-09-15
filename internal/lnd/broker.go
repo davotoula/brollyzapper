@@ -39,6 +39,11 @@ type BrokerStatus struct {
 	// the spend macaroon was baked under. §6: this needs macaroon:read, which
 	// the server's own macaroons deliberately do not have, so it arrives here.
 	SpendRootKeyListed bool
+	// ReceiveRootKeyChecked and ReceiveRootKeyListed are the receive credential's
+	// half (`0vk.11`). Both false is "not asked" — including from a guard too old
+	// to send them — and never "revoked".
+	ReceiveRootKeyChecked bool
+	ReceiveRootKeyListed  bool
 	// SendingPermitted is whether the guard will mint spend authority on this
 	// install if asked (tna.4, `06v`): the deployment ceiling and the operator's
 	// stored latch, ANDed. The server learns it here rather than reading a copy

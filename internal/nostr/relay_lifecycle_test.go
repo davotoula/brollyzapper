@@ -1222,3 +1222,73 @@ func TestSendOutcomeClassifiesEveryCombination(t *testing.T) {
 		})
 	}
 }
+
+// k2z item 3, THE NWC LEG: a slow or partial response publish names what each of
+// the pairing's relays cost, as the receipt path has since du9.
+//
+// du9 built the records and wired only the receipt half; PublishToConnection
+// computed them and threw them away. Two things had to be true for wiring it to
+// be safe, and this asserts both:
+//
+//   - ALIGNMENT. The results carry a row for an unusable URL that was never
+//     dialled, prepended before the dialled ones, so the records cannot simply
+//     be the dialled relays' costs indexed by result position (d1o review, a).
+//   - THE LABEL. On this path the attempt's own five-second deadline is set
+//     before the dial's, and a context whose parent expires first keeps the
+//     parent's cause — so a relay that hung was recorded not_connected, "fast
+//     and free", on exactly the path where it costs a client its answer (d1o
+//     review, b).
+func TestASlowOrPartialConnectionPublishNamesWhatEachRelayCost(t *testing.T) {
+	t.Parallel()
+	live := newFleet(t, 1)
+	hole := newBlackHole(t)
+	pool, logged := loggedPool(t, func() []string { return nil })
+	defer pool.Close()
+
+	// The attempt budget as §8 sets it: equal to the connect budget, and set
+	// first, which is the arrangement that loses the dial's cause.
+	ctx, cancel := context.WithTimeout(t.Context(), nostr.ConnectBudget)
+	defer cancel()
+	unusable := "not a relay"
+	results := pool.PublishToConnection(ctx, signedNote(t),
+		nostr.PairingRelays([]string{unusable, live.urls()[0], hole.url}))
+	if nostr.Accepted(results) != 1 {
+		t.Fatalf("the live relay did not accept: %+v", results)
+	}
+
+	records := costRecords(t, logged.String())
+	if len(records) != 3 {
+		t.Fatalf("%d per-relay records, want 3 — one for each relay the pairing names\n%s",
+			len(records), logged.String())
+	}
+	if got := records.costFor(live.urls()[0]); got.Outcome != "accepted" {
+		t.Errorf("the live relay is recorded %q, want accepted", got.Outcome)
+	}
+	if got := records.costFor(hole.url); got.Outcome != "over_budget" {
+		t.Errorf("the relay that hung for the whole attempt is recorded %q, want over_budget — "+
+			"it is why the answer was slow, not a relay that was merely unavailable", got.Outcome)
+	}
+	if got := records[unusable]; got.Outcome != "not_connected" {
+		t.Errorf("the unusable URL is recorded %+v, want not_connected — no socket, and it cost nothing", got)
+	}
+}
+
+// go-review of k2z: a dial begun AFTER the caller's deadline had already passed
+// cost nothing and waited for nothing, so it is not_connected — never
+// over_budget, which names the relay that ate the time.
+func TestADialWithNoTimeLeftIsNotRecordedAsOverBudget(t *testing.T) {
+	hole := newBlackHole(t)
+	pool, logged := loggedPool(t, func() []string { return nil })
+	defer pool.Close()
+
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	results := pool.PublishToConnection(ctx, signedNote(t), nostr.PairingRelays([]string{hole.url}))
+	if len(results) != 1 || results[0].OK() {
+		t.Fatalf("results = %+v, want one failure", results)
+	}
+
+	if got := costRecords(t, logged.String()).costFor(hole.url); got.Outcome != "not_connected" {
+		t.Errorf("a relay dialled with the deadline already gone is recorded %q, want not_connected", got.Outcome)
+	}
+}

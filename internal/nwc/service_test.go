@@ -806,6 +806,8 @@ type countingSigner struct {
 	nostr.Identity
 	mu    sync.Mutex
 	calls int
+	// encryptErr, when set, is what every Encrypt returns instead.
+	encryptErr error
 }
 
 func (c *countingSigner) count() int {
@@ -822,6 +824,12 @@ func (c *countingSigner) record() {
 
 func (c *countingSigner) Encrypt(scheme nostr.Encryption, peer, plaintext string) (string, error) {
 	c.record()
+	c.mu.Lock()
+	failure := c.encryptErr
+	c.mu.Unlock()
+	if failure != nil {
+		return "", failure
+	}
 	return c.Identity.Encrypt(scheme, peer, plaintext)
 }
 

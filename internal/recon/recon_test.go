@@ -300,13 +300,13 @@ func TestAnUnreachableNodeDoesNotFreezeSpending(t *testing.T) {
 // reads this.
 func TestShortfallIsThePreflightProducer(t *testing.T) {
 	r, _, _, _ := newReconciler(t, 500_000_000, 900_000_000)
-	if _, _, present := r.Shortfall(t.Context()); present {
+	if _, _, present, _ := r.Shortfall(t.Context()); present {
 		t.Error("a shortfall was reported before any check ran")
 	}
 	if err := r.Check(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	amount, cause, present := r.Shortfall(t.Context())
+	amount, cause, present, _ := r.Shortfall(t.Context())
 	if !present || amount != 400_000_000 {
 		t.Errorf("Shortfall = %d, %v; want 400000000, true", amount, present)
 	}
@@ -398,5 +398,35 @@ func TestAClosedDemandChannelEndsTheLoopRatherThanSpinning(t *testing.T) {
 	}
 	if len(checks) > 1 {
 		t.Errorf("a closed demand channel drove %d checks", len(checks))
+	}
+}
+
+// d46.25: every Check is remembered, pass or fail, with its time — the panel's
+// only way to tell a verdict from a verdict nobody has re-checked.
+func TestLastCheckRemembersEveryOutcomeAndItsTime(t *testing.T) {
+	r, node, _, _ := newReconciler(t, 1_000_000_000, 400_000_000)
+	if at, err := r.LastCheck(); !at.IsZero() || err != nil {
+		t.Fatalf("LastCheck before any check = %v, %v; want zero", at, err)
+	}
+
+	node.mu.Lock()
+	node.err = errors.New("connection refused")
+	node.mu.Unlock()
+	if err := r.Check(t.Context()); err == nil {
+		t.Fatal("the fixture is wrong: Check succeeded against an unreachable node")
+	}
+	at, err := r.LastCheck()
+	if !at.Equal(now) || err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("LastCheck after a failure = %v, %v; want %v and the failure", at, err, now)
+	}
+
+	node.mu.Lock()
+	node.err = nil
+	node.mu.Unlock()
+	if err := r.Check(t.Context()); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if _, err := r.LastCheck(); err != nil {
+		t.Errorf("LastCheck after a success still carries %v; a recovered node would stay red", err)
 	}
 }

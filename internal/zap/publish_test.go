@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -534,15 +535,7 @@ func TestTheReceiptLineSaysHowLongThePublishTook(t *testing.T) {
 
 	h.publisherWith(&slowPool{takes: takes}, &logged).PublishNow(t.Context(), hash)
 
-	line := ""
-	for _, candidate := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
-		if strings.Contains(candidate, "zap receipt published") {
-			line = candidate
-		}
-	}
-	if line == "" {
-		t.Fatalf("no receipt line was logged at all:\n%s", logged.String())
-	}
+	line := receiptLine(t, logged.String())
 	var record struct {
 		PublishMS int64 `json:"publish_ms"`
 	}
@@ -556,4 +549,50 @@ func TestTheReceiptLineSaysHowLongThePublishTook(t *testing.T) {
 		t.Errorf("publish_ms = %d, want at least %d — the publish took %s and the line must "+
 			"say so:\n%s", record.PublishMS, floor, takes, line)
 	}
+}
+
+// k2z, from the 0.1.21-rc1 trip: the receipt line names the receipt's TAGS, so a
+// field check can verify the receipt's shape from the box — and never a tag's
+// VALUE, because one of them is the preimage.
+func TestTheReceiptLineNamesTheReceiptsTagsAndNoneOfTheirValues(t *testing.T) {
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged bytes.Buffer
+
+	h.publisherWith(&fakePool{}, &logged).PublishNow(t.Context(), hash)
+
+	var record struct {
+		Tags string `json:"tags"`
+	}
+	if line := receiptLine(t, logged.String()); json.Unmarshal([]byte(line), &record) != nil {
+		t.Fatalf("the receipt line is not JSON: %s", line)
+	}
+	names := strings.Split(record.Tags, ",")
+	for _, want := range []string{"bolt11", "description", "p", "preimage"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("the receipt line's tags %q do not name %q", record.Tags, want)
+		}
+	}
+	// The values must not be there: settleAs credits with this preimage, so if it
+	// reached the log in any form, this finds it.
+	if preimage := strings.Repeat("9", 64); strings.Contains(logged.String(), preimage) {
+		t.Errorf("the preimage reached the log:\n%s", logged.String())
+	}
+}
+
+// receiptLine is the last "zap receipt published" line in a captured log, or a
+// failure saying there was none — so an absent line reads as absent rather than
+// as a line missing its fields.
+func receiptLine(t *testing.T, logged string) string {
+	t.Helper()
+	line := ""
+	for _, candidate := range strings.Split(strings.TrimSpace(logged), "\n") {
+		if strings.Contains(candidate, "zap receipt published") {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatalf("no receipt line was logged at all:\n%s", logged)
+	}
+	return line
 }

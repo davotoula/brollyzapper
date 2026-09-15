@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -313,7 +314,6 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		invoices:       opts.Invoices,
 		cap:            OpenInvoiceCap,
 		now:            opts.Now,
-		log:            opts.Log,
 	}
 	payRequest, callback := opts.LNURL.Handlers()
 	public := NewPublicMux(
@@ -336,7 +336,10 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		// The callback is the one that mints, so it is the one that is limited.
 		// The token is stamped OUTSIDE the gate so a refusal still carries it
 		// and the prober can tell "us, refusing" from "somebody else answering".
-		WithProbeToken(opts.ProbeToken, gate.Middleware(callback)),
+		//
+		// And the request id OUTSIDE both, so every line the gate and the handler
+		// write about this request carries it (o34.8).
+		withRequestID(opts.Log, WithProbeToken(opts.ProbeToken, gate.Middleware(callback))),
 	)
 
 	admin := NewAdminMux()
@@ -504,14 +507,21 @@ func (s *Server) checks(ctx context.Context) preflight.Report {
 // degraded is one rendering of the preflight report: the failed checks, in the
 // words an operator can act on. It computes nothing of its own, which is what
 // stops it disagreeing with the Security panel.
+//
+// A line is said once. Rows that could not be evaluated for the same reason share
+// the sentence — an install the guard has not linked yet has four receive rows
+// with nothing to read (`0vk.11`) — and a banner repeating it four times reads as
+// four problems.
 func degraded(report preflight.Report) []string {
 	var missing []string
 	for _, c := range report.Failed() {
-		if c.Detail == "" {
-			missing = append(missing, c.Title)
-			continue
+		line := c.Detail
+		if line == "" {
+			line = c.Title
 		}
-		missing = append(missing, c.Detail)
+		if !slices.Contains(missing, line) {
+			missing = append(missing, line)
+		}
 	}
 	return missing
 }

@@ -73,7 +73,9 @@ type callbackGate struct {
 	invoices       Invoices
 	cap            int64
 	now            func() time.Time
-	log            *slog.Logger
+	// No logger of its own: every line is about one request, and is written
+	// through that request's logger so it carries the req_id withRequestID
+	// attached (o34.8).
 
 	// rescueOnce keeps the double-encoding notice to one line per process. See
 	// noteDoubleEncodingRescue.
@@ -109,8 +111,8 @@ func (g *callbackGate) Middleware(next http.Handler) http.Handler {
 		// because both depend on what it found.
 		zap := lnurl.ParseZapParam(r.URL.Query())
 		r = r.WithContext(contextWithZap(r.Context(), zap))
-		logRelayDrops(g.log, zap)
-		g.noteDoubleEncodingRescue(zap)
+		logRelayDrops(logging.FromContext(r.Context()), zap)
+		g.noteDoubleEncodingRescue(r.Context(), zap)
 
 		// Zap path only: a plain LNURL payment carries no sender identity, so
 		// there is nothing to key on and the backstop above is its only bound.
@@ -163,13 +165,13 @@ func (g *callbackGate) Middleware(next http.Handler) http.Handler {
 const rescueNotice = "a zap request parsed only after a second percent-decode; " +
 	"the client encoded the nostr parameter twice"
 
-func (g *callbackGate) noteDoubleEncodingRescue(zap lnurl.ZapParam) {
+func (g *callbackGate) noteDoubleEncodingRescue(ctx context.Context, zap lnurl.ZapParam) {
 	client, rescued := zap.DoubleEncodingRescue()
 	if !rescued {
 		return
 	}
 	g.rescueOnce.Do(func() {
-		g.log.Info(rescueNotice, "client", client)
+		logging.FromContext(ctx).Info(rescueNotice, "client", client)
 	})
 }
 
@@ -225,11 +227,11 @@ func (g *callbackGate) underInvoiceCap(ctx context.Context) bool {
 	defer g.countMu.Unlock()
 	if err != nil {
 		if !g.counted {
-			g.log.Error("could not count open invoices, and there is no earlier count "+
+			logging.FromContext(ctx).Error("could not count open invoices, and there is no earlier count "+
 				"to fall back on; allowing the callback", "error", err.Error())
 			return true
 		}
-		g.log.Error("could not count open invoices; using the last known count",
+		logging.FromContext(ctx).Error("could not count open invoices; using the last known count",
 			"error", err.Error(), "last_open", g.lastCount)
 		return g.lastCount < g.cap
 	}
@@ -262,6 +264,6 @@ func (g *callbackGate) refuse(w http.ResponseWriter, r *http.Request, limit, rea
 	if key != "" {
 		attrs = append(attrs, "sender", logging.Short(key))
 	}
-	g.log.Debug("rate-limited an LNURL callback", attrs...)
+	logging.FromContext(r.Context()).Debug("rate-limited an LNURL callback", attrs...)
 	writeLNURLError(w, http.StatusTooManyRequests, reason)
 }

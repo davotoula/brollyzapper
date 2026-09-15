@@ -55,6 +55,11 @@ const (
 	CheckSpendExpiry      = "spend.expiry"
 	CheckSpendRootKey     = "spend.rootkey"
 	CheckSpendGuardCaveat = "spend.guard_caveat"
+	// `0vk.11`: the four rows the receive credential shares with the spend one.
+	CheckReceiveCaveats   = "receive.caveats"
+	CheckReceiveIPMatches = "receive.ipaddr"
+	CheckReceiveExpiry    = "receive.expiry"
+	CheckReceiveRootKey   = "receive.rootkey"
 	CheckGuardMiddleware  = "guard.middleware"
 	CheckReconciliation   = "wallet.reconciliation"
 	CheckUnresolvedSpend  = "wallet.unresolved_payments"
@@ -312,8 +317,13 @@ type Inputs struct {
 	// SpendMacaroon returns the serialised spend macaroon, if one has been
 	// baked. Absent is not a failure: receive-only is the default (§6).
 	SpendMacaroon func() ([]byte, bool)
-	// ServerIP is this container's address, which the spend macaroon's ipaddr
-	// caveat must match.
+	// ReceiveMacaroon returns the serialised receive macaroon (`0vk.11`). Absent
+	// is NOT the default here: it is an install the guard has not linked yet, and
+	// its rows say not checked rather than pass.
+	ReceiveMacaroon func() ([]byte, bool)
+	// ServerIP is this container's address, which both macaroons' ipaddr caveats
+	// must match. Invalid is "could not discover it", and those rows say not
+	// checked.
 	ServerIP netip.Addr
 	DataDir  string
 	// Domain reports the configured domain, whether the last self-probe
@@ -322,7 +332,18 @@ type Inputs struct {
 	// Shortfall reports a reconciliation deficit and the likeliest reason for
 	// it (§5). The cause travels with the number because a number on its own
 	// sends the operator to the wrong place.
-	Shortfall func(ctx context.Context) (shortfallMsat int64, cause string, present bool)
+	// An error is "could not tell whether spending is frozen", which the row
+	// reports as not checked — never as no shortfall.
+	Shortfall func(ctx context.Context) (shortfallMsat int64, cause string, present bool, err error)
+	// LastReconciliation is when the last reconciliation check finished and what
+	// it returned; a zero time is none yet (d46.25).
+	//
+	// Beside Shortfall because Shortfall is the WALLET's frozen state, which a
+	// check that could not run leaves untouched: on its own it renders the
+	// previous verdict under a tick for as long as the node stays away. Wired
+	// with Shortfall: the row treats a Shortfall with no LastReconciliation as
+	// never checked, never as fresh.
+	LastReconciliation func() (at time.Time, err error)
 	// UnresolvedPayments reports how many payments a previous run left in
 	// flight (§5's second freeze, u0u).
 	//
@@ -385,6 +406,7 @@ func Run(ctx context.Context, in Inputs) Report {
 		unresolvedPaymentsCheck(ctx, in),
 		dataDirCheck(in),
 	)
+	report.Checks = append(report.Checks, credentialChecks(receiveCredential, read(in.ReceiveMacaroon), in, broker)...)
 	report.Checks = append(report.Checks, spendChecks(in, broker)...)
 	report.Spend = spendWindow(broker)
 	report.Rejections = rejectionBurst(ctx, in)
@@ -594,33 +616,224 @@ func guardCheck(broker brokerState) Check {
 	return c
 }
 
-// spendChecks are §11's spend-macaroon rows. With no spend macaroon baked —
-// the receive-only default — they pass: there is nothing unconstrained.
+// credentialKind is what differs between §11's rows for the two credentials
+// (`0vk.11`). Four rows apply to both — caveats present, locked to this
+// container, not expired, root key still listed — and they were written for the
+// spend credential alone, which most installs never bake, while the receive
+// credential, which `d46.26` gave the same caveats and its own root key and
+// whose failure stops the app receiving, had none.
+//
+// THE EVALUATION IS SHARED; the words and what a failure takes away are not.
+type credentialKind struct {
+	ids [4]string // caveats, ipaddr, expiry, rootkey
+	// titles and threats, in the same order. Each threat names the §11
+	// threat-model row it maps to.
+	titles, threats [4]string
+	// blocks is what a FINDING takes away. Not-checked states block nothing,
+	// whatever this says.
+	blocks Capability
+	// absent is the detail when there is no such credential on disk, and
+	// absentIsAPass whether that is the expected state (receive-only) or a
+	// question nobody could answer (no receive credential yet), which is said as
+	// not checked.
+	absent        string
+	absentIsAPass bool
+	// expired is the consequence clause of an expired credential's detail.
+	expired string
+	// rootKey reads the guard's answer about this credential's root key.
+	rootKey func(lnd.BrokerStatus) rootKeyAnswer
+	// requiresRecord is whether the guard holding no root key for a credential on
+	// disk is a finding. For spend it is (a stale or stolen copy, d24.6); a
+	// receive credential with none is one the guard re-bakes on its own (d46.26),
+	// and Status carries no such field for it.
+	requiresRecord bool
+	// revoked is the detail when the node was asked and no longer lists the key.
+	revoked string
+}
+
+var spendCredential = credentialKind{
+	ids: [4]string{CheckSpendCaveats, CheckSpendIPMatches, CheckSpendExpiry, CheckSpendRootKey},
+	titles: [4]string{
+		"The spend macaroon carries its caveats",
+		"The spend macaroon is locked to this container",
+		"The spend macaroon has not expired",
+		"The node still honours the spend root key",
+	},
+	threats: [4]string{
+		"A macaroon copy stolen by any other route — the IP lock and timeout are what make a stolen copy inert, and a spend macaroon missing them is unconstrained.",
+		"A macaroon copy stolen by any other route — an ipaddr caveat for the wrong address locks it to somewhere else, which is the §10 static-IP misconfiguration showing up as an authentication failure days later. Read from the file, so the row names both addresses before a payment is attempted; node.credential_address is the node's own refusal, after.",
+		"A macaroon copy stolen by any other route — the timeout is the mitigation, and an expired spend macaroon simply stops working. Receiving is unaffected.",
+		"Spend macaroon exfiltrated — RevokeSpend deletes the root key node-side, so a key the node no longer lists means sending was already revoked.",
+	},
+	blocks:        BlocksSending,
+	absent:        "Sending is not enabled, so there is no spend macaroon to check.",
+	absentIsAPass: true,
+	expired:       "receiving continues, and re-enabling sending bakes a fresh one",
+	rootKey: func(s lnd.BrokerStatus) rootKeyAnswer {
+		return rootKeyAnswer{s.SpendMacaroonPresent, s.SpendRootKeyRecorded, s.SpendRootKeyChecked, s.SpendRootKeyListed}
+	},
+	requiresRecord: true,
+	revoked:        "the node no longer lists this macaroon's root key, so it has already been revoked",
+}
+
+// receiveCredential's rows block NOTHING, and that is §11 rather than an
+// oversight. BlocksReceiving exists to be asserted against: Tier 2 never takes
+// receiving away. A receive credential that fails these is one the NODE refuses,
+// or will — the app withholds nothing — so the detail says what stops working and
+// the pay ladder, which reads BlockedBy(BlocksSending), is not handed a reason to
+// refuse a payment the spend credential can make.
+var receiveCredential = credentialKind{
+	ids: [4]string{CheckReceiveCaveats, CheckReceiveIPMatches, CheckReceiveExpiry, CheckReceiveRootKey},
+	titles: [4]string{
+		"The receive macaroon carries its caveats",
+		"The receive macaroon is locked to this container",
+		"The receive macaroon has not expired",
+		"The node still honours the receive root key",
+	},
+	threats: [4]string{
+		"Receive macaroon exfiltrated — a stolen copy streams every invoice on the node, memos and preimages included; the IP lock and timeout are what make it inert, and one missing them is not.",
+		"Receive macaroon exfiltrated — the ipaddr caveat makes a stolen copy useless elsewhere, and the same lock refuses this container when the address in the caveat is another. Read from the file, so the row names both addresses before the node is asked; node.credential_address is the node's own refusal, after, and only once the guard has declined to re-bake.",
+		"Receive macaroon exfiltrated — time-before stops a stolen copy within a week. An expired one is refused by the node, so the app stops receiving until the guard renews it, which it does before expiry on its own.",
+		"Receive macaroon exfiltrated — Re-link revokes its own root key without touching any other app, so a key the node no longer lists means this credential no longer works.",
+	},
+	blocks:  BlocksNothing,
+	absent:  "there is no receive macaroon yet; the guard writes it once it can reach your node.",
+	expired: "your node refuses it, so the app cannot receive until the guard bakes a fresh one",
+	rootKey: func(s lnd.BrokerStatus) rootKeyAnswer {
+		return rootKeyAnswer{present: s.ReceiveMacaroonPresent, checked: s.ReceiveRootKeyChecked,
+			listed: s.ReceiveRootKeyListed}
+	},
+	revoked: "the node no longer lists this macaroon's root key, so it was revoked or the node's " +
+		"macaroons were rotated; the app cannot receive with it, and the guard re-links when it notices",
+}
+
+// credentialChecks evaluates kind's four rows against the credential read by
+// macaroon.
+//
+// NOT CHECKED IS NOT A PASS (d46.25). Every row that could not be evaluated —
+// no credential to read where one is expected, no address to compare with, a
+// guard that did not answer, a node the guard could not ask — says so, is not OK,
+// and blocks nothing: the row that knows WHY (node.linked, guard.reachable) is
+// the one that blocks.
+func credentialChecks(kind credentialKind, cred credentialRead, in Inputs, broker brokerState) []Check {
+	rows := make([]Check, 4)
+	for i := range rows {
+		rows[i] = Check{ID: kind.ids[i], Title: kind.titles[i], Threat: kind.threats[i], OK: true, Blocks: kind.blocks}
+	}
+	caveats, ipMatch, expiry, rootKey := &rows[0], &rows[1], &rows[2], &rows[3]
+
+	if !cred.wired {
+		return rows
+	}
+	raw := cred.raw
+	if !cred.present {
+		for i := range rows {
+			if kind.absentIsAPass {
+				rows[i].Detail = kind.absent
+			} else {
+				notChecked(&rows[i], kind.absent)
+			}
+		}
+		return rows
+	}
+
+	// lnd.RequireHardening is the one statement of the policy: the guard bakes
+	// to it and this verifies against it, so a change to what a hardened
+	// credential must carry cannot leave a second copy behind that quietly
+	// stops requiring something (§6, d46.26).
+	if err := lnd.RequireHardening(raw); err != nil {
+		caveats.OK, caveats.Detail = false, err.Error()
+	}
+	switch locked, ok := lnd.CaveatValue(raw, lnd.CaveatIPAddr); {
+	case !ok:
+		ipMatch.OK, ipMatch.Detail = false, "the macaroon carries no ipaddr caveat"
+	case !in.ServerIP.IsValid():
+		notChecked(ipMatch, fmt.Sprintf("the macaroon is locked to %s, and this container's own "+
+			"address could not be discovered to compare it with.", locked))
+	case locked != in.ServerIP.String():
+		ipMatch.OK = false
+		ipMatch.Detail = fmt.Sprintf("the macaroon is locked to %s but this container is %s; "+
+			"the static IP in the package and the caveat disagree", locked, in.ServerIP)
+	}
+	if when, ok := lnd.Expiry(raw); ok {
+		if !in.Now().Before(when) {
+			expiry.OK = false
+			expiry.Detail = fmt.Sprintf("the macaroon expired at %s; %s", when.Format(time.RFC3339), kind.expired)
+		}
+	} else {
+		expiry.OK, expiry.Detail = false, "the macaroon carries no time-before caveat"
+	}
+
+	// CHECKED as well as not-listed. A node that could not be asked has not said
+	// anything about this key, and since d24.6 the spend row refuses payments — so
+	// treating "we could not ask" as "already revoked" would turn a transient RPC
+	// error into a spend refusal with a diagnosis pointing at the wrong repair.
+	if broker.wired && broker.err != nil {
+		notChecked(rootKey, guardDown)
+		return rows
+	}
+	if !broker.answered() {
+		return rows
+	}
+	answer := kind.rootKey(broker.status)
+	switch {
+	case !answer.present:
+		// The server reads a credential the guard does not report: the two are
+		// looking at different files, or the guard's view is a moment behind.
+		// Neither is an answer about the key.
+		notChecked(rootKey, "the guard does not report this macaroon, so it has not said which root key it was baked under.")
+	case kind.requiresRecord && !answer.recorded:
+		// A spend macaroon on disk that the guard has no root key for. It baked
+		// none, or baked one and revoked it — which is what a stale copy put back
+		// by hand looks like, and what a stolen one looks like too. Since d24.6
+		// this refuses payments, which is the right answer for both.
+		rootKey.OK = false
+		rootKey.Detail = "the guard holds no root key for this macaroon, so it was " +
+			"either never baked here or has already been revoked"
+	case !answer.checked:
+		// Including a guard too old to send the receive fields, which decode false.
+		notChecked(rootKey, "the guard has not confirmed with your node which root keys it still lists.")
+	case !answer.listed:
+		rootKey.OK, rootKey.Detail = false, kind.revoked
+	}
+	return rows
+}
+
+// rootKeyAnswer is the guard's Status about one credential's root key: whether
+// the guard reports the credential, holds a root key id for it, asked the node,
+// and was told the node still lists it.
+type rootKeyAnswer struct{ present, recorded, checked, listed bool }
+
+// credentialRead is one credential file, read ONCE per report: wired is whether
+// an accessor was supplied at all, present whether it found a credential.
+type credentialRead struct {
+	raw            []byte
+	present, wired bool
+}
+
+// read reads a credential through its accessor, once.
+func read(macaroon func() ([]byte, bool)) credentialRead {
+	if macaroon == nil {
+		return credentialRead{}
+	}
+	raw, present := macaroon()
+	return credentialRead{raw: raw, present: present, wired: true}
+}
+
+// guardDown is why a row the guard answers was not checked when it did not.
+const guardDown = "the guard is not answering, so it could not be asked."
+
+// notChecked is d46.25's state: not a pass, and not a finding either — it blocks
+// nothing, because the row that knows why (guard.reachable, node.linked) is the
+// one that blocks.
+func notChecked(c *Check, why string) {
+	c.OK, c.Blocks, c.Detail = false, BlocksNothing, "Not checked — "+why
+}
+
+// spendChecks are §11's spend-macaroon rows: the four shared with the receive
+// credential, and two of its own. With no spend macaroon baked — the
+// receive-only default — they pass: there is nothing unconstrained.
 func spendChecks(in Inputs, broker brokerState) []Check {
-	caveats := Check{
-		ID:     CheckSpendCaveats,
-		Title:  "The spend macaroon carries its caveats",
-		Threat: "Database or credential volume stolen from a backup — the IP lock and timeout are what make a stolen copy inert, and a macaroon missing them is unconstrained.",
-		OK:     true, Blocks: BlocksSending,
-	}
-	ipMatch := Check{
-		ID:     CheckSpendIPMatches,
-		Title:  "The spend macaroon is locked to this container",
-		Threat: "Spend macaroon exfiltrated — an ipaddr caveat for the wrong address locks it to somewhere else, which is the §10 static-IP misconfiguration showing up as an authentication failure days later.",
-		OK:     true, Blocks: BlocksSending,
-	}
-	expiry := Check{
-		ID:     CheckSpendExpiry,
-		Title:  "The spend macaroon has not expired",
-		Threat: "Spend macaroon exfiltrated — the timeout is the mitigation, and an expired one simply stops working. Receiving is unaffected.",
-		OK:     true, Blocks: BlocksSending,
-	}
-	rootKey := Check{
-		ID:     CheckSpendRootKey,
-		Title:  "The node still honours the spend root key",
-		Threat: "Spend macaroon exfiltrated — RevokeSpend deletes the root key node-side, so a key the node no longer lists means sending was already revoked.",
-		OK:     true, Blocks: BlocksSending,
-	}
 	// §11's Tier 2, from P4. TWO ROWS, and Wave 31 shipped them as one — which
 	// was wrong for the reason tna.4 had already established about the two
 	// sending off-states: TWO REMEDIES MEANS TWO ROWS. A macaroon with no
@@ -646,99 +859,50 @@ func spendChecks(in Inputs, broker brokerState) []Check {
 		Threat: "Guard down with sending enabled — LND rejects a custom caveat with no middleware behind it, so the spend macaroon stops working entirely. That is the fail-closed direction, and it is a state the page must name rather than leave as an unexplained payment failure.",
 		OK:     true, Blocks: BlocksSending,
 	}
-
-	// The set, named ONCE. It was written out four times, and this wave split a
-	// row in two and had to edit every copy: a seventh row that reaches five
-	// sites but not the sixth drops silently from whichever return path was
-	// missed, and the receive-only path below is the one no test exercises with
-	// a macaroon present.
-	rows := []*Check{&caveats, &ipMatch, &expiry, &rootKey, &guardCaveat, &middleware}
-	all := func() []Check {
-		out := make([]Check, 0, len(rows))
-		for _, c := range rows {
-			out = append(out, *c)
-		}
-		return out
+	// The set, named ONCE: the shared four, then these two, on every return path.
+	// A row that reaches some paths and not others drops silently from whichever
+	// was missed, and the receive-only path is the one no test exercises with a
+	// macaroon present.
+	//
+	// The file is read ONCE and handed to the shared four, so one report cannot
+	// describe two different spend macaroons if the guard bakes between reads.
+	cred := read(in.SpendMacaroon)
+	rows := func() []Check {
+		return append(credentialChecks(spendCredential, cred, in, broker), guardCaveat, middleware)
 	}
 
-	if in.SpendMacaroon == nil {
-		return all()
+	if !cred.wired {
+		return rows()
 	}
-	raw, present := in.SpendMacaroon()
-	if !present {
-		// Receive-only is the default and not a defect (§6).
-		for _, c := range rows {
-			c.Detail = "Sending is not enabled, so there is no spend macaroon to check."
-		}
-		return all()
+	if !cred.present {
+		guardCaveat.Detail, middleware.Detail = spendCredential.absent, spendCredential.absent
+		return rows()
 	}
-	if !lnd.HasGuardCaveat(raw) {
+	if !lnd.HasGuardCaveat(cred.raw) {
 		guardCaveat.OK = false
 		guardCaveat.Detail = "this macaroon was baked before the guard enforced the spend limit, " +
 			"so payments made with it are not counted against it; turning sending off and on " +
 			"again bakes one that is"
 	}
-
-	// lnd.RequireHardening is the one statement of the policy: the guard bakes
-	// to it and this verifies against it, so a change to what a hardened
-	// credential must carry cannot leave a second copy behind that quietly
-	// stops requiring something (§6, d46.26).
-	if err := lnd.RequireHardening(raw); err != nil {
-		caveats.OK, caveats.Detail = false, err.Error()
+	if broker.wired && broker.err != nil {
+		// NOT CHECKED IS NOT A PASS (d46.25, 0vk.1 F5). Built OK and flipped only
+		// on a finding, this row used to render "The guard is registered with your
+		// node" with a tick having asked nobody. guard.reachable is the row that
+		// knows why, and it blocks.
+		notChecked(&middleware, guardDown)
 	}
-	if locked, ok := lnd.CaveatValue(raw, lnd.CaveatIPAddr); ok {
-		if in.ServerIP.IsValid() && locked != in.ServerIP.String() {
-			ipMatch.OK = false
-			ipMatch.Detail = fmt.Sprintf("the macaroon is locked to %s but this container is %s; "+
-				"the static IP in the package and the caveat disagree", locked, in.ServerIP)
-		}
-	} else {
-		ipMatch.OK, ipMatch.Detail = false, "the macaroon carries no ipaddr caveat"
+	// The OTHER cause of a failing spend-cap row (tna.1), and it is not "the cap
+	// is unenforced" — it is "the macaroon does not work". LND rejects a custom
+	// caveat with no middleware behind it, so sending is already broken and this
+	// row's job is to name the reason rather than leave an unexplained payment
+	// failure.
+	if broker.answered() && broker.status.SpendMacaroonPresent && !broker.status.MiddlewareRegistered {
+		middleware.OK = false
+		middleware.Detail = "the guard is not registered with your node as an RPC " +
+			"middleware, so your node will refuse this macaroon outright until it is; " +
+			"the guard retries on its own, and rpcmiddleware.enable must be set on the node"
 	}
-	if when, ok := lnd.Expiry(raw); ok {
-		if !in.Now().Before(when) {
-			expiry.OK = false
-			expiry.Detail = fmt.Sprintf("the macaroon expired at %s; receiving continues, "+
-				"and re-enabling sending bakes a fresh one", when.Format(time.RFC3339))
-		}
-	} else {
-		expiry.OK, expiry.Detail = false, "the macaroon carries no time-before caveat"
-	}
-	// CHECKED as well as not-listed. A node that could not be asked has not said
-	// anything about this key, and since d24.6 this row refuses payments — so
-	// treating "we could not ask" as "already revoked" would turn a transient RPC
-	// error into a spend refusal with a diagnosis pointing at the wrong repair.
-	// An unreachable node has its own row (guard.reachable, node.linked), which
-	// is where that belongs.
-	if status := broker.status; broker.answered() && status.SpendMacaroonPresent {
-		switch {
-		case !status.SpendRootKeyRecorded:
-			// A spend macaroon on disk that the guard has no root key for.
-			// It baked none, or baked one and revoked it — which is what a
-			// stale copy put back by hand looks like, and what a stolen one
-			// looks like too. Since d24.6 this refuses payments, which is
-			// the right answer for both.
-			rootKey.OK = false
-			rootKey.Detail = "the guard holds no root key for this macaroon, so it was " +
-				"either never baked here or has already been revoked"
-		case status.SpendRootKeyChecked && !status.SpendRootKeyListed:
-			rootKey.OK = false
-			rootKey.Detail = "the node no longer lists this macaroon's root key, so it has already been revoked"
-		}
-		// The OTHER cause of a failing spend-cap row (tna.1), and it is not
-		// "the cap is unenforced" — it is "the macaroon does not work". LND
-		// rejects a custom caveat with no middleware behind it, so sending
-		// is already broken and this row's job is to name the reason rather
-		// than leave an unexplained payment failure. Only when the caveat
-		// itself checked out, so the more specific diagnosis wins.
-		if !status.MiddlewareRegistered {
-			middleware.OK = false
-			middleware.Detail = "the guard is not registered with your node as an RPC " +
-				"middleware, so your node will refuse this macaroon outright until it is; " +
-				"the guard retries on its own, and rpcmiddleware.enable must be set on the node"
-		}
-	}
-	return all()
+	return rows()
 }
 
 func addressCheck(ctx context.Context, in Inputs) Check {
@@ -763,6 +927,21 @@ func addressCheck(ctx context.Context, in Inputs) Check {
 	return c
 }
 
+// reconciliationCheck is §5's freeze, and when it was last looked at (d46.25).
+//
+// THE VERDICT IS THE WALLET'S; THE FRESHNESS IS THE RECONCILER'S. A frozen
+// shortfall is real whether or not the last check ran — the wallet refuses on
+// it — so it blocks sending in every case and the detail says how current it is.
+// No shortfall is only a pass when a check actually ran and succeeded: before
+// the first one, or after one that failed, nothing has compared the ceiling with
+// the node since, and the tick that used to stand there was the confidence §11
+// calls worse than no checklist.
+//
+// A FAILED CHECK BLOCKS NOTHING by itself (delegated, d46.25). §5's freeze is the
+// wallet's decision and this row reports it; it does not make one. Refusing to
+// send because LND did not answer a balance read would be an outage caused by
+// the check, which Check's own comment already rules out, and the payment that
+// needs LND will fail at LND regardless.
 func reconciliationCheck(ctx context.Context, in Inputs) Check {
 	c := Check{
 		ID:     CheckReconciliation,
@@ -773,14 +952,60 @@ func reconciliationCheck(ctx context.Context, in Inputs) Check {
 	if in.Shortfall == nil {
 		return c
 	}
-	if shortfall, cause, present := in.Shortfall(ctx); present {
+	// Read before the shortfall, so a check finishing between the two reads makes
+	// the freshness older than the verdict, never newer. Unwired is never-checked,
+	// not fresh: a report with no way to say when must not be able to say "now".
+	var at time.Time
+	var checkErr error
+	if in.LastReconciliation != nil {
+		at, checkErr = in.LastReconciliation()
+	}
+	shortfall, cause, present, readErr := in.Shortfall(ctx)
+	if readErr != nil {
+		// The FREEZE could not be read, and a node check however recent says
+		// nothing about it (go-review). Not a pass; not a finding either — the
+		// pay ladder reads the wallet itself and refuses on the same error.
+		notChecked(&c, "could not read whether spending is frozen: "+readErr.Error())
+		return c
+	}
+	failed := ""
+	if !at.IsZero() && checkErr != nil {
+		failed = fmt.Sprintf("The last check failed at %s: %v", clock(at), checkErr)
+	}
+
+	if present {
 		c.OK = false
 		c.Detail = fmt.Sprintf("the wallet believes it may spend %d msat more than the node can "+
 			"send, so spending is frozen. %s. Correct it with an adjustment on the wallet page — "+
 			"the balance is never rewritten silently", shortfall, cause)
+		switch {
+		case at.IsZero():
+			c.Detail += ". Not re-checked since the app started; the freeze stands until a check clears it."
+		case failed != "":
+			c.Detail += ". " + failed + "; the freeze stands until a check succeeds."
+		default:
+			c.Detail += ". This is the verdict as of " + clock(at) + "."
+		}
+		return c
+	}
+	switch {
+	case at.IsZero():
+		c.OK, c.Blocks = false, BlocksNothing
+		c.Detail = "Not checked yet — reconciliation runs when the app starts and every five minutes. " +
+			"No shortfall is recorded, so spending is not frozen."
+	case failed != "":
+		c.OK, c.Blocks = false, BlocksNothing
+		c.Detail = failed + ". The last verdict stands: no shortfall recorded, so spending is not " +
+			"frozen — but nothing has compared the ceiling with the node since."
+	default:
+		c.Detail = "Within the node's balance, as of " + clock(at) + "."
 	}
 	return c
 }
+
+// clock is how this package states a time on the panel. The Node page's template
+// spells the same format itself (node.html's "as of"); change both together.
+func clock(at time.Time) string { return at.UTC().Format("15:04:05 UTC") }
 
 // unresolvedPaymentsCheck is §5's second freeze, made visible (1xp).
 //

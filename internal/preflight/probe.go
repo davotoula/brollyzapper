@@ -156,7 +156,7 @@ func serverCredentialCheck(in Inputs) (Check, *ProbeResult) {
 		c.Detail = "Not checked yet — opening an admin page asks your node, and the answer arrives within seconds."
 		return c, &result
 	}
-	asOf := "as of " + result.At.UTC().Format("15:04:05 UTC")
+	asOf := "as of " + clock(result.At)
 	if result.Err == nil {
 		c.Detail = "Your node accepted it, " + asOf + "."
 		return c, &result

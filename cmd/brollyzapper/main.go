@@ -355,6 +355,13 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 					raw, err := lnd.VolumeCredentials(cfg.CredentialsDir, lnd.SpendMacaroon).Macaroon()
 					return raw, err == nil
 				},
+				// The credential the receive client presents, read through the SAME
+				// source it dials with, so the rows describe the file in use
+				// (`0vk.11`).
+				ReceiveMacaroon: func() ([]byte, bool) {
+					raw, err := receiveCredentials.Macaroon()
+					return raw, err == nil
+				},
 				ServerIP: serverIP,
 				DataDir:  cfg.DataDir,
 				Domain: func(ctx context.Context) (string, bool, string) {
@@ -364,6 +371,10 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 					return domain, ok == "true", reason
 				},
 				Shortfall: reconciler.Shortfall,
+				// When the verdict above was last checked, and whether that check
+				// failed (d46.25): the wallet's freeze outlives a check that could
+				// not run, so on its own it is a tick with no date.
+				LastReconciliation: reconciler.LastCheck,
 				// §5's SECOND freeze, its own row (1xp). Read through the
 				// wallet, which owns the cutoff, so the dashboard and the freeze
 				// cannot disagree about which payments count.

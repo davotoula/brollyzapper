@@ -1040,6 +1040,12 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 	// deadline shortens this rather than extending past it. That is the
 	// property go-nostr's hardcoded fifteen seconds lacked: it hangs off the
 	// pool's context, where no caller can reach it.
+	// NO TIME LEFT IS NOT A HUNG RELAY (go-review of k2z). A caller whose deadline
+	// has already gone gets a dial that fails at once, and labelling that the
+	// budget running out would name as costly a relay that cost nothing.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("nostr: connecting to %s: %w", url, err)
+	}
 	dialCtx, cancel := context.WithTimeoutCause(ctx, connectBudget, errConnectBudget)
 	defer cancel()
 
@@ -1051,9 +1057,21 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 		// what this releases is the relay's own context, and with it any
 		// half-open socket the dial left behind.
 		_ = relay.Close()
-		if errors.Is(context.Cause(dialCtx), errConnectBudget) {
-			return nil, fmt.Errorf("nostr: %s: %w after %s: %w",
-				url, errConnectBudget, connectBudget, err)
+		// A DEADLINE, EITHER ONE (k2z, from d1o's review). WithTimeoutCause keeps
+		// the PARENT's cause when the parent's deadline is the sooner one, and on
+		// the NWC path it always is: the attempt's five seconds are set before
+		// this dial's five. The relay hung until a deadline ran out either way —
+		// the budget, shortened, as errConnectBudget's own comment describes — so
+		// it is one outcome, and the cause only chooses the wording. Recording the
+		// second as not_connected would call the relay that cost the client its
+		// answer "fast and free". A parent CANCELLED is not a deadline and keeps
+		// the plain error.
+		if errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
+			bound := fmt.Sprintf("after %s", connectBudget)
+			if !errors.Is(context.Cause(dialCtx), errConnectBudget) {
+				bound = "at the caller's deadline"
+			}
+			return nil, fmt.Errorf("nostr: %s: %w %s: %w", url, errConnectBudget, bound, err)
 		}
 		return nil, fmt.Errorf("nostr: connecting to %s: %w", url, err)
 	}
@@ -1142,8 +1160,13 @@ func (p *Pool) dial(ctx context.Context, url string) (*gonostr.Relay, error) {
 // it uses is spared by closeTransient for exactly this reason.
 func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	relays ConnectionRelays) []PublishResult {
+	start := time.Now()
 	targets := make([]string, 0, len(relays.urls))
 	results := make([]PublishResult, 0, len(relays.urls))
+	// One cost record beside every result, in the same order, because
+	// logRelayCosts reads the two by position (k2z): an unusable URL was never
+	// dialled, so its record is not_connected — no socket, and it cost nothing.
+	costs := make([]relayCost, 0, len(relays.urls))
 	for _, relay := range relays.urls {
 		normalised := gonostr.NormalizeURL(strings.TrimSpace(relay))
 		if normalised == "" || !gonostr.IsValidRelayURL(normalised) {
@@ -1152,6 +1175,7 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 			// others, which is the whole reason there is a list (d24.18).
 			results = append(results, PublishResult{Relay: relay,
 				Err: fmt.Errorf("nostr: %q is not a usable relay URL", relay)})
+			costs = append(costs, relayCost{outcome: "not_connected"})
 			continue
 		}
 		targets = append(targets, normalised)
@@ -1201,13 +1225,14 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	// as. Subscribe dials through Pool.dial now, so the concurrent dial this
 	// path still provokes resolves to one socket instead of two.
 	//
-	// The cost records are DISCARDED here: k2z keeps the NWC line, and du9
-	// folded in only its receipt half. They are computed either way, which is
-	// the price of ONE implementation of the two phases rather than two — and a
-	// cheap one, at MaxPairingRelays entries. Two copies would have been two
-	// chances to fix this barrier once.
-	sent, _ := p.sendAndDial(ctx, targets, event)
-	return append(results, sent...)
+	// THE COST RECORDS, on this leg too (k2z item 3). du9 wired only the receipt
+	// half and discarded these; a pairing's dead relay costs a client its answer,
+	// which is the case they exist to name.
+	//
+	sent, sentCosts := p.sendAndDial(ctx, targets, event)
+	results = append(results, sent...)
+	p.logRelayCosts(time.Since(start), results, append(costs, sentCosts...))
+	return results
 }
 
 // transientChoice is what one publish decided about the relays it was handed.
