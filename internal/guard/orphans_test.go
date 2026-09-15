@@ -2,7 +2,6 @@ package guard_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/netip"
@@ -24,9 +23,15 @@ import (
 // openGuardOnClock is openGuardWithSending on a clock the test moves, because two
 // bakes of one credential inside MinBakeInterval are refused as a repeat — and
 // every test here bakes a credential twice.
-func openGuardOnClock(t *testing.T, node *lndtest.Node, d dirs, clock *testClock, permit bool) *guard.Guard {
+func openGuardOnClock(t *testing.T, node *lndtest.Node, d dirs, clock *testClock, permit bool,
+	opts ...guard.Options) *guard.Guard {
 	t.Helper()
-	g := openGuardFull(t, node, d, guard.Options{Now: clock.Now}, netip.MustParseAddr("10.21.0.17"), true)
+	var o guard.Options
+	if len(opts) == 1 {
+		o = opts[0]
+	}
+	o.Now = clock.Now
+	g := openGuardFull(t, node, d, o, netip.MustParseAddr("10.21.0.17"), true)
 	if permit {
 		permitSending(t, g, d)
 	}
@@ -35,10 +40,19 @@ func openGuardOnClock(t *testing.T, node *lndtest.Node, d dirs, clock *testClock
 
 // pastTheRepeatGuard moves the clock far enough that the next bake is not
 // refused as a repeat of the last.
-func (c *testClock) pastTheRepeatGuard() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(guard.MinBakeInterval)
+func (c *testClock) pastTheRepeatGuard() { c.advance(guard.MinBakeInterval) }
+
+// sweepRows is the attributes of every unattended-sweep row in the trail — the
+// macaroon.revoke rows that carry a count, which the per-key rows do not.
+func sweepRows(t *testing.T, g *guard.Guard) []map[string]string {
+	t.Helper()
+	var rows []map[string]string
+	for _, event := range g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
+		if event.Event == logging.EventMacaroonRevoke && event.Attrs["count"] != "" {
+			rows = append(rows, event.Attrs)
+		}
+	}
+	return rows
 }
 
 // errCrash stands in for the process dying at a chosen point in a bake.
@@ -204,17 +218,12 @@ func TestAStartupSweepRevokesAKeyNothingNames(t *testing.T) {
 		t.Errorf("the sweep revoked the live receive key %d", live)
 	}
 	// ONE audit row for the sweep, naming the count, not a row per key.
-	rows := 0
-	for _, event := range restarted.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
-		if event.Event == logging.EventMacaroonRevoke && event.Attrs["count"] != "" {
-			rows++
-			if event.Attrs["count"] != "2" {
-				t.Errorf("the sweep's row counts %q revoked, want 2", event.Attrs["count"])
-			}
-		}
+	rows := sweepRows(t, restarted)
+	if len(rows) != 1 {
+		t.Fatalf("%d sweep rows in the trail, want exactly one", len(rows))
 	}
-	if rows != 1 {
-		t.Errorf("%d sweep rows in the trail, want exactly one", rows)
+	if rows[0]["count"] != "2" {
+		t.Errorf("the sweep's row counts %q revoked, want 2", rows[0]["count"])
 	}
 }
 
@@ -376,9 +385,8 @@ func TestAnUnattendedSweepRevokesNothingBesideACredentialWithNoSidecar(t *testin
 	}
 
 	var logs bytes.Buffer
-	restarted := openGuardFull(t, node, d, guard.Options{
-		Now: clock.Now, Log: logging.New(&logs, logging.NewLevelVar(slog.LevelInfo)),
-	}, netip.MustParseAddr("10.21.0.17"), true)
+	restarted := openGuardOnClock(t, node, d, clock, false,
+		guard.Options{Log: logging.New(&logs, logging.NewLevelVar(slog.LevelInfo))})
 	sweepAsAtStartup(t, restarted)
 	sweepAsAtStartup(t, restarted)
 
@@ -515,26 +523,9 @@ func TestAnUnattendedSweepSparesAKeyTheStateNamesAsCurrent(t *testing.T) {
 	}
 	live := readGuardState(t, d.data).ReceiveRootKeyID
 
-	path := filepath.Join(d.data, "guard-state.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// UseNumber: a root key id is a uint64, and a plain map would carry it as a
-	// float64 and write back a different key.
-	var state map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&state); err != nil {
-		t.Fatal(err)
-	}
-	state["pending_root_key_ids"] = []uint64{live}
-	if raw, err = json.Marshal(state); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	editGuardStateJSON(t, d, func(fields map[string]any) {
+		fields["pending_root_key_ids"] = []uint64{live}
+	})
 	// And the sidecar goes too, so it is the STATE that has to spare it — the
 	// sidecar would otherwise answer first. With no sidecar beside a credential
 	// the sweep stops altogether, so the credential goes as well: what is left is
@@ -566,10 +557,8 @@ func TestAnUnattendedSweepKeepsWhatTheNodeWouldNotRevoke(t *testing.T) {
 		t.Fatalf("the sweep forgot %d after the node refused to revoke it; it is live at the node "+
 			"with no record anywhere", orphan)
 	}
-	for _, event := range g.Handle(t.Context(), guard.Request{Op: guard.OpStatus}).Events {
-		if event.Event == logging.EventMacaroonRevoke && event.Attrs["count"] != "" {
-			t.Errorf("a sweep that revoked nothing wrote a row claiming %s", event.Attrs["count"])
-		}
+	for _, row := range sweepRows(t, g) {
+		t.Errorf("a sweep that revoked nothing wrote a row claiming %s", row["count"])
 	}
 
 	node.SetDeleteMacaroonIDError(orphan, nil)

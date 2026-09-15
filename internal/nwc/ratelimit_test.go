@@ -27,6 +27,19 @@ func (h *harness) exhaust(t *testing.T, conn *connection) {
 	}
 }
 
+// rateLimitedRows is every rate-limit refusal in the trail: connection.refuse
+// carrying RATE_LIMITED, which is how l3j's episodes are told apart from the
+// capability refusals sharing that event.
+func (h *harness) rateLimitedRows() []auditedRow {
+	var rows []auditedRow
+	for _, row := range h.audit.events() {
+		if row.event == logging.EventConnectionRefuse && row.attrs["code"] == CodeRateLimited {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
 // clientFor is the client identity that may speak for a pairing the harness built.
 func (h *harness) clientFor(conn *connection) nostr.Identity {
 	if conn == h.conn {
@@ -193,13 +206,7 @@ func TestASustainedFloodIsOneEpisode(t *testing.T) {
 	if served == 0 {
 		t.Fatal("precondition: the refill should have served some of the flood")
 	}
-	rows := 0
-	for _, row := range h.audit.events() {
-		if row.attrs["code"] == CodeRateLimited {
-			rows++
-		}
-	}
-	if rows != 1 {
+	if rows := len(h.rateLimitedRows()); rows != 1 {
 		t.Errorf("%d audit rows over thirty seconds of one sustained flood (%d served), want 1", rows, served)
 	}
 }
@@ -216,17 +223,14 @@ func TestARateLimitFloodIsAuditedOnce(t *testing.T) {
 			t.Fatalf("expected RATE_LIMITED, got %+v", resp)
 		}
 	}
-	rows := 0
-	for _, row := range h.audit.events() {
-		if row.event == logging.EventConnectionRefuse && row.attrs["code"] == CodeRateLimited {
-			rows++
-			if row.attrs["connection"] != strconv.FormatInt(h.conn.row().ID, 10) {
-				t.Errorf("the audit row names connection %q, want %d", row.attrs["connection"], h.conn.row().ID)
-			}
+	rows := h.rateLimitedRows()
+	for _, row := range rows {
+		if row.attrs["connection"] != strconv.FormatInt(h.conn.row().ID, 10) {
+			t.Errorf("the audit row names connection %q, want %d", row.attrs["connection"], h.conn.row().ID)
 		}
 	}
-	if rows != 1 {
-		t.Errorf("%d audit rows for one flood of %d refusals, want 1", rows, flood)
+	if len(rows) != 1 {
+		t.Errorf("%d audit rows for one flood of %d refusals, want 1", len(rows), flood)
 	}
 	if n := strings.Count(h.logs.String(), `level=WARN`); n > 1 {
 		t.Errorf("%d WARN lines for one flood; the episode's first refusal is the one worth saying", n)
@@ -246,13 +250,7 @@ func TestARateLimitFloodIsAuditedOnce(t *testing.T) {
 	h.clock.at = h.clock.at.Add(time.Minute)
 	h.exhaust(t, h.conn)
 	h.handle(t, MethodGetBalance, nil)
-	rows = 0
-	for _, row := range h.audit.events() {
-		if row.attrs["code"] == CodeRateLimited {
-			rows++
-		}
-	}
-	if rows != 2 {
+	if rows := len(h.rateLimitedRows()); rows != 2 {
 		t.Errorf("%d audit rows after a second episode, want 2", rows)
 	}
 }

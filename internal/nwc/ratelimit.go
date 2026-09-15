@@ -19,9 +19,12 @@ import (
 // same *connection and therefore the same bucket (update swaps only the row).
 //
 // The zero value is a FULL bucket: a pairing's first requests are its burst.
+//
+// Not internal/api's limiter: nwc sits below api in internal/arch's layer order,
+// and that one counts HTTP callers in fixed windows with nothing to say about a
+// request delivered once per relay or about refusal episodes.
 type requestLimit struct {
-	mu      sync.Mutex
-	started bool
+	mu sync.Mutex
 	// tokens is a float because the refill is continuous; this is a count of
 	// requests, never money, so §4's integer rule does not reach it.
 	tokens float64
@@ -73,10 +76,10 @@ const admittedMemory = RequestBurst + int(SiblingDeliveryWindow/(time.Minute/Req
 func (l *requestLimit) admit(id string, now time.Time) (ok, episodeStarts bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if !l.started {
-		l.started, l.tokens, l.last = true, RequestBurst, now
-	}
-	// A clock that stepped backwards refills nothing rather than draining.
+	// A clock that stepped backwards refills nothing rather than draining. And
+	// the FIRST call refills to full: last is the zero time, so elapsed is
+	// enormous and the min is the burst — which is what makes the zero value a
+	// full bucket without a flag saying so.
 	if elapsed := now.Sub(l.last); elapsed > 0 {
 		l.tokens = min(float64(RequestBurst), l.tokens+elapsed.Minutes()*RequestsPerMinute)
 		l.last = now

@@ -531,15 +531,11 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	// Tags.Find matches the name EXACTLY and only a tag that has a value, and
 	// returns a nil slice when there is none (zu5.11). The deprecated GetFirst
 	// it replaced matched a name prefix, so "encryptionx" chose the scheme.
-	tag := event.Tags.Find("encryption")
-	scheme, supported := nostr.NIP04, true
-	if tag != nil {
-		scheme, supported = nostr.EncryptionFromTag(tag[1])
-	}
+	scheme, present, supported := requestedScheme(event.Tags)
 
 	s.log.Debug("handling an NWC request", "connection", conn.row().ID,
 		"event", event.ID, "kind", event.Kind, "tags", tagNames{event},
-		"encryption", encryptionRequested(tag != nil, scheme, supported))
+		"encryption", encryptionRequested(present, scheme, supported))
 
 	if !supported {
 		return s.respond(ctx, conn, event, nostr.NIP04,
@@ -1241,6 +1237,22 @@ func (t tagNames) LogValue() slog.Value {
 	}
 	slices.Sort(names)
 	return slog.StringValue(strings.Join(names, ","))
+}
+
+// requestedScheme is §8 step 2's reading of a request's tags: the scheme it
+// names, whether it named one at all, and whether this build speaks it. Absent
+// is NIP-04.
+//
+// A function of its own so FuzzHandle seals its inputs with the SAME answer
+// handle will reach; a copy there would drift quietly, and the fuzzer would go
+// on passing while reaching the decryptor less often (qag).
+func requestedScheme(tags gonostr.Tags) (scheme nostr.Encryption, present, supported bool) {
+	tag := tags.Find("encryption")
+	if tag == nil {
+		return nostr.NIP04, false, true
+	}
+	scheme, supported = nostr.EncryptionFromTag(tag[1])
+	return scheme, true, supported
 }
 
 // encryptionRequested names the scheme the client asked for, for the log.

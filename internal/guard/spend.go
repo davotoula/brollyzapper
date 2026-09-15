@@ -263,7 +263,7 @@ func (g *Guard) removeSpendCredential() error {
 // one. Every caller removes spend.macaroon anyway, which is what the sidecar
 // would have been protecting.
 func (g *Guard) sweepAndForgetSpend(ctx context.Context, pending []uint64) ([]uint64, error) {
-	kept := g.sweepPending(ctx, "spend", pending, 0, g.sidecarRootKeys(receiveCredential))
+	kept, _ := g.sweepPending(ctx, "spend", pending, 0, g.sidecarRootKeys(receiveCredential), true)
 	return kept, g.clearSpendState(kept)
 }
 

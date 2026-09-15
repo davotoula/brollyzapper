@@ -124,28 +124,18 @@ func (g *Guard) sweepOrphans(ctx context.Context) {
 	}
 
 	swept := state.PendingRootKeyIDs
-	var kept []uint64
-	revoked := 0
-	for _, id := range swept {
-		if slices.Contains(spare, id) {
-			kept = append(kept, id)
-			continue
-		}
-		gone, deleted := g.revokeRootKey(ctx, "orphaned", id)
-		if !gone {
-			kept = append(kept, id)
-		}
-		if deleted {
-			revoked++
-		}
-	}
+	kept, revoked := g.sweepPending(ctx, "orphaned", swept, 0, spare, false)
 	// Forgets only what THIS sweep saw go, inside the update's own read: nothing
 	// else can add to the set while bakeMu is held, but the closure is where the
-	// state is current, so it is where the decision is made.
-	if err := g.state.update(func(st *State) {
+	// state is current, so it is where the decision is made. updateIf, so a pass
+	// that forgot nothing — every id spared, or the node unreachable — does not
+	// rewrite the state file on an SD card every hour.
+	if err := g.state.updateIf(func(st *State) bool {
+		before := len(st.PendingRootKeyIDs)
 		st.PendingRootKeyIDs = slices.DeleteFunc(st.PendingRootKeyIDs, func(id uint64) bool {
 			return slices.Contains(swept, id) && !slices.Contains(kept, id)
 		})
+		return len(st.PendingRootKeyIDs) != before
 	}); err != nil {
 		g.log.Warn("could not forget the swept pending root keys", "error", err.Error())
 	}

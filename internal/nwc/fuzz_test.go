@@ -47,22 +47,23 @@ const (
 // ladder is reachable too; a pairing without `pay` would answer RESTRICTED before
 // any of it ran.
 func FuzzHandle(f *testing.F) {
+	const nip44Tags = `[["p","x"],["encryption","nip44_v2"]]`
 	for _, seed := range []struct {
 		plaintext, tags string
 		seal            uint8
 		limited         bool
 	}{
 		// One valid request per method.
-		{`{"method":"get_info"}`, `[["p","x"],["encryption","nip44_v2"]]`, sealAsTagged, false},
-		{`{"method":"get_balance"}`, `[["p","x"],["encryption","nip44_v2"]]`, sealAsTagged, false},
+		{`{"method":"get_info"}`, nip44Tags, sealAsTagged, false},
+		{`{"method":"get_balance"}`, nip44Tags, sealAsTagged, false},
 		{`{"method":"make_invoice","params":{"amount":21000,"description":"tip"}}`,
-			`[["p","x"],["encryption","nip44_v2"]]`, sealAsTagged, false},
+			nip44Tags, sealAsTagged, false},
 		{`{"method":"lookup_invoice","params":{"payment_hash":"hash"}}`,
-			`[["p","x"],["encryption","nip44_v2"]]`, sealAsTagged, false},
+			nip44Tags, sealAsTagged, false},
 		{`{"method":"list_transactions","params":{"limit":5,"type":"incoming","unpaid":true}}`,
-			`[["p","x"],["encryption","nip44_v2"]]`, sealAsTagged, false},
+			nip44Tags, sealAsTagged, false},
 		{`{"method":"pay_invoice","params":{"invoice":"lnbc1fuzzseed","amount":1000}}`,
-			`[["p","x"],["encryption","nip44_v2"]]`, sealAsTagged, false},
+			nip44Tags, sealAsTagged, false},
 		// The `xmc` shape: no encryption tag, so NIP-04.
 		{`{"method":"get_balance"}`, `[["p","x"]]`, sealAsTagged, false},
 		// An encryption tag with no value, and one naming nothing we speak.
@@ -96,18 +97,11 @@ func FuzzHandle(f *testing.F) {
 		}
 		conn := newConnection(h.conn.row(), h.counting)
 		if limited {
-			conn.limit.started, conn.limit.last = true, h.clock.at
+			conn.limit.last = h.clock.at
 		}
 
-		// The scheme handle will choose, read with the same Tags.Find and
-		// EncryptionFromTag it uses. A copy of two lines, and if handle's reading
-		// ever moves this goes on sealing with the old answer — which would still
-		// fuzz, but would reach the decryptor less often, never crash wrongly.
-		probe := gonostr.Event{Tags: tags}
-		scheme, supported := nostr.NIP04, true
-		if tag := probe.Tags.Find("encryption"); tag != nil {
-			scheme, supported = nostr.EncryptionFromTag(tag[1])
-		}
+		// The scheme handle will choose, from handle's own reading of the tags.
+		scheme, _, supported := requestedScheme(tags)
 		if !supported {
 			scheme = nostr.NIP44
 		}

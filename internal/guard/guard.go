@@ -440,8 +440,8 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 	// credential that died in G3's window left its live key in this same pending
 	// set, and a receive bake that swept it would break sending, or the reverse.
 	// This credential's own sidecar names rootKeyID, which is spared anyway.
-	kept := g.sweepPending(ctx, c.kind, append(previous.PendingRootKeyIDs, previousKey), rootKeyID,
-		g.sidecarRootKeys(receiveCredential, spendCredential))
+	kept, _ := g.sweepPending(ctx, c.kind, append(previous.PendingRootKeyIDs, previousKey), rootKeyID,
+		g.sidecarRootKeys(receiveCredential, spendCredential), true)
 	if err := g.state.update(func(st *State) {
 		st.PendingRootKeyIDs = slices.DeleteFunc(st.PendingRootKeyIDs, func(id uint64) bool {
 			return id != rootKeyID && !slices.Contains(kept, id)
@@ -522,26 +522,37 @@ func (g *Guard) ipCaveatValue() string {
 }
 
 // sweepPending revokes every orphaned root key and returns the ones that are
-// STILL THERE.
+// STILL THERE, and how many this call deleted.
 //
-// One function for both sweep sites — the end of a bake, and RevokeSpend —
-// because they had grown opposite polarities, one accumulating the keys that
-// were gone and the other the keys that were kept. An inversion in either is
-// silent and produces exactly the d24.10 bug this replaced: a live root key
-// with no record of it anywhere.
+// One function for every sweep site — the end of a bake, RevokeSpend, and the
+// unattended sweep (2o1) — because two of them had grown opposite polarities,
+// one accumulating the keys that were gone and the other the keys that were
+// kept. An inversion in either is silent and produces exactly the d24.10 bug
+// this replaced: a live root key with no record of it anywhere.
 //
 // An id in spare is KEPT without being touched: a credential on disk depends on
 // it (2o1). Kept rather than dropped, so it is still pending — and swept — once
 // that credential is re-baked and nothing names it any more.
+//
+// rowPerKey is the audit shape. The operator-triggered sweeps write a row per
+// revoked key; the unattended one runs every hour and writes one row per pass
+// from the count, so a row per key there would be the trail filling itself.
 func (g *Guard) sweepPending(ctx context.Context, kind string, ids []uint64, current uint64,
-	spare []uint64) []uint64 {
-	var kept []uint64
+	spare []uint64, rowPerKey bool) (kept []uint64, deleted int) {
 	for _, orphan := range ids {
-		if slices.Contains(spare, orphan) || !g.revokePrevious(ctx, kind, orphan, current) {
+		if slices.Contains(spare, orphan) {
+			kept = append(kept, orphan)
+			continue
+		}
+		gone, wasDeleted := g.revokePrevious(ctx, kind, orphan, current, rowPerKey)
+		if !gone {
 			kept = append(kept, orphan)
 		}
+		if wasDeleted {
+			deleted++
+		}
 	}
-	return kept
+	return kept, deleted
 }
 
 // revokePrevious deletes the root key an earlier credential was baked under.
@@ -560,25 +571,14 @@ func (g *Guard) sweepPending(ctx context.Context, kind string, ids []uint64, cur
 // PendingRootKeyIDs keep the ids this returns false for, because forgetting a
 // key whose revocation FAILED leaves it live at the node with no record
 // anywhere — the exact failure that field exists to prevent, reintroduced by
-// the code that tidies it.
-func (g *Guard) revokePrevious(ctx context.Context, kind string, previous, current uint64) bool {
+// the code that tidies it. Separately, it reports whether THIS call deleted it,
+// which is what a row may claim.
+func (g *Guard) revokePrevious(ctx context.Context, kind string, previous, current uint64,
+	row bool) (gone, deleted bool) {
 	if previous == 0 || previous == current {
-		return true // nothing of ours is left honouring it
+		return true, false // nothing of ours is left honouring it
 	}
-	gone, deleted := g.revokeRootKey(ctx, kind, previous)
-	if deleted {
-		g.audit(ctx, slog.LevelInfo, "previous "+kind+" macaroon revoked",
-			logging.EventMacaroonRevoke, nil)
-	}
-	return gone
-}
-
-// revokeRootKey asks the node to delete one root key, and reports whether it is
-// GONE (see revokePrevious) and whether this call is what DELETED it. It audits
-// nothing: the operator-triggered sweeps write a row per key, and the unattended
-// one writes one row per sweep, so the row is the caller's.
-func (g *Guard) revokeRootKey(ctx context.Context, kind string, id uint64) (gone, deleted bool) {
-	deleted, err := g.node.DeleteMacaroonID(ctx, id)
+	deleted, err := g.node.DeleteMacaroonID(ctx, previous)
 	if err != nil {
 		g.log.Warn("could not revoke the previous root key; a stolen copy of the old "+
 			"credential stays valid until it expires, and the id is kept so a later sweep "+
@@ -589,8 +589,13 @@ func (g *Guard) revokeRootKey(ctx context.Context, kind string, id uint64) (gone
 		// The node is not listing it. Nothing more to do about it, ever.
 		g.log.Warn("the node did not delete the previous root key; it was not listing it",
 			"kind", kind)
+		return true, false
 	}
-	return true, deleted
+	if row {
+		g.audit(ctx, slog.LevelInfo, "previous "+kind+" macaroon revoked",
+			logging.EventMacaroonRevoke, nil)
+	}
+	return true, true
 }
 
 // EnsureReceiveMacaroon bakes the receive macaroon when the credential volume
