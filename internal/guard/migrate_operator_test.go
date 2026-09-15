@@ -163,33 +163,41 @@ func TestAFreshInstallGetsTheConfiguredCapsAndNotZero(t *testing.T) {
 // output.
 func stripOperatorIntent(t *testing.T, d dirs) {
 	t.Helper()
+	editGuardStateJSON(t, d, func(fields map[string]any) {
+		for _, key := range []string{
+			"sending_latch", "max_spend_msat", "max_payment_msat", "operator_intent_seeded",
+		} {
+			delete(fields, key)
+		}
+	})
+}
+
+// editGuardStateJSON rewrites the stored state as raw JSON fields, for a test
+// that needs a file the current code would never write.
+func editGuardStateJSON(t *testing.T, d dirs, edit func(fields map[string]any)) {
+	t.Helper()
 	path := filepath.Join(d.data, "guard-state.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading the state to age it: %v", err)
+		t.Fatalf("reading the state to edit it: %v", err)
 	}
 	var fields map[string]any
 	// UseNumber, and it is not a nicety: root key ids are uint64 and the ones
 	// LND mints are routinely above 2^53. Decoding into `any` gives float64,
-	// which silently rounds them — the aged file then names a key the node has
-	// never heard of, the guard reads that as an external revocation, and this
-	// test would report a migration failure it invented itself. Cost one debug
-	// round.
+	// which silently rounds them — the edited file then names a key the node has
+	// never heard of, and the test reports a failure it invented itself. Cost one
+	// debug round, twice (the second in 2o1's tests).
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&fields); err != nil {
-		t.Fatalf("parsing the state to age it: %v", err)
+		t.Fatalf("parsing the state to edit it: %v", err)
 	}
-	for _, key := range []string{
-		"sending_latch", "max_spend_msat", "max_payment_msat", "operator_intent_seeded",
-	} {
-		delete(fields, key)
-	}
-	aged, err := json.Marshal(fields)
+	edit(fields)
+	edited, err := json.Marshal(fields)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, aged, 0o600); err != nil {
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

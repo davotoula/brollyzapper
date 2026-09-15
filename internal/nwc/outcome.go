@@ -41,6 +41,15 @@ const MaxAuditedRefusalsPerHour = logging.DefaultRefusalsPerHour
 // twenty rows tell it.
 const MaxAuditedPanicsPerHour = logging.DefaultRefusalsPerHour
 
+// MaxAuditedRateLimitsPerHour bounds how many rate-limit EPISODES reach §12's
+// trail in an hour (l3j), on a budget of their own for the reason panics have
+// one: an episode ends once a bucket is full again, which is ten idle seconds,
+// so one paired client alternating a pause and a flood opens an episode every
+// few seconds. On the refusals budget it would spend the hour's allowance in
+// minutes and silence every other pairing's RESTRICTED rows — the capability
+// probe d24.14 added the trail to catch (found by review).
+const MaxAuditedRateLimitsPerHour = logging.DefaultRefusalsPerHour
+
 // auditWriteTimeout bounds the trail write on the request path.
 //
 // Generous against a local sqlite write and short against a human. The store
@@ -174,6 +183,42 @@ func (s *Service) auditRefusal(ctx context.Context, connectionID int64, method M
 		slog.Int64("connection", connectionID),
 		slog.String("method", string(method)),
 		slog.String("code", code))
+}
+
+// rateLimitedMessage is what a client over its request rate is told (l3j).
+const rateLimitedMessage = "too many requests; slow down and retry"
+
+// reportRateLimited says that a pairing is over its request rate — once per
+// EPISODE, not once per refused request (l3j).
+//
+// The episode's first refusal is audited and written to the connection's last
+// refusal, and every later one in the same episode logs at DEBUG and nothing more.
+// A flood is exactly the case where one line per request is the harm: this limit
+// exists to bound writes to an SD card, and a refusal that wrote an audit row, a
+// connection row and a WARN line each time would move the flood rather than stop
+// it. See requestLimit.admit for when an episode ends.
+//
+// AUDITED, which ruling 3 declines for QUOTA_EXCEEDED, and the difference is the
+// client. An honest client meeting its budget is routine; a client past sixty a
+// minute is not a wallet app being eager, and the operator should be able to find
+// out which pairing did it and when without debug mode. It has an hourly bound
+// of its own (MaxAuditedRateLimitsPerHour), so episodes cannot spend the one
+// capability refusals are recorded under.
+func (s *Service) reportRateLimited(ctx context.Context, conn *connection, method Method, episodeStarts bool) {
+	id := conn.row().ID
+	if !episodeStarts {
+		s.log.Debug("an NWC request was refused by the rate limit", "connection", id,
+			"method", method)
+		return
+	}
+	s.auditBounded(ctx, s.rateLimits, slog.LevelWarn,
+		"a paired client is over its request rate; its requests are refused until it slows down",
+		logging.EventConnectionRefuse,
+		[]any{"connection", id, "method", method, "code", CodeRateLimited},
+		slog.Int64("connection", id),
+		slog.String("method", string(method)),
+		slog.String("code", CodeRateLimited))
+	s.recordRefusal(ctx, id, &ResponseError{Code: CodeRateLimited, Message: rateLimitedMessage})
 }
 
 // auditBounded writes one event to §12's trail, or to the log alone when this

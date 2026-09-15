@@ -1038,11 +1038,13 @@ type auditWriter struct {
 var auditWriters = []auditWriter{
 	{file: "internal/nostr/pool.go", bounded: true},
 	// Every audit write in internal/nwc goes through auditBounded here, so this
-	// one entry covers three events. connection.refuse is d24.14's capability
-	// boundary on the refusals budget; nwc.panic and connection.pause are
-	// `xmc`'s, on a separate panics budget so that a flood of refusals from one
-	// paired client cannot spend the allowance that would have recorded the
-	// first panic.
+	// one entry covers three events on three budgets. connection.refuse is
+	// d24.14's capability boundary on the refusals budget; nwc.panic and
+	// connection.pause are `xmc`'s, on a separate panics budget so that a flood
+	// of refusals from one paired client cannot spend the allowance that would
+	// have recorded the first panic; and connection.refuse carrying RATE_LIMITED
+	// is l3j's, once per episode on a rate-limit budget of its own, so episodes
+	// cannot spend the capability refusals' allowance either.
 	{file: "internal/nwc/outcome.go", bounded: true},
 	{file: "internal/zap/publish.go", bounded: true},
 	{file: "internal/guard/spend.go", bounded: true},
@@ -1057,6 +1059,10 @@ var auditWriters = []auditWriter{
 		"operator enabling sending, by the renewal tick, or by the node rejecting a credential " +
 		"— none of which a stranger can drive faster than the guard's own MinBakeInterval and " +
 		"wouldRepeatItself allow. That refusal is itself audited and bounded in spend.go."},
+	{file: "internal/guard/orphans.go", why: "the unattended root key sweep (2o1). It runs on " +
+		"the guard's own schedule — once at startup and once per hourly renewal tick — and " +
+		"writes at most one row per pass, however many keys the pass revoked, so the rate is " +
+		"the schedule's and nothing a remote party sends changes how often it runs."},
 	{file: "internal/api/server.go", why: "sign-ins, setting changes and connection lifecycle, " +
 		"all behind the admin session. The one unauthenticated path — a failed sign-in — is " +
 		"rate-limited per client by §7's admin limiter before it reaches here."},

@@ -100,6 +100,39 @@ const SiblingDeliveryWindow = 2 * time.Second
 // should be doing.
 const InFlightPerConnection = 4
 
+// RequestsPerMinute and RequestBurst are one pairing's request rate limit (l3j):
+// a token bucket holding RequestBurst, refilled at RequestsPerMinute. A request
+// past it is answered RATE_LIMITED and is not written anywhere.
+//
+// WHY THERE IS ONE. §7's limiter is HTTP-only, so a paired client had an
+// unbounded path: make_invoice minting invoices into LND (§11: "fills the invoice
+// database"), and every request writing an nwc_handled_requests row and a
+// connection touch, on an SD card, into a table with only time-based retention.
+//
+// SIXTY A MINUTE, BURST TEN. The fastest honest client measured is Amethyst
+// polling get_info and get_balance eleven times in two idle minutes (the 0.1.9
+// trip), about six a minute; opening a wallet screen fires three or four at once.
+// Ten covers that opening burst twice over, and a sustained one a second is ten
+// times the polling rate. A client past it is not a wallet app being eager — and
+// at the ceiling it is 86 400 cache rows a day, which is still a bound, where
+// before there was none.
+//
+// A SIBLING RELAY'S COPY IS NOT CHARGED (see requestLimit.admit), so these count
+// REQUESTS, not deliveries, however many relays the pairing names.
+//
+// FIXED CONSTANTS, not settings: §7's admin limiter is fixed by d46.27's ruling
+// for the reason that applies here — an adjustable ceiling is a footgun with a
+// label, and the operator who would raise it is the one being flooded.
+//
+// EXPIRY CONDITION: raise them if a real client is ever observed being refused
+// while doing something a person asked for — a wallet that fetches history in
+// many small pages is the likely case. Lower them only with a measurement of what
+// the ceiling actually costs the box, not by feel.
+const (
+	RequestsPerMinute = 60
+	RequestBurst      = 10
+)
+
 // ReconnectBackoff is how long a connection waits before re-subscribing after
 // its relay drops it.
 //

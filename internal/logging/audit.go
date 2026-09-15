@@ -115,6 +115,10 @@ const (
 	// honest client meeting its own budget — routine, logged at INFO, and
 	// auditing it would drown the boundary refusals in exactly the noise that
 	// makes a trail unreadable.
+	//
+	// Also RATE_LIMITED (l3j), audited once per episode on its own hourly budget:
+	// a client past sixty requests a minute is not an honest client meeting a
+	// budget.
 	EventConnectionRefuse Event = "connection.refuse"
 
 	// EventConnectionUpdate is the operator changing a live pairing's limits or

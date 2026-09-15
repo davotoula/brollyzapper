@@ -206,8 +206,8 @@ func (g *Guard) RevokeSpend(ctx context.Context) error {
 	// to the next bake, because after "Disable sending" there may never be one.
 	// Sending is off afterwards, so there may never be another bake — which
 	// makes this the one sweep that can lose an orphan for good (d24.10). What
-	// the node would not revoke is kept, and the next RevokeSpend or BakeSpend
-	// tries again.
+	// the node would not revoke is kept, and the guard's hourly sweep tries again
+	// with no operator present (2o1), as do the next RevokeSpend or BakeSpend.
 	if _, err := g.sweepAndForgetSpend(ctx, state.PendingRootKeyIDs); err != nil {
 		return err
 	}
@@ -255,8 +255,15 @@ func (g *Guard) removeSpendCredential() error {
 // The three places that end sending — the kill switch's two paths and an
 // external revocation — all do exactly this, and they did it in three slightly
 // different ways. What is kept is returned so the caller can say so.
+//
+// It spares what the RECEIVE credential's sidecar names (2o1), and deliberately
+// not the spend one's: ending sending means revoking the spend credential's key
+// wherever it is recorded, including a key a crashed bake left pending beside a
+// file on disk — that is tna.5 G4, and a kill switch that spared it would not be
+// one. Every caller removes spend.macaroon anyway, which is what the sidecar
+// would have been protecting.
 func (g *Guard) sweepAndForgetSpend(ctx context.Context, pending []uint64) ([]uint64, error) {
-	kept := g.sweepPending(ctx, "spend", pending, 0)
+	kept, _ := g.sweepPending(ctx, "spend", pending, 0, g.sidecarRootKeys(receiveCredential), true)
 	return kept, g.clearSpendState(kept)
 }
 
