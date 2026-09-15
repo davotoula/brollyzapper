@@ -26,8 +26,8 @@ func TestACertificateThatDoesNotNameTheDialAddressIsAFailedCheck(t *testing.T) {
 
 	got := check(t, preflight.Run(t.Context(), in), preflight.CheckCertificateName)
 
-	if got.OK {
-		t.Fatal("a certificate that does not name the dial address passed")
+	if got.State != preflight.Fail {
+		t.Fatalf("a certificate that does not name the dial address is %v, want a fail", got.State)
 	}
 	for _, want := range []string{"tlsextraip=10.61.7.1", "lnd.conf", "tls.cert", "tls.key", "restart"} {
 		if !strings.Contains(got.Detail, want) {
@@ -70,8 +70,8 @@ func TestTheCertificateIsNotReadWhileTheNodeIsReady(t *testing.T) {
 	in.CertificateName = func() *lnd.CertificateNameError { calls++; return nil }
 
 	got := check(t, preflight.Run(t.Context(), in), preflight.CheckCertificateName)
-	if !got.OK {
-		t.Errorf("a Ready node failed the certificate row: %+v", got)
+	if got.State != preflight.Pass {
+		t.Errorf("a Ready node did not pass the certificate row: %+v", got)
 	}
 	if calls != 0 {
 		t.Errorf("the certificate was read %d times while the node was Ready", calls)
@@ -113,7 +113,7 @@ func TestTheAddressMismatchNeedsTheGuardsKindAndTheNodesRejection(t *testing.T) 
 			report := preflight.Run(t.Context(), in)
 			got := check(t, report, preflight.CheckCredentialAddress)
 
-			if failed := !got.OK; failed != tc.want {
+			if failed := got.State == preflight.Fail; failed != tc.want {
 				t.Fatalf("mismatch check failed = %v, want %v: %+v", failed, tc.want, got)
 			}
 			if blocked := report.Blocked(preflight.BlocksRelink); blocked != tc.want {

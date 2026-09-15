@@ -167,12 +167,12 @@ func TestTheLadderRefusesExactlyWhatTierTwoBlocks(t *testing.T) {
 		why     string
 	}{{
 		name:   "everything passing",
-		report: preflight.Report{Checks: []preflight.Check{{ID: preflight.CheckGuardReachable, OK: true, Blocks: preflight.BlocksSending}}},
+		report: preflight.Report{Checks: []preflight.Check{{ID: preflight.CheckGuardReachable, State: preflight.Pass, Blocks: preflight.BlocksSending}}},
 		why:    "a healthy node pays",
 	}, {
 		name: "a spend row failing",
 		report: preflight.Report{Checks: []preflight.Check{
-			{ID: preflight.CheckSpendIPMatches, OK: false, Blocks: preflight.BlocksSending},
+			{ID: preflight.CheckSpendIPMatches, State: preflight.Fail, Blocks: preflight.BlocksSending},
 		}},
 		blocked: true,
 		failing: []string{preflight.CheckSpendIPMatches},
@@ -180,14 +180,20 @@ func TestTheLadderRefusesExactlyWhatTierTwoBlocks(t *testing.T) {
 	}, {
 		name: "something red that does not block sending",
 		report: preflight.Report{Checks: []preflight.Check{
-			{ID: preflight.CheckLightningAddress, OK: false, Blocks: preflight.BlocksAddress},
+			{ID: preflight.CheckLightningAddress, State: preflight.Fail, Blocks: preflight.BlocksAddress},
 		}},
 		why: "an unreachable domain probe must not stop a payment — only BlocksSending does",
 	}, {
+		name: "a spend row not checked",
+		report: preflight.Report{Checks: []preflight.Check{
+			{ID: preflight.CheckSpendRootKey, State: preflight.NotChecked, Blocks: preflight.BlocksSending},
+		}},
+		why: "a question nobody could put is not a refusal (as0.11); guard.reachable is the row that blocks",
+	}, {
 		name: "two spend rows failing",
 		report: preflight.Report{Checks: []preflight.Check{
-			{ID: preflight.CheckSpendExpiry, OK: false, Blocks: preflight.BlocksSending},
-			{ID: preflight.CheckSpendRootKey, OK: false, Blocks: preflight.BlocksSending},
+			{ID: preflight.CheckSpendExpiry, State: preflight.Fail, Blocks: preflight.BlocksSending},
+			{ID: preflight.CheckSpendRootKey, State: preflight.Fail, Blocks: preflight.BlocksSending},
 		}},
 		blocked: true,
 		failing: []string{preflight.CheckSpendExpiry, preflight.CheckSpendRootKey},

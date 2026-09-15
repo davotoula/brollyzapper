@@ -102,16 +102,30 @@ func (s *Server) security(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range report.Checks {
 		view.Checks = append(view.Checks, web.CheckRow{
-			Title:  c.Title,
-			OK:     c.OK,
-			Threat: c.Threat,
-			Detail: c.Detail,
-			Blocks: string(c.Blocks),
+			Title:   c.Title,
+			Verdict: verdict(c.State),
+			Threat:  c.Threat,
+			Detail:  c.Detail,
+			Blocks:  string(c.Blocks),
 		})
 	}
 	view.BlindSpots = report.BlindSpots
 	data.Security = view
 	s.render(w, "security", data)
+}
+
+// verdict maps preflight's state onto the page's word for it (as0.11). The only
+// mapping: internal/web imports nothing of the app's, so the page states the
+// three itself and this is where the two statements meet. An unknown state is
+// not checked, never a pass.
+func verdict(state preflight.State) web.Verdict {
+	switch state {
+	case preflight.Pass:
+		return web.VerdictPass
+	case preflight.Fail:
+		return web.VerdictFail
+	}
+	return web.VerdictNotChecked
 }
 
 // spendWindowView maps §11's window onto the shape both pages render.

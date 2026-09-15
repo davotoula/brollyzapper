@@ -515,9 +515,9 @@ func TestTheBannerAndTheSecurityPanelCannotDisagree(t *testing.T) {
 	h := newHarness(t)
 	h.report = preflight.Report{
 		Checks: []preflight.Check{
-			{ID: "node.linked", Title: "Connected to your Lightning node", OK: false,
+			{ID: "node.linked", Title: "Connected to your Lightning node", State: preflight.Fail,
 				Threat: "Server compromised, receive-only install", Detail: "the node rejected the macaroon"},
-			{ID: "guard.reachable", Title: "The guard is answering", OK: true,
+			{ID: "guard.reachable", Title: "The guard is answering", State: preflight.Pass,
 				Threat: "Server baking itself a broader macaroon"},
 		},
 		BlindSpots: preflight.BlindSpots,
@@ -534,7 +534,7 @@ func TestTheBannerAndTheSecurityPanelCannotDisagree(t *testing.T) {
 	}
 
 	// Flip it: both must follow, because there is only one source.
-	h.report.Checks[0].OK = true
+	h.report.Checks[0].State = preflight.Pass
 	h.report.Checks[0].Detail = ""
 	banner = h.get(t, "/", cookie).Body.String()
 	panel = h.get(t, "/security", cookie).Body.String()
@@ -569,7 +569,7 @@ func TestTheSecurityPanelShowsTheThreatEachCheckMapsTo(t *testing.T) {
 	h := newHarness(t)
 	h.report = preflight.Report{
 		Checks: []preflight.Check{{
-			ID: "guard.reachable", Title: "The guard is answering", OK: true,
+			ID: "guard.reachable", Title: "The guard is answering", State: preflight.Pass,
 			Threat: "Server baking itself a broader macaroon",
 		}},
 		BlindSpots: preflight.BlindSpots,

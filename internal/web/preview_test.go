@@ -44,6 +44,52 @@ func TestEveryPageRendersWithAFullFixture(t *testing.T) {
 	}
 }
 
+// notCheckedTitle names the full fixture's not-checked row, so the render test
+// below finds the row the fixture built.
+const notCheckedTitle = "The node still honours the spend root key"
+
+// as0.11 criterion 3, by rendering: each of the three verdicts says its own word
+// in the first cell, and only a FAIL names what it blocks. The not-checked row
+// carries Blocks "sending" in the fixture on purpose — a page that read Blocks
+// without the verdict would say sending is blocked by a question nobody put.
+func TestTheSecurityPageStatesEachVerdict(t *testing.T) {
+	var b strings.Builder
+	if err := newRenderer(t).Render(&b, "security", fullFixture(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ title, verdict, blocks string }{
+		{"admin.macaroon is not mounted into the server", "pass", "—"},
+		{"The advertised origin is https", "FAIL", "sending"},
+		{notCheckedTitle, "not checked", "nothing"},
+	} {
+		verdict, blocks := checkCells(t, b.String(), tc.title)
+		t.Logf("%q: verdict cell %q, blocks cell %q", tc.title, verdict, blocks)
+		if verdict != tc.verdict || blocks != tc.blocks {
+			t.Errorf("%q renders verdict %q, blocks %q; want %q, %q", tc.title, verdict, blocks, tc.verdict, tc.blocks)
+		}
+	}
+}
+
+// checkCells returns the verdict and blocks cells of the Security table's row
+// titled title.
+func checkCells(t *testing.T, page, title string) (verdict, blocks string) {
+	t.Helper()
+	at := strings.Index(page, "<td>"+title)
+	if at < 0 {
+		t.Fatalf("no row titled %q:\n%s", title, page)
+	}
+	row := page[strings.LastIndex(page[:at], "<tr>"):]
+	row = row[:strings.Index(row, "</tr>")]
+	var cells []string
+	for _, cell := range strings.Split(row, "<td>")[1:] {
+		cells = append(cells, strings.TrimSpace(cell[:strings.Index(cell, "</td>")]))
+	}
+	if len(cells) != 4 {
+		t.Fatalf("the row titled %q has %d cells, want 4:\n%s", title, len(cells), row)
+	}
+	return cells[0], cells[2]
+}
+
 // galleryPages are the screens a stranger chooses the app by — the ones that
 // go in the App Store submission (0vk.21). Setup and login are not among them:
 // one is a page the operator sees once, the other is a password box.
@@ -94,6 +140,11 @@ func TestTheGalleryFixtureShowsAHealthyInstall(t *testing.T) {
 		// waiting on the operator. Both were on the sending page before this list
 		// named them, because the fixture predates the fields they key on.
 		"does not permit sending", "Confirm this in a file only you can read",
+		// The third verdict (as0.11), and the Node page's unasked server line,
+		// which the gallery showed until this entry named it. Neither is a
+		// failure; neither is a healthy install that has finished looking at
+		// itself.
+		"not checked",
 	}
 
 	writeAssets(t, dir)
@@ -144,6 +195,11 @@ func galleryFixture(now time.Time) web.PageData {
 		{Kind: "zap", State: "settled", AmountMsat: 2_100, When: now.Add(-4 * day), Receipt: "published", ReceiptID: "a91e02…"},
 	}
 
+	// Node: the server's own credential has been answered, and works. The full
+	// fixture leaves it unasked, which renders "not checked yet" — right for
+	// reaching the branch, wrong on a store screenshot.
+	d.Node.ServerCheckedAt, d.Node.ServerReachable = now, true
+
 	// Sending: nothing in the way, and no ceremony mid-flight.
 	d.Sending.Blocked = nil
 	d.Sending.Authorisation = web.AuthorisationView{}
@@ -159,7 +215,7 @@ func galleryFixture(now time.Time) web.PageData {
 
 	// Security: every check passes; the trail shows the app doing its job.
 	for i := range d.Security.Checks {
-		d.Security.Checks[i].OK = true
+		d.Security.Checks[i].Verdict = web.VerdictPass
 		d.Security.Checks[i].Detail, d.Security.Checks[i].Blocks = "", ""
 	}
 
@@ -238,8 +294,11 @@ func fullFixture(now time.Time) web.PageData {
 	d.Security.GuardRejections = 0
 	d.Security.RejectionWindowHours = 24
 	d.Security.Checks = []web.CheckRow{
-		{Title: "admin.macaroon is not mounted into the server", OK: true, Threat: "A compromised server could spend the whole node."},
-		{Title: "The advertised origin is https", OK: false, Threat: "A wallet would be handed a plaintext callback.", Detail: "Set a domain on Settings.", Blocks: "sending"},
+		{Title: "admin.macaroon is not mounted into the server", Verdict: web.VerdictPass, Threat: "A compromised server could spend the whole node."},
+		{Title: "The advertised origin is https", Verdict: web.VerdictFail, Threat: "A wallet would be handed a plaintext callback.", Detail: "Set a domain on Settings.", Blocks: "sending"},
+		// as0.11: the third state, carrying a capability its control WOULD take on
+		// a failure — the page must still say it blocks nothing.
+		{Title: notCheckedTitle, Verdict: web.VerdictNotChecked, Threat: "Spend macaroon exfiltrated.", Detail: "The guard is not answering, so it could not be asked.", Blocks: "sending"},
 	}
 	d.Security.BlindSpots = []string{"This page cannot tell you whether your node's own backups work."}
 	d.Security.Events = []web.AuditRow{

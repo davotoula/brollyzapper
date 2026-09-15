@@ -144,24 +144,24 @@ func serverCredentialCheck(in Inputs) (Check, *ProbeResult) {
 		ID:     CheckServerCredential,
 		Title:  "The app's own credential works against your node",
 		Threat: "Server credential refused while the guard's is accepted — the Node page's reachability line is the guard's view, so a server that cannot use its own receive macaroon (its address lock, on a container with more than one network) is otherwise invisible until a payment is due.",
-		OK:     true,
 		Blocks: BlocksNothing,
 	}
 	if in.ServerCredential == nil {
+		notChecked(&c, unwired)
 		return c, nil
 	}
 	result := in.ServerCredential()
 	if result.At.IsZero() {
-		c.OK = false
-		c.Detail = "Not checked yet — opening an admin page asks your node, and the answer arrives within seconds."
+		notChecked(&c, "Your node has not been asked yet. Opening an admin page asks it, and the answer "+
+			"arrives within seconds.")
 		return c, &result
 	}
 	asOf := "as of " + clock(result.At)
 	if result.Err == nil {
-		c.Detail = "Your node accepted it, " + asOf + "."
+		c.State, c.Detail = Pass, "Your node accepted it, "+asOf+"."
 		return c, &result
 	}
-	c.OK = false
+	c.State = Fail
 	var nameErr *lnd.CertificateNameError
 	switch {
 	case errors.Is(result.Err, lnd.ErrNotLinked):
