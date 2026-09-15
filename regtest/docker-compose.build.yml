@@ -12,7 +12,7 @@
 # The canonical example was zap receipts, which landed in Wave 11 after the 0.1.4
 # images were published — criterion 6's receipt assertion could not pass against
 # the pins at all until the bump that included it. It passes against the pins now
-# (they are 0.1.16, and `smoke.sh` reads a kind 9735 back), which is exactly why
+# (they are 0.1.21, and `smoke.sh` reads a kind 9735 back), which is exactly why
 # the example is history and the rule above is not: every bump retires one set of
 # "needs the override" cases and the next unreleased change creates another.
 services:
