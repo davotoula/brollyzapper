@@ -29,12 +29,17 @@ import (
 // and every lint is a _test.go.
 //
 // WHAT IT JUDGES: a path argument's string literals and the constants it names —
-// alone, concatenated, or inside a call such as filepath.Join — and it refuses one
-// that names a compose file. WHAT IT DOES NOT: a path computed at run time. That is
-// not called clean; it is listed, every run, as the inventory a reviewer reads
-// (TestNoLintReadsComposeText logs it). What would reopen it: a lint reading a
-// file through a function this does not know — fs.ReadFile, io.ReadAll over an
-// os.DirFS — in which case add it to fileReaders and a row to the catches table.
+// alone, concatenated, or inside a call such as filepath.Join or fmt.Sprintf —
+// and it refuses one that names a compose file, or a piece of a computed path
+// that says "compose". A reader taken as a value (`f := os.ReadFile`) is refused
+// outright, and os under a dot import is still os. WHAT IT DOES NOT: a path wholly
+// computed at run time. That is not called clean; it is listed, every run, as the
+// inventory a reviewer reads (TestNoLintReadsComposeText logs it) — and a helper
+// that passes its own parameter to a reader, as readPackageFile does, is a reader
+// only if it is named in fileReaders. What would reopen it: a lint reading a file
+// through a function this does not know — fs.ReadFile, io.ReadAll over an
+// os.DirFS, a new wrapper — in which case add it to fileReaders and a row to the
+// catches table.
 
 // lintDirs are the three directories whose tests are the lints, from here.
 var lintDirs = []string{"../../deploy", "../../umbrel", "../../regtest"}
@@ -66,7 +71,7 @@ func isComposeName(p string) bool {
 type readCall struct {
 	At    string // file:line
 	Call  string // the call as written
-	Kind  string // literal, const, or computed
+	Kind  string // literal, const, computed, or value
 	Names []string
 }
 
@@ -77,80 +82,131 @@ type sourceFile struct {
 	Src  string
 }
 
-// scanReads parses one package's files and returns every file-reading call, and
-// the ones that name a compose file. Constants resolve across the package's files
-// and within the function a call sits in.
+// scanReads parses a directory's files and returns every file-reading call, and
+// the ones it refuses. Constants resolve within a Go package — the package clause,
+// not the directory, since `x` and `x_test` can share one — and within the
+// function a call sits in.
+//
+// A READER TAKEN AS A VALUE IS REFUSED, not listed: `f := os.ReadFile` hands the
+// read to a name this cannot follow, so what it reads is unknowable here, and no
+// lint needs one (go-review, lint line).
 func scanReads(t *testing.T, pkg []sourceFile) (refused, all []readCall) {
 	t.Helper()
 	fset := token.NewFileSet()
-	var files []*ast.File
+	byPackage := map[string][]*ast.File{}
 	for _, f := range pkg {
 		file, err := parser.ParseFile(fset, f.Name, f.Src, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parsing %s: %v", f.Name, err)
 		}
-		files = append(files, file)
+		byPackage[file.Name.Name] = append(byPackage[file.Name.Name], file)
 	}
-	pkgConsts := map[string]ast.Expr{}
-	for _, file := range files {
-		for _, decl := range file.Decls {
-			if gen, ok := decl.(*ast.GenDecl); ok {
-				collectConsts(gen, pkgConsts)
+	for _, files := range byPackage {
+		pkgConsts := map[string]ast.Expr{}
+		for _, file := range files {
+			for _, decl := range file.Decls {
+				if gen, ok := decl.(*ast.GenDecl); ok {
+					collectConsts(gen, pkgConsts)
+				}
 			}
 		}
-	}
-	for _, file := range files {
-		osNames := importNames(file, "os")
-		// Every declaration, not only functions: a read in a package-level
-		// `var x = func() {…}` is a read too. A function's own constants are in
-		// scope inside it; anywhere else, the package's.
-		for _, decl := range file.Decls {
-			consts := pkgConsts
-			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-				consts = localConsts(fn.Body, pkgConsts)
-			}
-			ast.Inspect(decl, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				argAt, known := fileReaders[callName(call, osNames)]
-				if !known || argAt >= len(call.Args) {
-					return true
-				}
-				arg := call.Args[argAt]
-				rc := readCall{
-					At:    fset.Position(call.Pos()).String(),
-					Call:  types.ExprString(call),
-					Kind:  "computed",
-					Names: stringParts(arg, consts),
-				}
-				if _, ok := stringValue(arg, consts, 0); ok {
-					rc.Kind = "const"
-					if _, lit := arg.(*ast.BasicLit); lit {
-						rc.Kind = "literal"
-					}
-				}
-				all = append(all, rc)
-				if slices.ContainsFunc(rc.Names, isComposeName) {
-					refused = append(refused, rc)
-				}
-				return true
-			})
+		for _, file := range files {
+			r, a := scanFile(fset, file, pkgConsts)
+			refused, all = append(refused, r...), append(all, a...)
 		}
 	}
 	return refused, all
 }
 
-// callName is "os.ReadFile" for a call through the os package under any of its
-// import names, the bare name for a plain function, and "" otherwise.
-func callName(call *ast.CallExpr, osNames []string) string {
-	switch fun := call.Fun.(type) {
+// scanFile is scanReads for one file, given its package's constants.
+func scanFile(fset *token.FileSet, file *ast.File, pkgConsts map[string]ast.Expr) (refused, all []readCall) {
+	osNames := importNames(file, "os")
+	// Every declaration, not only functions: a read in a package-level
+	// `var x = func() {…}` is a read too. A function's own constants are in
+	// scope inside it; anywhere else, the package's.
+	for _, decl := range file.Decls {
+		consts := pkgConsts
+		called := map[ast.Expr]bool{} // readers in call position, seen before their Fun
+		var declared *ast.Ident
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			declared = fn.Name // `func readPackageFile(…)` declares the name; it does not take it
+			if fn.Body != nil {
+				consts = localConsts(fn.Body, pkgConsts)
+			}
+		}
+		value := func(n ast.Node, call string) {
+			rc := readCall{At: fset.Position(n.Pos()).String(), Call: call, Kind: "value"}
+			refused, all = append(refused, rc), append(all, rc)
+		}
+		var visit func(n ast.Node) bool
+		visit = func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				argAt, known := fileReaders[readerName(n.Fun, osNames)]
+				if !known || argAt >= len(n.Args) {
+					return true
+				}
+				called[n.Fun] = true
+				arg := n.Args[argAt]
+				rc := readCall{
+					At:    fset.Position(n.Pos()).String(),
+					Call:  types.ExprString(n),
+					Kind:  "computed",
+					Names: stringParts(arg, consts),
+				}
+				refuse := slices.ContainsFunc(rc.Names, namesCompose)
+				if _, ok := stringValue(arg, consts, 0); ok {
+					rc.Kind, refuse = "const", slices.ContainsFunc(rc.Names, isComposeName)
+					if _, lit := arg.(*ast.BasicLit); lit {
+						rc.Kind = "literal"
+					}
+				}
+				all = append(all, rc)
+				if refuse {
+					refused = append(refused, rc)
+				}
+			case *ast.SelectorExpr:
+				// Sel is a field or method name, never a dot-imported reader, so
+				// only X is walked.
+				if _, known := fileReaders[readerName(n, osNames)]; !known {
+					ast.Inspect(n.X, visit)
+				} else if !called[n] {
+					value(n, types.ExprString(n))
+				}
+				return false
+			case *ast.Ident:
+				if _, known := fileReaders[readerName(n, osNames)]; known && n != declared && !called[n] {
+					value(n, n.Name)
+				}
+			}
+			return true
+		}
+		ast.Inspect(decl, visit)
+	}
+	return refused, all
+}
+
+// namesCompose is isComposeName for a PIECE of a computed path: a piece that says
+// "compose" at all. `fmt.Sprintf("%s.yml", "docker-compose")` splits the name
+// across two pieces, neither of which is one, so a piece is judged by the word
+// alone — a false red on a path that only mentions compose, never a false green.
+func namesCompose(piece string) bool {
+	return strings.Contains(strings.ToLower(piece), "compose")
+}
+
+// readerName is "os.ReadFile" for a reference through the os package under any
+// of its import names — a dot import included — the bare name for any other
+// identifier, and "" otherwise.
+func readerName(e ast.Expr, osNames []string) string {
+	switch e := e.(type) {
 	case *ast.Ident:
-		return fun.Name
+		if _, known := fileReaders["os."+e.Name]; known && slices.Contains(osNames, ".") {
+			return "os." + e.Name
+		}
+		return e.Name
 	case *ast.SelectorExpr:
-		if x, ok := fun.X.(*ast.Ident); ok && slices.Contains(osNames, x.Name) {
-			return "os." + fun.Sel.Name
+		if x, ok := e.X.(*ast.Ident); ok && slices.Contains(osNames, x.Name) {
+			return "os." + e.Sel.Name
 		}
 	}
 	return ""
@@ -176,11 +232,17 @@ func collectConsts(gen *ast.GenDecl, into map[string]ast.Expr) {
 	if gen.Tok != token.CONST {
 		return
 	}
+	// A spec with no values repeats the previous spec's, as Go does:
+	// `const ( p = "docker-compose.yml"; q )` makes q the same string.
+	var last []ast.Expr
 	for _, spec := range gen.Specs {
 		vs := spec.(*ast.ValueSpec)
+		if len(vs.Values) > 0 {
+			last = vs.Values
+		}
 		for i, name := range vs.Names {
-			if i < len(vs.Values) {
-				into[name.Name] = vs.Values[i]
+			if i < len(last) {
+				into[name.Name] = last[i]
 			}
 		}
 	}
@@ -312,9 +374,10 @@ func TestNoLintReadsComposeText(t *testing.T) {
 	for _, dir := range slices.Sorted(maps.Keys(pkgs)) {
 		refused, all := scanReads(t, pkgs[dir])
 		for _, rc := range refused {
-			t.Errorf("%s: %s reads a compose file's text (%q); read it through composelint.Load "+
-				"and ask the document — the raw string is what every 20i defect was built on "+
-				"(BrollyZap-20i.18, 20i.24)", rc.At, rc.Call, rc.Names)
+			t.Errorf("%s: %s [%s %q] reads a compose file's text, or reads through a name this "+
+				"cannot follow; read the file through composelint.Load and ask the document — the "+
+				"raw string is what every 20i defect was built on (BrollyZap-20i.18, 20i.24)",
+				rc.At, rc.Call, rc.Kind, rc.Names)
 		}
 		for _, rc := range all {
 			t.Logf("read: %s  %s  [%s] %q", rc.At, rc.Call, rc.Kind, rc.Names)
@@ -374,7 +437,7 @@ func TestEveryComposeFileIsNamedAsOne(t *testing.T) {
 // TestTheComposeReadRuleCatches plants each route in a synthetic package. A rule
 // that has only ever passed has been written, not tested.
 func TestTheComposeReadRuleCatches(t *testing.T) {
-	const header = "package lint\n\nimport (\n\t\"os\"\n\tfsos \"os\"\n\t\"path/filepath\"\n\t\"testing\"\n)\n\n" +
+	const header = "package lint\n\nimport (\n\t\"os\"\n\tfsos \"os\"\n\t\"path/filepath\"\n\t\"fmt\"\n\t\"testing\"\n)\n\n" +
 		"func readPackageFile(t *testing.T, name string) string { return \"\" }\n\n"
 	for _, tc := range []struct {
 		name     string
@@ -396,12 +459,23 @@ func TestTheComposeReadRuleCatches(t *testing.T) {
 			extra: "package lint\n\nimport \"os\"\n\nvar read = func() { os.ReadFile(\"docker-compose.yml\") }\n", refused: `os.ReadFile("docker-compose.yml")`},
 		{name: "a local const defined from the package const it shadows terminates, listed", body: "const dir = dir + \"/x\"\n\tos.ReadFile(dir)",
 			extra: "package lint\n\nconst dir = \"../deploy\"\n", computed: true},
+		{name: "a dot import of os", body: `_ = 0`,
+			extra: "package lint\n\nimport . \"os\"\n\nvar _, _ = ReadFile(\"docker-compose.yml\")\n", refused: `ReadFile("docker-compose.yml")`},
+		{name: "a reader taken as a value", body: "f := os.ReadFile\n\tf(\"docker-compose.yml\")", refused: `os.ReadFile`},
+		{name: "readPackageFile taken as a value", body: "g := readPackageFile\n\t_ = g", refused: `readPackageFile`},
+		{name: "a const repeating the previous spec's value", body: "const (\n\t\tp = \"docker-compose.yml\"\n\t\tq\n\t)\n\tos.ReadFile(q)", refused: `os.ReadFile(q)`},
+		{name: "a compose name split across Sprintf", body: `os.ReadFile(fmt.Sprintf("%s.yml", "docker-compose"))`,
+			refused: `os.ReadFile(fmt.Sprintf("%s.yml", "docker-compose"))`, computed: true},
+		{name: "an x_test file's const does not resolve in package x", body: `os.ReadFile(stack)`,
+			extra: "package lint_test\n\nconst stack = \"docker-compose.yml\"\n", computed: true},
+		{name: "a method named ReadFile under a dot import is not os", body: `os.ReadFile("exports.sh")`,
+			extra: "package lint\n\nimport . \"os\"\n\ntype fsys struct{}\n\nfunc (fsys) ReadFile(string) {}\n\nvar _ = Getpid\nvar _ = func() { fsys{}.ReadFile(\"docker-compose.yml\") }\n"},
 		{name: "a script is not compose", body: `os.ReadFile("exports.sh")`},
 		{name: "the Umbrel manifest is YAML and not compose", body: "const name = \"umbrel-app.yml\"\n\treadPackageFile(t, name)"},
 		{name: "a variable is listed, not judged", body: `name := t.Name()` + "\n\tos.ReadFile(name)", computed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pkg := []sourceFile{{Name: "synthetic_test.go", Src: header + "func TestX(t *testing.T) {\n\t" + tc.body + "\n\t_ = filepath.Join\n\t_ = fsos.Open\n}\n"}}
+			pkg := []sourceFile{{Name: "synthetic_test.go", Src: header + "func TestX(t *testing.T) {\n\t" + tc.body + "\n\t_ = filepath.Join\n\t_ = fsos.Getpid\n\t_ = fmt.Sprint\n}\n"}}
 			if tc.extra != "" {
 				pkg = append(pkg, sourceFile{Name: "extra_test.go", Src: tc.extra})
 			}
