@@ -130,11 +130,8 @@ def bolt_uses(bolts):
 
 MARK_PX = 256
 
-# The GitHub social preview: the mark centred on one bleed-coloured field. Not the
-# master padded after rasterising — that would carry the master's own square inside
-# a second field — but the same elements drawn at SOCIAL_MARK_SCALE on a wider
-# field. At 2 the disc is 408px of 640, clear of the edges a link card may crop;
-# change it only if a card crops the disc or the mark reads small in one.
+# The GitHub social preview: the mark at 2x on one 1280×640 field. The 408px disc
+# stays clear of the edges a link card may crop; change the scale if a card crops it.
 SOCIAL_W, SOCIAL_H = 1280, 640
 SOCIAL_MARK_SCALE = 2
 
@@ -146,13 +143,13 @@ def build(bolts, title, desc, width=MARK_PX, height=MARK_PX, mark_scale=1):
     the field to the social preview could not change icon.svg or favicon.svg by a byte.
     """
     bz = outline("BZ", BZ_SIZE, BZ_CENTRE_X, BZ_BASELINE)
-    mark = f'''  <circle cx="128" cy="128" r="{DISC_R}" fill="{WHITE}"/>
+    mark = f'''  <circle cx="{MARK_PX // 2}" cy="{MARK_PX // 2}" r="{DISC_R}" fill="{WHITE}"/>
 {bolt_uses(bolts)}
   <path d="{CANOPY}" fill="{PURPLE_CANOPY}"/>
   <path d="{bz}" fill="{WHITE}"/>'''
-    if (width, height, mark_scale) != (MARK_PX, MARK_PX, 1):
-        dx = (width - MARK_PX * mark_scale) / 2
-        dy = (height - MARK_PX * mark_scale) / 2
+    dx = (width - MARK_PX * mark_scale) / 2
+    dy = (height - MARK_PX * mark_scale) / 2
+    if dx or dy or mark_scale != 1:
         mark = f'''  <g transform="translate({dx:g} {dy:g}) scale({mark_scale:g})">
 {textwrap.indent(mark, "  ")}
   </g>'''
@@ -198,21 +195,18 @@ def rasterise(src, dst, width, height):
 def main():
     ensure_font()
 
-    icon = build(
-        BOLTS_THREE,
-        "BrollyZapper",
-        "An upturned umbrella catching three lightning bolts, marked BZ.",
-    )
+    # README.md's <img alt> repeats this description; change the two together.
+    three_bolts = "An upturned umbrella catching three lightning bolts, marked BZ"
+    icon = build(BOLTS_THREE, "BrollyZapper", f"{three_bolts}.")
     favicon = build(
         BOLTS_ONE,
         "BrollyZapper",
         "An upturned umbrella catching a lightning bolt, marked BZ.",
     )
-
     social = build(
         BOLTS_THREE,
         "BrollyZapper",
-        "An upturned umbrella catching three lightning bolts, marked BZ, on a purple field.",
+        f"{three_bolts}, on a purple field.",
         SOCIAL_W,
         SOCIAL_H,
         SOCIAL_MARK_SCALE,
@@ -220,18 +214,17 @@ def main():
 
     master = HERE / "icon.svg"
     master.write_text(icon)
-    (STATIC / "favicon.svg").write_text(favicon)
+    favicon_svg = STATIC / "favicon.svg"
+    favicon_svg.write_text(favicon)
     social_svg = HERE / "social-preview.svg"
     social_svg.write_text(social)
 
     touch_icon = STATIC / "apple-touch-icon.png"
     tool = rasterise(master, touch_icon, TOUCH_ICON_PX, TOUCH_ICON_PX)
-    # Uploaded by hand in the repository's settings, never committed: .gitignore
-    # holds it out of the tree, so the script works in any checkout.
     social_png = HERE / "social-preview.png"
     rasterise(social_svg, social_png, SOCIAL_W, SOCIAL_H)
 
-    for path in (master, STATIC / "favicon.svg", touch_icon, social_svg, social_png):
+    for path in (master, favicon_svg, touch_icon, social_svg, social_png):
         print(f"{path.relative_to(ROOT)}: {path.stat().st_size} bytes")
     print(f"(PNGs rendered with {tool})")
 
