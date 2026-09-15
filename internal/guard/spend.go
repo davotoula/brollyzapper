@@ -206,8 +206,8 @@ func (g *Guard) RevokeSpend(ctx context.Context) error {
 	// to the next bake, because after "Disable sending" there may never be one.
 	// Sending is off afterwards, so there may never be another bake — which
 	// makes this the one sweep that can lose an orphan for good (d24.10). What
-	// the node would not revoke is kept, and the next RevokeSpend or BakeSpend
-	// tries again.
+	// the node would not revoke is kept, and the guard's hourly sweep tries again
+	// with no operator present (2o1), as do the next RevokeSpend or BakeSpend.
 	if _, err := g.sweepAndForgetSpend(ctx, state.PendingRootKeyIDs); err != nil {
 		return err
 	}

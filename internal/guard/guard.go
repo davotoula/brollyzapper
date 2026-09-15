@@ -431,9 +431,10 @@ func (g *Guard) bake(ctx context.Context, c credential, reason string) error {
 	// Every key an earlier attempt created and never recorded as current, plus
 	// the one just superseded.
 	// They may have been the other credential's attempts; either way they are
-	// keys this guard made and nothing is using. All of them, because a bake
-	// that failed after BakeMacaroon leaves one behind and the next bake is the
-	// only thing that will ever look.
+	// keys this guard made, and all but the ones a sidecar names are keys nothing
+	// is using. All of them, because a bake that failed after BakeMacaroon leaves
+	// one behind; the hourly sweep (2o1) would reach it too, but this is the
+	// moment the superseded key is known to be free.
 	//
 	// Sparing what either credential's sidecar names (2o1): a bake of the OTHER
 	// credential that died in G3's window left its live key in this same pending
