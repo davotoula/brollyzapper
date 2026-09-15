@@ -36,6 +36,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/davotoula/brollyzapper/internal/composelint"
 )
 
 // The relay databases must be named volumes, never host binds.
@@ -58,7 +60,8 @@ func TestRelayDatabasesAreNamedVolumes(t *testing.T) {
 		}
 		found := false
 		for _, v := range svc.Volumes {
-			source, dest, ok := strings.Cut(v, ":")
+			source := composelint.MountSource(v)
+			dest, ok := strings.CutPrefix(v, source+":")
 			if !ok || !strings.HasPrefix(dest, "/app/strfry-db") {
 				continue
 			}
