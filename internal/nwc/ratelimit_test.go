@@ -147,6 +147,10 @@ func TestAResentRequestAfterTheSiblingWindowIsCharged(t *testing.T) {
 	h := newHarness(t)
 	first := h.request(t, h.client, MethodGetBalance, nil)
 	h.service.handle(t.Context(), h.conn, first)
+	cached, _, err := h.db.NWCHandledResponse(t.Context(), first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for range RequestBurst - 1 {
 		h.handle(t, MethodGetBalance, nil)
 	}
@@ -157,6 +161,46 @@ func TestAResentRequestAfterTheSiblingWindowIsCharged(t *testing.T) {
 	resp, _ := h.service.handle(t.Context(), h.conn, first)
 	if resp.Error == nil || resp.Error.Code != CodeRateLimited {
 		t.Fatalf("a re-send past the sibling window was not charged: %+v", resp)
+	}
+	// And the refusal left the id's REAL answer alone. This id has a cache row,
+	// so a refusal that completed a claim it never made would overwrite what the
+	// request actually returned — and every later retry would be told
+	// RATE_LIMITED for a request that was served.
+	if after, _, err := h.db.NWCHandledResponse(t.Context(), first.ID); err != nil {
+		t.Fatal(err)
+	} else if after != cached {
+		t.Errorf("the refusal rewrote a handled request's cached answer:\n before: %s\n  after: %s",
+			cached, after)
+	}
+}
+
+// A SUSTAINED flood is one episode too. A token refills every second, so a
+// client hammering the service is served once a second throughout; an episode
+// that ended at the next served request would audit once a second, which is the
+// flood of rows moved rather than stopped.
+func TestASustainedFloodIsOneEpisode(t *testing.T) {
+	h := newHarness(t)
+	h.exhaust(t, h.conn)
+	served := 0
+	for range 30 {
+		h.clock.at = h.clock.at.Add(time.Minute / RequestsPerMinute)
+		for range 5 {
+			if resp := h.handle(t, MethodGetBalance, nil); resp.Error == nil {
+				served++
+			}
+		}
+	}
+	if served == 0 {
+		t.Fatal("precondition: the refill should have served some of the flood")
+	}
+	rows := 0
+	for _, row := range h.audit.events() {
+		if row.attrs["code"] == CodeRateLimited {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Errorf("%d audit rows over thirty seconds of one sustained flood (%d served), want 1", rows, served)
 	}
 }
 
