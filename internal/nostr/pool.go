@@ -642,6 +642,23 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
 
+	// THIS PUBLISH'S LOGGER, taken once and used by every line this publish
+	// writes (et8, extended by ruling 16 Sep). A caller that knows what the
+	// publish is FOR — the zap publisher knows the payment hash — attaches a
+	// logger carrying it, and both writers below inherit it, so the whole
+	// publish is one grep rather than the relay choice alone.
+	//
+	// Taken here rather than at each writer because a publish has ONE identity:
+	// the first cut passed it only to chosen.log, which put the hash on the
+	// happy path and left it off logRelayCosts — and logRelayCosts writes only
+	// when the publish was slow or partial, so the lines that exist exactly when
+	// someone is tracing a failure were the ones outside the trace.
+	//
+	// LoggerOr and not FromContext: this pool's own logger is the fallback, and
+	// FromContext's is slog.Default(), which would drop p.log's handler on every
+	// publish with nothing attached — and every test that reads these lines.
+	log := logging.LoggerOr(ctx, p.log)
+
 	// The operator's list is read ONCE. The exemption below, the send list and
 	// the teardown must all agree on what "configured" meant for this publish:
 	// reading it again in the deferred close reopened the window that splitting
@@ -655,12 +672,7 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 	defer p.exempt.Store(nil)
 	chosen := p.chooseTargets(ctx, configured, extra)
 	sending := chosen.sending
-	// Through the CONTEXT's logger when the caller attached one, so a publish
-	// that knows which zap it is for can say so on this line (et8). LoggerOr and
-	// not FromContext: this pool's own logger is the fallback, and FromContext's
-	// is slog.Default(), which would drop p.log's handler on every publish with
-	// nothing attached — NWC's responses, and every test that reads this line.
-	chosen.log(logging.LoggerOr(ctx, p.log))
+	chosen.log(log)
 	if len(sending) == 0 {
 		// Distinguishable from "every relay refused": both are retryable, and
 		// o34.3 must be able to tell "nowhere to send it" from "nobody took it".
@@ -705,7 +717,7 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 	// what changed is that no relay waits for another. See sendAndDial.
 	start := time.Now()
 	results, cost := p.sendAndDial(ctx, sending, event)
-	p.logRelayCosts(time.Since(start), results, cost)
+	p.logRelayCosts(log, time.Since(start), results, cost)
 	return results
 }
 
@@ -781,9 +793,15 @@ type relayCost struct {
 //
 // Relay URLs only. They are logged already in "relays chosen for this publish",
 // they are not secrets, and an operator cannot match a line against their own
-// relay list if it is redacted. Nothing else is added — no payload, no identity,
-// and deliberately not the relay's own error text, which is unbounded input from
-// a stranger's relay.
+// relay list if it is redacted. Nothing else is added HERE — no payload, no
+// identity, and deliberately not the relay's own error text, which is unbounded
+// input from a stranger's relay.
+//
+// WHAT THE CALLER MAY ADD is the publish's identity, through `log` (et8): the
+// receipt path hands in a logger carrying the payment hash so these lines join
+// that zap's trace, and §8's pairing leg hands in the pool's own so they do not.
+// The parameter exists so the choice is the caller's, because only the caller
+// knows what the publish is for.
 // "Slow" is measured on the pool's own clock: from after the publishing lock,
 // the exemption store and chooseTargets' resolver pre-check, to the last relay's
 // answer. The receipt line's publish_ms (internal/zap) is taken around the whole
@@ -804,14 +822,14 @@ type relayCost struct {
 // RelayURL to the URL it was given, so the two strings were identical by
 // construction and the hazard was never reachable. Positional indexing is
 // simpler; it did not fix a bug.
-func (p *Pool) logRelayCosts(elapsed time.Duration, results []PublishResult,
-	costs []relayCost) {
+func (p *Pool) logRelayCosts(log *slog.Logger, elapsed time.Duration,
+	results []PublishResult, costs []relayCost) {
 	if elapsed <= connectBudget && Accepted(results) == len(results) {
 		return
 	}
 	for i, result := range results {
 		c := costs[i]
-		p.log.Debug("relay outcome in a slow or partial publish",
+		log.Debug("relay outcome in a slow or partial publish",
 			"relay", result.Relay, "outcome", c.outcome, "ms", c.took.Milliseconds())
 	}
 }
@@ -1236,7 +1254,11 @@ func (p *Pool) PublishToConnection(ctx context.Context, event gonostr.Event,
 	//
 	sent, sentCosts := p.sendAndDial(ctx, targets, event)
 	results = append(results, sent...)
-	p.logRelayCosts(time.Since(start), results, append(costs, sentCosts...))
+	// THE POOL'S OWN LOGGER on this leg, deliberately (ruling 16 Sep). §8's
+	// responses share this pool, and a payment hash attached by a zap is not
+	// this pairing's business — an NWC line carrying one would tell an operator
+	// the response and that zap were the same episode. internal/nwc pins it.
+	p.logRelayCosts(p.log, time.Since(start), results, append(costs, sentCosts...))
 	return results
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -676,4 +677,58 @@ func logLineIn(t *testing.T, logged, msg string) string {
 		t.Fatalf("no %q line was logged at all:\n%s", msg, logged)
 	}
 	return line
+}
+
+// et8, extended by David's ruling of 16 Sep: the PER-RELAY outcome lines carry
+// the payment hash too.
+//
+// The first cut put the hash on "relays chosen for this publish" alone, which
+// inverted the purpose. logRelayCosts writes only when a publish was slow or
+// partial — that is its own guard — so the lines that exist exactly when an
+// operator is tracing a failure were the ones outside the grep, while the happy
+// path was inside it.
+//
+// A configured relay that nothing answers is what makes the publish partial:
+// the operator's own relays are exempt from the allow-list, so a closed local
+// port reaches the dial and fails there, which is a real not_connected rather
+// than a refusal on content.
+func TestThePerRelayLinesOfAPartialPublishCarryThePaymentHash(t *testing.T) {
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged, poolsOwn bytes.Buffer
+
+	dead := closedPort(t)
+	pool := nostr.NewPool(t.Context(), func() []string { return []string{dead} }, nostr.Options{
+		Log: logging.New(&poolsOwn, logging.NewLevelVar(slog.LevelDebug)),
+	})
+	defer pool.Close()
+
+	h.publisherWith(pool, &logged).PublishNow(t.Context(), hash)
+
+	perRelay := logLineIn(t, logged.String(), "relay outcome in a slow or partial publish")
+	chosen := logLineIn(t, logged.String(), "relays chosen for this publish")
+	if got := hashOn(t, perRelay); got == "" || got != hashOn(t, chosen) {
+		t.Errorf("payment_hash is %q on the per-relay line and %q on the relays-chosen "+
+			"line; one grep must return both, and the per-relay line is the one that "+
+			"only appears when something went wrong", got, hashOn(t, chosen))
+	}
+	if strings.Contains(poolsOwn.String(), "relay outcome in a slow or partial publish") {
+		t.Errorf("the per-relay line went to the pool's own logger, so the context was "+
+			"not consulted:\n%s", poolsOwn.String())
+	}
+}
+
+// closedPort is a local address nothing is listening on — bound and released, so
+// the port is real and the dial is refused rather than left hanging.
+func closedPort(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("closing the probe listener: %v", err)
+	}
+	return "ws://" + addr
 }
