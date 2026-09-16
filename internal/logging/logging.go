@@ -85,6 +85,26 @@ func FromContext(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
+// LoggerOr returns the context's logger, or `fallback` when nothing attached
+// one — FromContext for a component that already HAS a logger of its own (et8).
+//
+// The difference from FromContext is the whole point. FromContext falls back to
+// slog.Default(), which is right for a handler whose only logger IS the
+// request's, and wrong for a long-lived component: the pool writes through the
+// logger it was built with, and switching it to FromContext would send every
+// publish with no request in play to the process-wide default instead — silently
+// dropping the pool's own handler, and with it every test that captures its
+// output.
+//
+// It exists so that a caller who KNOWS which zap this publish is for can say so
+// on the lines the pool writes, without the pool having to learn about zaps.
+func LoggerOr(ctx context.Context, fallback *slog.Logger) *slog.Logger {
+	if log, ok := ctx.Value(contextKey{}).(*slog.Logger); ok {
+		return log
+	}
+	return fallback
+}
+
 func newRequestID() string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {

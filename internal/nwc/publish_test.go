@@ -247,3 +247,41 @@ func TestAStaleRequestsRefusalIsStillPublished(t *testing.T) {
 		t.Errorf("the published answer is %q, want the expiry §8 requires", got)
 	}
 }
+
+// et8 criterion 6: an NWC response publish rides a context with NO logger on
+// it, so the pool writes its lines through its own and the pairing leg stays
+// out of a zap's payment_hash grep.
+//
+// The attachment is the ZAP publisher's, made around one call on the one leg
+// where a payment hash is the right correlation key. The pool is shared with §8
+// by design (one pool, an arch rule), so an attachment made any wider would
+// have put an NWC response into some zap's trace and told an operator the two
+// were one episode.
+//
+// Asserted on the CONTEXT rather than on what was logged: this harness publishes
+// through a fake, which writes no relay-choice line at all, so an assertion
+// about output would pass whatever the seam did. pay_invoice deliberately — it
+// is the method where a payment hash genuinely exists in scope, so a careless
+// attachment would have had something to write.
+func TestAnNWCResponsePublishRidesAContextWithNoLoggerAttached(t *testing.T) {
+	h := newHarness(t)
+	h.grantPay()
+	h.sendEnabled(true)
+	h.decodesTo("lnbcrt1et8", 50_000, "a payment")
+
+	if resp := h.handle(t, MethodPayInvoice, payParams("lnbcrt1et8", 0)); resp.Error != nil {
+		t.Fatalf("the payment was refused, so the fixture is wrong: %+v", resp.Error)
+	}
+
+	h.relays.mu.Lock()
+	defer h.relays.mu.Unlock()
+	if len(h.relays.publishLoggers) == 0 {
+		t.Fatal("nothing was published, so this asserts nothing")
+	}
+	for i, log := range h.relays.publishLoggers {
+		if log != nil {
+			t.Errorf("publish %d rode a logger attached to its context; the zap "+
+				"publisher's payment_hash has leaked onto the pairing leg", i)
+		}
+	}
+}

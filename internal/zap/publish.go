@@ -213,7 +213,21 @@ func (p *Publisher) attempt(ctx context.Context, zap store.SettledZap, pending s
 	// the timestamps side by side. An interval nothing states is an interval
 	// nobody reads.
 	started := time.Now()
-	results := p.pool.Publish(ctx, *event, relays...)
+	// The pool's own lines — "relays chosen for this publish" above all — join
+	// the payment_hash grep o34.8 built (et8). The pool knows nothing about
+	// zaps and must not: it takes the logger off the context when there is one,
+	// so the caller who KNOWS which zap this is says it once, here.
+	//
+	// Attached at the CALL and not on the publisher's ctx, because this is the
+	// only leg where the hash is the right correlation key. The receipt publish
+	// runs from the invoice stream minutes after the callback, so there is no
+	// request logger on this context to displace.
+	//
+	// logging.PaymentHash, never a raw slog.String: it truncates to the same
+	// prefix the minted/settled/published lines carry, which is what makes the
+	// four lines one grep rather than three plus a near miss.
+	withHash := logging.ContextWithLogger(ctx, p.log.With(logging.PaymentHash(zap.PaymentHash)))
+	results := p.pool.Publish(withHash, *event, relays...)
 	publishMS := time.Since(started).Milliseconds()
 	accepted := nostr.Accepted(results)
 	if accepted == 0 {

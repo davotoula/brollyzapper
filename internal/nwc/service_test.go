@@ -984,6 +984,7 @@ type fakeRelays struct {
 	blockPublish     bool
 	publishedAt      []time.Time
 	publishDeadlines []time.Time
+	publishLoggers   []*slog.Logger
 }
 
 // fakeSubscription remembers which relay handed a channel out, so a test with
@@ -1160,6 +1161,12 @@ func (f *fakeRelays) PublishToConnection(ctx context.Context, event gonostr.Even
 	f.publishedAt = append(f.publishedAt, time.Now())
 	deadline, _ := ctx.Deadline()
 	f.publishDeadlines = append(f.publishDeadlines, deadline)
+	// et8: whether anything attached a logger to the context this publish rides.
+	// The zap publisher attaches one carrying the payment hash so the pool's
+	// relay-choice line joins that zap's grep; §8's leg shares the same pool and
+	// must not inherit it. Read here because the context is the mechanism —
+	// asserting on the fake's output would only prove this fake writes no line.
+	f.publishLoggers = append(f.publishLoggers, logging.LoggerOr(ctx, nil))
 	refuse := f.refusePublishes > 0
 	if refuse {
 		f.refusePublishes--

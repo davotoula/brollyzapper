@@ -536,3 +536,32 @@ func TestEveryDeclaredEventIsInTheVocabulary(t *testing.T) {
 			"not a declared constant", declared, len(logging.Events))
 	}
 }
+
+// et8: LoggerOr is FromContext for a component that already HAS a logger. The
+// difference from FromContext is the whole reason it exists — FromContext falls
+// back to slog.Default(), so a pool that switched to it would lose its own
+// handler on every publish with no request in play, and every test capturing
+// that pool's output would go quiet.
+func TestLoggerOrPrefersTheContextAndFallsBackToTheCallerNotTheDefault(t *testing.T) {
+	var attached, fallback bytes.Buffer
+	level := logging.NewLevelVar(slog.LevelDebug)
+	fallbackLog := logging.New(&fallback, level)
+
+	// Identity, not output: it is the ONE assertion that distinguishes this from
+	// FromContext without reassigning the process-wide slog.Default() out from
+	// under every other test in this package.
+	if got := logging.LoggerOr(context.Background(), fallbackLog); got != fallbackLog {
+		t.Errorf("an empty context returned %p, want the caller's own logger %p — "+
+			"FromContext's slog.Default() fallback is what this exists to avoid",
+			got, fallbackLog)
+	}
+
+	ctx := logging.ContextWithLogger(context.Background(), logging.New(&attached, level))
+	logging.LoggerOr(ctx, fallbackLog).Info("a logger is on the context")
+	if attached.Len() == 0 {
+		t.Errorf("the context's logger was ignored:\n%s", fallback.String())
+	}
+	if fallback.Len() != 0 {
+		t.Errorf("the line went to the fallback as well:\n%s", fallback.String())
+	}
+}

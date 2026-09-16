@@ -596,3 +596,84 @@ func receiptLine(t *testing.T, logged string) string {
 	}
 	return line
 }
+
+// et8: the relay-selection line joins the payment_hash grep.
+//
+// o34.8 made the payment hash the correlation key — minted, settled, receipt
+// published are three lines on one grep — and the 0.1.22-rc1 trip found the
+// fourth line a tracer wants outside it. "relays chosen for this publish" is
+// written by the POOL, which knows nothing about zaps, so an operator asking
+// "the receipt says relays=5 accepted=5, which five and why" had to find the
+// line by timestamp.
+//
+// TWO POOLS, because one of them has to be REAL: the relays-chosen line only
+// exists in internal/nostr, and the zap package has no relay fixture for it to
+// deliver to. So the first publish goes through a real, relay-less pool — which
+// still chooses (finds nothing) and still logs the line — and the second
+// through the fake, which produces the receipt line. Both write to the same
+// buffer, which is the operator's journal, and the assertion is the one the
+// bead asks for: a grep on the hash returns both.
+func TestTheRelaysChosenLineCarriesTheSamePaymentHashAsTheReceipt(t *testing.T) {
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged, poolsOwn bytes.Buffer
+
+	pool := nostr.NewPool(t.Context(), func() []string { return nil }, nostr.Options{
+		Log: logging.New(&poolsOwn, logging.NewLevelVar(slog.LevelDebug)),
+	})
+	defer pool.Close()
+
+	h.publisherWith(pool, &logged).PublishNow(t.Context(), hash)
+	h.publisherWith(&fakePool{}, &logged).PublishNow(t.Context(), hash)
+
+	chosen := hashOn(t, logLineIn(t, logged.String(), "relays chosen for this publish"))
+	receipt := hashOn(t, receiptLine(t, logged.String()))
+	if chosen == "" {
+		t.Fatalf("the relays-chosen line carries no payment_hash, so it is outside the grep")
+	}
+	if chosen != receipt {
+		t.Errorf("payment_hash is %q on the relays-chosen line and %q on the receipt; "+
+			"one grep must return both", chosen, receipt)
+	}
+
+	// The pool's OWN logger must not have taken it: the line went through the
+	// context the zap publisher attached, which is what carries the hash. If
+	// this buffer has it, the attachment did nothing and the hash above came
+	// from somewhere else.
+	if strings.Contains(poolsOwn.String(), "relays chosen for this publish") {
+		t.Errorf("the pool wrote the line to its own logger, so the context was not "+
+			"consulted:\n%s", poolsOwn.String())
+	}
+}
+
+// hashOn is a line's payment_hash, or "" when it has none — parsed, never
+// matched as a substring, so a hash appearing anywhere else on the line cannot
+// be mistaken for the attribute.
+func hashOn(t *testing.T, line string) string {
+	t.Helper()
+	var record struct {
+		PaymentHash string `json:"payment_hash"`
+	}
+	if err := json.Unmarshal([]byte(line), &record); err != nil {
+		t.Fatalf("the line is not JSON: %s", line)
+	}
+	return record.PaymentHash
+}
+
+// logLineIn is the last line carrying msg, or a failure saying there was none.
+func logLineIn(t *testing.T, logged, msg string) string {
+	t.Helper()
+	line := ""
+	for _, candidate := range strings.Split(strings.TrimSpace(logged), "\n") {
+		var record struct {
+			Msg string `json:"msg"`
+		}
+		if json.Unmarshal([]byte(candidate), &record) == nil && record.Msg == msg {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatalf("no %q line was logged at all:\n%s", msg, logged)
+	}
+	return line
+}

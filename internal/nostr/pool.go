@@ -655,7 +655,12 @@ func (p *Pool) Publish(ctx context.Context, event gonostr.Event, extra ...string
 	defer p.exempt.Store(nil)
 	chosen := p.chooseTargets(ctx, configured, extra)
 	sending := chosen.sending
-	chosen.log(p.log)
+	// Through the CONTEXT's logger when the caller attached one, so a publish
+	// that knows which zap it is for can say so on this line (et8). LoggerOr and
+	// not FromContext: this pool's own logger is the fallback, and FromContext's
+	// is slog.Default(), which would drop p.log's handler on every publish with
+	// nothing attached — NWC's responses, and every test that reads this line.
+	chosen.log(logging.LoggerOr(ctx, p.log))
 	if len(sending) == 0 {
 		// Distinguishable from "every relay refused": both are retryable, and
 		// o34.3 must be able to tell "nowhere to send it" from "nobody took it".
