@@ -76,9 +76,11 @@ const auditWriteTimeout = 5 * time.Second
 //     and does not audit. An honest client meeting its own budget is routine,
 //     and auditing it would drown (2) in noise.
 //  4. The audited refusal is BOUNDED — see MaxAuditedRefusalsPerHour.
-//  5. Every other request logs at DEBUG. The trip's eleven idle
-//     get_info/get_balance pairs in two minutes must not fill an operator's log
-//     at INFO, and §12 is explicit that INFO has to stand alone for diagnosis.
+//  5. Every other request logs at DEBUG, EXCEPT an answered pay_invoice, which
+//     is INFO (xej — see reportAnswered for why the exception is ruling 3 and
+//     not a hole in this one). The trip's eleven idle get_info/get_balance pairs
+//     in two minutes must not fill an operator's log at INFO, and §12 is
+//     explicit that INFO has to stand alone for diagnosis.
 //
 // The context is the request's, except for the trail write — see auditRefusal.
 func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Request, resp Response) {
@@ -89,8 +91,9 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 		// saying only "a payment was made" added nothing an operator could act
 		// on. Two INFO lines per payment is what the first version shipped.
 		//
-		// And ruling 5's DEBUG line is reportAnswered's, AFTER the publish, so it
-		// can say what the publish took (k2z).
+		// And ruling 5's line is reportAnswered's, AFTER the publish, so it can
+		// say what the publish took (k2z) — at INFO for a payment and DEBUG for
+		// a read (xej).
 		return
 	}
 
@@ -137,12 +140,36 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 //
 // Refusals keep their own lines, written before the publish, and do not carry the
 // timing: their question is which control refused, not how long delivery took.
+//
+// THE LEVEL IS PER METHOD (xej): INFO for pay_invoice, DEBUG for the reads —
+// get_info, get_balance, make_invoice, lookup_invoice, list_transactions. This
+// is ruling 3's reasoning above, applied to the line ruling 5 put at DEBUG: "an
+// operator asking why did my phone stop paying must not need debug mode". The
+// 0.1.22-rc1 trip found the failure this line exists to explain reproducing —
+// Amethyst's "your wallet did not respond within 60 seconds" — with the box at
+// the default log_level=info and nothing whatever in the journal.
+//
+// Ruling 5 is not overturned, only narrowed, and the split is what keeps it:
+// INFO here is bounded by the number of PAYMENTS, while the eleven idle
+// get_info/get_balance pairs in two minutes that ruling 5 was written against
+// are a client POLLING, and stay at DEBUG. make_invoice is a read for this
+// purpose — it moves no money and its amount is already bounded by
+// lnurl.MaxSendableMsat (l3j).
+//
+// EXPIRY: pay_invoice is the only method here that spends. A second one —
+// pay_keysend, multi_pay_invoice — belongs on the INFO side, and adding it to
+// §8's method set without adding it here would silence the new one.
 func (s *Service) reportAnswered(conn *connection, req Request, entered time.Time, sent delivery) {
 	// The server's share is the whole of it less the publish.
 	handleMS := (time.Since(entered) - sent.took).Milliseconds()
-	s.log.Debug("an NWC request was answered", "connection", conn.row().ID, "method", req.Method,
+	line := []any{"connection", conn.row().ID, "method", req.Method,
 		"handle_ms", handleMS, "publish_ms", sent.took.Milliseconds(),
-		"relays", sent.relays, "accepted", sent.accepted)
+		"relays", sent.relays, "accepted", sent.accepted}
+	if req.Method == MethodPayInvoice {
+		s.log.Info("an NWC request was answered", line...)
+		return
+	}
+	s.log.Debug("an NWC request was answered", line...)
 }
 
 // recordRefusal remembers, ON THE CONNECTION, the last thing this pairing was
