@@ -70,6 +70,8 @@ const (
 	CheckCredentialAddress = "node.credential_address"
 	// `20i.21`: the server's own credential, put to the node.
 	CheckServerCredential = "node.server_credential"
+	// as0.10: the guard's own admin macaroon, which a restart did not repair.
+	CheckGuardAdminMacaroon = "guard.admin_macaroon"
 )
 
 // TierOneChecks is the whole of Tier 1. §11: exactly one condition, and it
@@ -201,6 +203,10 @@ type Report struct {
 	// explanation needs the value, and it travels with the verdict so no page
 	// can name an address for a refusal that is not happening.
 	MismatchedAddress string
+	// AdminMacaroonRejected is the guard-admin-macaroon check's verdict (as0.10),
+	// so the Node page's "LND reachable from the guard — no" can say why from the
+	// same answer the Security panel renders, and never computes it itself.
+	AdminMacaroonRejected bool
 	// ServerCredential is the last answer the server's own credential got from
 	// the node, with its time (`20i.21`). Nil when no probe is wired; a zero At
 	// means not asked yet. A MEASUREMENT beside its check, like Spend: the Node
@@ -442,12 +448,15 @@ func Run(ctx context.Context, in Inputs) Report {
 	report.MismatchedAddress = mismatchedAddress
 	serverCredential, probed := serverCredentialCheck(in)
 	report.ServerCredential = probed
+	adminMacaroon := guardAdminMacaroonCheck(state, broker)
+	report.AdminMacaroonRejected = adminMacaroon.State == Fail
 	report.Checks = append(report.Checks,
 		nodeCheck(state, mismatchedAddress != ""),
 		mismatch,
 		certificateNameCheck(in, state),
 		serverCredential,
 		guardCheck(broker),
+		adminMacaroon,
 		addressCheck(ctx, in),
 		reconciliationCheck(ctx, in),
 		unresolvedPaymentsCheck(ctx, in),
@@ -680,6 +689,58 @@ func guardCheck(broker brokerState) Check {
 		return c
 	}
 	c.State = Pass
+	return c
+}
+
+// guardAdminMacaroonCheck is as0.10's row: the guard's rotation exit did not
+// repair the credential it holds, and it has stopped exiting to say so.
+//
+// KEYED ON THE GUARD'S STATUS ALONE — its kind, and the node not answering it —
+// and deliberately NOT on lnd.StateRelink, unlike the address row above. The
+// scenario is a wrong admin.macaroon mounted into the guard: the SERVER's receive
+// credential was baked before and the node still accepts it, so the server is
+// Ready while the guard cannot talk to the node. A row that waited for the
+// server's rejection would never fire.
+//
+// BLOCKS NOTHING, decided rather than copied from the address row. Re-link cannot
+// help — the guard asks the node for its root key ids with the rejected
+// credential and fails before anything is created, so a click costs a refused
+// call or two and no key and no audit row. But blocking it needs the Node page and the handler's flash
+// to know a second cause, and the flash today says the node refuses the
+// credential for its ADDRESS, which here is false. Sending needs no block of its
+// own: a guard the node rejects cannot register the middleware, and the
+// middleware row already blocks sending.
+func guardAdminMacaroonCheck(state lnd.State, broker brokerState) Check {
+	c := Check{
+		ID:     CheckGuardAdminMacaroon,
+		Title:  "Your node accepts the admin macaroon mounted into the guard",
+		Threat: "Server compromised with sending enabled — revoking the spend macaroon is the guard's call to the node, and a guard the node rejects can revoke, bake and renew nothing.",
+		Blocks: BlocksNothing,
+	}
+	switch {
+	case !broker.wired:
+		notChecked(&c, unwired)
+		return c
+	case broker.err != nil:
+		notChecked(&c, guardDown)
+		return c
+	}
+	status := broker.status
+	if status.LNDReachable || status.RefusalKind != guard.KindAdminMacaroonStillRejected {
+		c.State = Pass
+		return c
+	}
+	c.State = Fail
+	c.Detail = "Your node rejects the admin macaroon mounted into the guard, and it is the same file " +
+		"the node rejected before the guard last restarted — so this is not a macaroon rotation, " +
+		"which a restart repairs. Re-linking will not change it, and neither will restarting the " +
+		"guard over the same file. Mount your node's current admin macaroon into the guard, then " +
+		"restart the guard."
+	// Only while the server is Ready is "the app keeps receiving" true.
+	if state == lnd.StateReady && !status.ReceiveExpiry.IsZero() {
+		c.Detail += " The app keeps receiving until its current credential expires at " +
+			status.ReceiveExpiry.UTC().Format("2006-01-02 15:04 UTC") + ", and cannot renew it after that."
+	}
 	return c
 }
 

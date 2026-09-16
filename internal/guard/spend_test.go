@@ -945,15 +945,26 @@ func credentialMode(t *testing.T, dir, name string) os.FileMode {
 // for it — the seam, not a shortcut around it.
 func serveGuard(t *testing.T, g *guard.Guard) *guard.SocketClient {
 	t.Helper()
+	return startServing(t, g).client
+}
+
+// serving is a guard running Serve over the socket, with Serve's result kept —
+// whether Serve RETURNED is the claim the rotation tests make (as0.10).
+type serving struct {
+	client *guard.SocketClient
+	done   chan error
+}
+
+func startServing(t *testing.T, g *guard.Guard) serving {
+	t.Helper()
 	socket := socketPath(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	go func() { _ = g.Serve(ctx, socket) }()
-
-	client := guard.NewSocketClient(socket, guard.DiscardEvents)
+	s := serving{client: guard.NewSocketClient(socket, guard.DiscardEvents), done: make(chan error, 1)}
+	go func() { s.done <- g.Serve(ctx, socket) }()
 	lndtest.WaitFor(t, "the socket to accept", func() bool {
-		_, err := client.Status(ctx)
+		_, err := s.client.Status(ctx)
 		return err == nil
 	})
-	return client
+	return s
 }

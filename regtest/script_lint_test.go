@@ -377,10 +377,10 @@ func scriptsWith(scripts map[string]string, marker string) []string {
 // lost another. What would change them: a script that starts or stops running
 // a container, which is a change worth a reader's attention.
 var (
-	dockerRunScripts   = []string{"authorise.sh", "cap.sh", "e2e.sh", "ipaddr.sh", "nwc.sh", "rotation.sh", "spend.sh"}
-	toolImageScripts   = []string{"authorise.sh", "cap.sh", "e2e.sh", "nwc.sh", "rotation.sh", "spend.sh"}
+	dockerRunScripts   = []string{"authorise.sh", "cap.sh", "e2e.sh", "ipaddr.sh", "nwc.sh", "rotation.sh", "spend.sh", "wrongmount.sh"}
+	toolImageScripts   = []string{"authorise.sh", "cap.sh", "e2e.sh", "nwc.sh", "rotation.sh", "spend.sh", "wrongmount.sh"}
 	lndImageScripts    = []string{"cap.sh", "ipaddr.sh", "spend.sh"}
-	sqliteImageScripts = []string{"rotation.sh"}
+	sqliteImageScripts = []string{"rotation.sh", "wrongmount.sh"}
 )
 
 type plant struct{ src, want string } // want "" means clean

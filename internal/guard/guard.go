@@ -112,6 +112,22 @@ type Guard struct {
 	sleep           func(ctx context.Context, d time.Duration) error
 
 	rotated chan struct{}
+	// adminMacaroon is what the node client reads admin.macaroon through on
+	// every call, kept so the rotation exit records WHICH bytes it exited over
+	// through that same read (as0.10, rotationmemory.go).
+	adminMacaroon lnd.CredentialSource
+	// holdingExit is whether the guard is withholding a second rotation exit
+	// over the same bytes (as0.10). Its false→true swap IS the transition, so it
+	// is also the once-guard on that transition's audit event; a success resets
+	// it. Not `rotated`, whose closing ends Serve — the exit this withholds — and
+	// not lastRefusal, which is the last BAKE refusal with writers of its own;
+	// Status joins the two into the one wire field (refusalKind).
+	holdingExit atomic.Bool
+	// acceptances counts the node accepting admin.macaroon (as0.10, go-review).
+	// A probe reads it before it asks; a success that lands while the probe is
+	// out makes the probe's rejection stale, and recordRotationExit then acts on
+	// nothing. See TestAProbeSentBeforeASuccessDoesNotAct.
+	acceptances atomic.Uint64
 
 	// writeCredential is how the guard writes to the credential volume, and it
 	// is WriteCredential outside a test. A field so a test can interrupt a bake
@@ -134,7 +150,9 @@ type Guard struct {
 }
 
 // New builds a guard from the guard binary's configuration. It performs no
-// network I/O.
+// network I/O. It does read the state file and the mounted admin.macaroon, and
+// may clear the record of a rotation exit over a file no longer mounted
+// (as0.10, forgetExitOverAnotherFile).
 func New(cfg *config.Guard, opts Options) (*Guard, error) {
 	// The seed is what an install upgrading from ≤0.1.12 gets for the operator
 	// controls the first time this store is read (`06v`, Migration). The caps
@@ -166,11 +184,10 @@ func New(cfg *config.Guard, opts Options) (*Guard, error) {
 	}
 	// The guard dials LND with its own two bind-mounted files, through the same
 	// client the server uses — one TLS path, one per-RPC credential mechanism.
-	node := lnd.New(cfg.LNDAddress,
-		lnd.FileCredentials(cfg.LNDCertFile, cfg.LNDAdminMacaroonFile),
-		lnd.Options{Log: log})
+	credentials := lnd.FileCredentials(cfg.LNDCertFile, cfg.LNDAdminMacaroonFile)
+	node := lnd.New(cfg.LNDAddress, credentials, lnd.Options{Log: log})
 
-	return &Guard{
+	g := &Guard{
 		node:                  node,
 		credentialsDir:        cfg.CredentialsDir,
 		certSourcePath:        cfg.LNDCertFile,
@@ -191,7 +208,10 @@ func New(cfg *config.Guard, opts Options) (*Guard, error) {
 		rotated:           make(chan struct{}),
 		writeCredential:   WriteCredential,
 		probeInterval:     probeInterval,
-	}, nil
+		adminMacaroon:     credentials,
+	}
+	g.forgetExitOverAnotherFile()
+	return g, nil
 }
 
 // Close releases the connection to LND.
@@ -785,11 +805,10 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 		// total against a limit from a different version of the state.
 		SpendUsedMsat:  spendUsedIn(state, g.rotation.clock()),
 		SpendLimitMsat: state.MaxSpendMsat,
-		// The last bake refusal as a TOKEN, and the address the credentials are
-		// locked to as a VALUE. Neither is the guard's sentence: that reaches
-		// the operator through the audit row this same refusal writes, which is
-		// where prose belongs (`20i.3`).
-		RefusalKind:       g.lastRefusalKind(),
+		// The address the credentials are locked to as a VALUE, not the guard's
+		// sentence: that reaches the operator through the audit row, which is
+		// where prose belongs (`20i.3`). The refusal kind is set below, after
+		// the node has been asked.
 		CredentialAddress: g.ipCaveatValue(),
 	}
 	// The pending grant, WITHOUT its code. The server is told that one exists,
@@ -824,6 +843,12 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 			}
 		}
 	}
+	// A TOKEN, never the sentence (`20i.3`) — and read AFTER the GetInfo above,
+	// whose success clears as0.10's held exit. That narrows, and does not close,
+	// an answer saying both "reachable" and "the node rejects the guard": a probe
+	// sent before this GetInfo can still land between the two. The page asks for
+	// both facts for that reason.
+	status.RefusalKind = g.refusalKind()
 	return status, nil
 }
 
@@ -925,7 +950,7 @@ func (g *Guard) dispatch(ctx context.Context, req Request) Response {
 // will ever see the replacement (§6).
 func (g *Guard) observe(ctx context.Context, err error) error {
 	if err == nil {
-		g.rotation.Success()
+		g.nodeAccepted()
 		return nil
 	}
 	if !lnd.IsAuthFailure(err) {
@@ -943,9 +968,11 @@ func (g *Guard) observe(ctx context.Context, err error) error {
 
 // observeProbe is observe for the guard's OWN samples: the only observations
 // that advance the run toward §6's threshold.
-func (g *Guard) observeProbe(ctx context.Context, err error) {
+//
+// sent is g.acceptances as it stood when the probe went out.
+func (g *Guard) observeProbe(ctx context.Context, err error, sent uint64) {
 	if err == nil {
-		g.rotation.Success()
+		g.nodeAccepted()
 		return
 	}
 	if !lnd.IsAuthFailure(err) {
@@ -954,6 +981,13 @@ func (g *Guard) observeProbe(ctx context.Context, err error) {
 		return
 	}
 	if !g.rotation.ProbeFailed() {
+		return
+	}
+	switch d := g.recordRotationExit(sent); d.outcome {
+	case exitStale, exitHeld:
+		return
+	case exitHoldBegins:
+		g.auditHold(ctx, d.exitedAt)
 		return
 	}
 	g.audit(ctx, slog.LevelWarn, "lnd rejected admin.macaroon repeatedly; the node's macaroons "+
@@ -995,8 +1029,9 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		if !g.rotation.Armed() {
 			continue
 		}
+		sent := g.acceptances.Load()
 		_, err := g.node.GetInfo(ctx)
-		g.observeProbe(ctx, err)
+		g.observeProbe(ctx, err, sent)
 		if err == nil {
 			g.log.Info("lnd is answering again; the credential was not rotated after all")
 			continue

@@ -172,3 +172,48 @@ func TestTheNodePageIsUnchangedWithNoRefusal(t *testing.T) {
 			"the recovery for a ROTATED macaroon, which is a real and different case:\n%s", page)
 	}
 }
+
+// as0.10: the guard withholding a second rotation exit, on both pages from one
+// verdict — and with the server READY, which is the scenario itself: only the
+// guard's mount is wrong, and the server's own credential still works.
+//
+// RE-LINK STAYS OFFERED, and the test pins that as a decision rather than an
+// accident: the row blocks nothing (see preflight's guardAdminMacaroonCheck),
+// so the Node page must not hide a button its handler would honour.
+func TestTheNodePageSaysWhyTheGuardCannotReachTheNode(t *testing.T) {
+	// THE PAGE'S OWN LINE, anchored on its <dd>. The degraded banner renders the
+	// Security row's detail on every page, and that detail says "rejects the
+	// admin macaroon mounted into the guard" too — the first version of this test
+	// matched the banner and passed with the Node page unchanged.
+	const why = "<dd>no — your node rejects the admin macaroon mounted into the guard"
+	for _, tc := range []struct {
+		name   string
+		status lnd.BrokerStatus
+		want   bool
+	}{
+		{"the guard is holding its second exit", lnd.BrokerStatus{ReceiveMacaroonPresent: true,
+			RefusalKind: guard.KindAdminMacaroonStillRejected}, true},
+		{"the node is merely down", lnd.BrokerStatus{ReceiveMacaroonPresent: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, livePreflight(lnd.StateReady, nil))
+			h.broker.Answer = tc.status
+			cookie := h.login(t)
+			node := h.get(t, "/node", cookie).Body.String()
+			security := h.get(t, "/security", cookie).Body.String()
+
+			if got := strings.Contains(node, why); got != tc.want {
+				t.Errorf("the Node page says why = %v, want %v:\n%s", got, tc.want, node)
+			}
+			if got := strings.Contains(security, "not a macaroon rotation"); got != tc.want {
+				t.Errorf("the Security panel carries the finding = %v, want %v:\n%s", got, tc.want, security)
+			}
+			if !strings.Contains(node, "<dt>LND reachable from the guard</dt><dd>no") {
+				t.Errorf("the Node page no longer says the guard cannot reach LND:\n%s", node)
+			}
+			if !strings.Contains(node, relinkForm) {
+				t.Errorf("the Node page withdrew Re-link, which this finding does not block:\n%s", node)
+			}
+		})
+	}
+}

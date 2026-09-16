@@ -1,7 +1,7 @@
 <h1>Node</h1>
 <dl>
   <dt>Connection</dt><dd>{{.Node.State}}</dd>
-  <dt>LND reachable from the guard</dt><dd>{{if .Node.LNDReachable}}yes{{else}}no{{end}}</dd>
+  <dt>LND reachable from the guard</dt><dd>{{if .Node.LNDReachable}}yes{{else}}no{{if .Node.AdminMacaroonRejected}} — your node rejects the admin macaroon mounted into the guard, and restarting will not change that; the Security page says what to fix{{end}}{{end}}</dd>
   <dt>LND reachable from the server</dt><dd>{{if .Node.ServerCheckedAt.IsZero}}not checked yet{{else}}{{if .Node.ServerReachable}}yes{{else}}no{{end}}, as of {{.Node.ServerCheckedAt.UTC.Format "15:04:05 UTC"}}{{end}}</dd>
   <dt>Receive macaroon</dt>
   <dd>
