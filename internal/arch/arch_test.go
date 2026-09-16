@@ -6392,6 +6392,12 @@ func checkAPINamesOnlyTheGuardsVocabulary(t *testing.T, files []sourceFile) []pr
 		// credential for its ADDRESS than about a rotated macaroon, and the
 		// alternative was reading the guard's sentence off BrokerStatus.
 		"KindAddressMismatch": true,
+		// KindAdminMacaroonStillRejected joined in as0.10, on the same grounds: the
+		// Security panel has a different thing to say about a guard whose restart
+		// did not change the admin macaroon it holds — mount the right file — than
+		// about a rotation the restart repairs, and the alternative was reading the
+		// guard's sentence off its audit row.
+		"KindAdminMacaroonStillRejected": true,
 	}
 	reference := regexp.MustCompile(`\bguard\.([A-Z]\w*)`)
 

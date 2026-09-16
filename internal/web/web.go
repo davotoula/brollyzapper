@@ -555,6 +555,10 @@ type NodeView struct {
 	// A VALUE, not a sentence. The copy lives in the template where it can be
 	// read and reviewed; what crosses from the guard is a token and an address.
 	MismatchedAddress string
+	// AdminMacaroonRejected says WHY the guard cannot reach LND when the reason is
+	// the one a restart did not repair: the admin macaroon mounted into it
+	// (as0.10). The report's verdict, carried; the copy is the template's.
+	AdminMacaroonRejected bool
 	// ServerCheckedAt is when the SERVER's own credential last got an answer
 	// from the node, and ServerReachable what that answer was (`20i.21`). Zero
 	// means not asked yet, and the page says so rather than "no". The guard's

@@ -34,6 +34,8 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	// address is set exactly when that check blocks re-linking, so it is the
 	// verdict as well as the value.
 	view.MismatchedAddress = report.MismatchedAddress
+	// The same rule for as0.10's finding: the verdict the Security panel renders.
+	view.AdminMacaroonRejected = report.AdminMacaroonRejected
 	// The server's own credential, from the same report the Security panel
 	// renders its check from (`20i.21`) — a cached answer with its time. A render
 	// may START a probe when one is due; it never waits on the node.
