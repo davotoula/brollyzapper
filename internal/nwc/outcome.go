@@ -153,9 +153,9 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 // INFO here is bounded by the number of payments that SUCCEED — this line is
 // written only when the response published and carried no error — while the
 // eleven idle get_info/get_balance pairs in two minutes that ruling 5 was
-// written against are a client POLLING, and stay at DEBUG. make_invoice is a read for this
-// purpose — it moves no money and its amount is already bounded by
-// lnurl.MaxSendableMsat (l3j).
+// written against are a client POLLING, and stay at DEBUG. make_invoice is a
+// read for this purpose — it moves no money and its amount is already bounded
+// by lnurl.MaxSendableMsat (l3j).
 //
 // WHICH METHODS SPEND is not asked here: spends() answers it from the permission
 // group, which is the package's one statement of the fact (§8 step 4). This used

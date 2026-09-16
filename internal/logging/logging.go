@@ -97,8 +97,14 @@ func FromContext(ctx context.Context) *slog.Logger { return LoggerOr(ctx, Defaul
 //
 // It exists so that a caller who KNOWS which zap this publish is for can say so
 // on the lines the pool writes, without the pool having to learn about zaps.
+// A nil logger STORED on the context falls back too (go-review). The type
+// assertion succeeds for a typed nil, so without the second test this would hand
+// back a *slog.Logger that panics at the first call — a wiring mistake turned
+// into a crash in the pool, some publishes later, far from the attach. Default's
+// doc states the package's preference: a nil logger is a mistake, and it should
+// not also be a change of destination.
 func LoggerOr(ctx context.Context, fallback *slog.Logger) *slog.Logger {
-	if log, ok := ctx.Value(contextKey{}).(*slog.Logger); ok {
+	if log, ok := ctx.Value(contextKey{}).(*slog.Logger); ok && log != nil {
 		return log
 	}
 	return fallback

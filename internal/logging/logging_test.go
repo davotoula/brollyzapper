@@ -565,3 +565,50 @@ func TestLoggerOrPrefersTheContextAndFallsBackToTheCallerNotTheDefault(t *testin
 		t.Errorf("the line went to the fallback as well:\n%s", fallback.String())
 	}
 }
+
+// A cancelled context does not suppress a record.
+//
+// xej moved the NWC answered line from Debug to a levelled Log(ctx, …) taking
+// the REQUEST's context, and that line exists precisely for the case where
+// something went wrong — a stalled payment, a client that gave up. If a
+// cancelled context could swallow it, the bead would have made the blindness
+// worse on exactly the requests it was filed for.
+//
+// It cannot, because New builds a plain slog.JSONHandler and the standard
+// handlers ignore the context. That is a property of a dependency rather than of
+// this package, which is why it is pinned here: nothing in the repo implements
+// slog.Handler, so this test is what would go red if one ever did and dropped
+// records on cancellation.
+func TestACancelledContextStillLogs(t *testing.T) {
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.NewLevelVar(slog.LevelDebug))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	log.Log(ctx, slog.LevelInfo, "an NWC request was answered", "connection", 1)
+
+	if !strings.Contains(buf.String(), "an NWC request was answered") {
+		t.Errorf("a cancelled context suppressed the record, so the line xej added "+
+			"would be missing on exactly the requests it exists for:\n%s", buf.String())
+	}
+}
+
+// go-review of et8: a nil logger attached to the context falls back rather than
+// being handed out. The type assertion succeeds for a typed nil, so the naive
+// form returns a *slog.Logger that panics at the first call — in the pool, some
+// publishes after the attach that caused it.
+func TestLoggerOrFallsBackWhenTheContextHoldsANilLogger(t *testing.T) {
+	var buf bytes.Buffer
+	fallback := logging.New(&buf, logging.NewLevelVar(slog.LevelDebug))
+
+	ctx := logging.ContextWithLogger(context.Background(), nil)
+
+	if got := logging.LoggerOr(ctx, fallback); got != fallback {
+		t.Fatalf("a nil logger on the context was handed back; the next call panics")
+	}
+	logging.LoggerOr(ctx, fallback).Info("still logs")
+	if buf.Len() == 0 {
+		t.Error("nothing was written through the fallback")
+	}
+}
