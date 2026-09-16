@@ -157,16 +157,20 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 // purpose — it moves no money and its amount is already bounded by
 // lnurl.MaxSendableMsat (l3j).
 //
-// EXPIRY: pay_invoice is the only method here that spends. A second one —
-// pay_keysend, multi_pay_invoice — belongs on the INFO side, and adding it to
-// §8's method set without adding it here would silence the new one.
+// WHICH METHODS SPEND is not asked here: spends() answers it from the permission
+// group, which is the package's one statement of the fact (§8 step 4). This used
+// to be a comparison with pay_invoice and an EXPIRY note saying to remember this
+// line when a second spending method arrives — prose where a predicate belonged,
+// and incomplete prose at that: it named this line and not advertised(), where
+// the same omission would have put a pay button on a wallet the operator had
+// made receive-only.
 func (s *Service) reportAnswered(conn *connection, req Request, entered time.Time, sent delivery) {
 	// The server's share is the whole of it less the publish.
 	handleMS := (time.Since(entered) - sent.took).Milliseconds()
 	line := []any{"connection", conn.row().ID, "method", req.Method,
 		"handle_ms", handleMS, "publish_ms", sent.took.Milliseconds(),
 		"relays", sent.relays, "accepted", sent.accepted}
-	if req.Method == MethodPayInvoice {
+	if spends(req.Method) {
 		s.log.Info("an NWC request was answered", line...)
 		return
 	}

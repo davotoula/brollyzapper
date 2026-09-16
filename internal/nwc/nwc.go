@@ -168,14 +168,32 @@ const (
 )
 
 // methodGroup maps a method to the permission group that grants it (§8 step 4).
+//
+// The store's constants rather than the same words spelled again: "pay" written
+// twice is two statements of one fact, and spends below reads this map to answer
+// the question the package used to ask by hand in three places.
 var methodGroup = map[Method]string{
-	MethodGetInfo:          "info",
-	MethodGetBalance:       "balance",
-	MethodMakeInvoice:      "invoice",
-	MethodLookupInvoice:    "lookup",
-	MethodListTransactions: "history",
-	MethodPayInvoice:       "pay",
+	MethodGetInfo:          store.PermissionInfo,
+	MethodGetBalance:       store.PermissionBalance,
+	MethodMakeInvoice:      store.PermissionInvoice,
+	MethodLookupInvoice:    store.PermissionLookup,
+	MethodListTransactions: store.PermissionHistory,
+	MethodPayInvoice:       store.PermissionPay,
 }
+
+// spends reports whether a method can move money.
+//
+// THE PACKAGE'S ONE STATEMENT OF IT, and the reason it is a function rather than
+// a comparison written where it is needed: `m == MethodPayInvoice` was written
+// by hand in two places — the answered line's level (xej) and advertised's
+// withholding while sending is off — and each was a separate thing to remember.
+// The permission group already says which methods spend; asking it here is what
+// makes a second spending method one map entry instead of three edits.
+//
+// EXPIRY: when pay_keysend or multi_pay_invoice arrives, it joins methodGroup
+// with store.PermissionPay and both callers follow with no change. The advertised
+// table test is what goes red if it is added to Supported() and not to the map.
+func spends(m Method) bool { return methodGroup[m] == store.PermissionPay }
 
 // Supported is every method this build answers, in §8's order.
 //
