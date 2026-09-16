@@ -349,4 +349,11 @@ func TestAStateWriteThatFailsDoesNotStopTheRotationExit(t *testing.T) {
 	s := startServing(t, g)
 	_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
 	s.waitForExit(t, "a rotation with an unwritable state file is still a rotation")
+	// And the write DID fail. Where a directory mode does not stop the writer —
+	// CAP_DAC_OVERRIDE without root, some CI user mappings — this test would
+	// otherwise pass on the success path and prove nothing (go-review L4).
+	if st := readGuardState(t, d.data); st.RotationExit != nil {
+		t.Fatal("the rotation exit was recorded, so the state write did not fail and this test " +
+			"exercised the success path")
+	}
 }

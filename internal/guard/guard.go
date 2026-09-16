@@ -123,6 +123,11 @@ type Guard struct {
 	// not lastRefusal, which is the last BAKE refusal with writers of its own;
 	// Status joins the two into the one wire field (refusalKind).
 	holdingExit atomic.Bool
+	// acceptances counts the node accepting admin.macaroon (as0.10, go-review).
+	// A probe reads it before it asks; a success that lands while the probe is
+	// out makes the probe's rejection stale, and recordRotationExit then acts on
+	// nothing. See TestAProbeSentBeforeASuccessDoesNotAct.
+	acceptances atomic.Uint64
 
 	// writeCredential is how the guard writes to the credential volume, and it
 	// is WriteCredential outside a test. A field so a test can interrupt a bake
@@ -839,8 +844,10 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 		}
 	}
 	// A TOKEN, never the sentence (`20i.3`) — and read AFTER the GetInfo above,
-	// whose success clears as0.10's held exit, so one answer cannot say both
-	// "reachable" and "the node rejects the guard".
+	// whose success clears as0.10's held exit. That narrows, and does not close,
+	// an answer saying both "reachable" and "the node rejects the guard": a probe
+	// sent before this GetInfo can still land between the two. The page asks for
+	// both facts for that reason.
 	status.RefusalKind = g.refusalKind()
 	return status, nil
 }
@@ -961,7 +968,9 @@ func (g *Guard) observe(ctx context.Context, err error) error {
 
 // observeProbe is observe for the guard's OWN samples: the only observations
 // that advance the run toward §6's threshold.
-func (g *Guard) observeProbe(ctx context.Context, err error) {
+//
+// sent is g.acceptances as it stood when the probe went out.
+func (g *Guard) observeProbe(ctx context.Context, err error, sent uint64) {
 	if err == nil {
 		g.nodeAccepted()
 		return
@@ -974,8 +983,11 @@ func (g *Guard) observeProbe(ctx context.Context, err error) {
 	if !g.rotation.ProbeFailed() {
 		return
 	}
-	if held := g.recordRotationExit(); held != nil {
-		g.holdExit(ctx, held)
+	switch d := g.recordRotationExit(sent); d.outcome {
+	case exitStale, exitHeld:
+		return
+	case exitHoldBegins:
+		g.auditHold(ctx, d.exitedAt)
 		return
 	}
 	g.audit(ctx, slog.LevelWarn, "lnd rejected admin.macaroon repeatedly; the node's macaroons "+
@@ -1017,8 +1029,9 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		if !g.rotation.Armed() {
 			continue
 		}
+		sent := g.acceptances.Load()
 		_, err := g.node.GetInfo(ctx)
-		g.observeProbe(ctx, err)
+		g.observeProbe(ctx, err, sent)
 		if err == nil {
 			g.log.Info("lnd is answering again; the credential was not rotated after all")
 			continue

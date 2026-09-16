@@ -12,15 +12,39 @@ import (
 
 // The rotation exit's memory (as0.10). Why it exists is on RotationExit.
 //
-// The brief's table, as code: at the threshold, the SAME bytes as the recorded
-// exit hold the exit (holdExit); anything else records this exit and takes it
-// (recordRotationExit); any success forgets it (nodeAccepted); and a start over
-// a different file forgets it early, for the log line (forgetExitOverAnotherFile).
+// The brief's table, as code: at the threshold, recordRotationExit holds the exit
+// over the SAME bytes as the recorded one and otherwise records this exit for the
+// caller to take; any success forgets it (nodeAccepted); and a start over a
+// different file forgets it early, for the log line (forgetExitOverAnotherFile).
 
-// recordRotationExit decides and records in one read-modify-write: it returns
-// the recorded exit when this rejection run is over the very bytes that exit
-// was taken over, and otherwise records this one and returns nil — the caller
-// then exits.
+// exitOutcome is what a rejection run past the threshold comes to.
+type exitOutcome int
+
+const (
+	// exitTake: recorded (or, with no identity, not recorded); the caller exits.
+	exitTake exitOutcome = iota
+	// exitHoldBegins: the same bytes as the recorded exit, and this call began
+	// the hold — the caller raises the one audit event.
+	exitHoldBegins
+	// exitHeld: the same bytes, already held.
+	exitHeld
+	// exitStale: the node accepted a call after this probe was sent, so its
+	// rejection is not current evidence of anything.
+	exitStale
+)
+
+type exitDecision struct {
+	outcome  exitOutcome
+	exitedAt time.Time // the recorded exit's time, on exitHoldBegins
+}
+
+// recordRotationExit decides and records in one read-modify-write, UNDER THE
+// STATE LOCK — which nodeAccepted also takes — so a success and a rejection run
+// cannot interleave inside the decision (go-review M1: the hold used to be set
+// after the lock, and a success landing in between left it set against a node
+// that accepts, with a durable row saying otherwise). sent is g.acceptances as it
+// stood when the probe went out; nodeAccepted bumps it BEFORE taking the lock, so
+// a success that landed while the probe was out is always seen here.
 //
 // Asked once per probe while held: a file read and a state read every
 // ProbeInterval, and it is what lets a file changed IN PLACE still get its exit.
@@ -30,15 +54,26 @@ import (
 // the memory; withholding the one recovery a real rotation has on a guess would
 // trade a lap of a loop for a guard that never recovers. So a failed write is
 // logged and the exit still happens — the next run then behaves as every run
-// did before as0.10. The mount cannot be unreadable for long here anyway: the
-// node only rejects a macaroon it was sent.
-func (g *Guard) recordRotationExit() *RotationExit {
+// did before as0.10. An unreadable mount records nothing either: the memory it
+// already holds stays, rather than being replaced by an identity that can never
+// match (go-review L1). It cannot be unreadable for long anyway: the node only
+// rejects a macaroon it was sent.
+func (g *Guard) recordRotationExit(sent uint64) exitDecision {
 	identity := g.mountedIdentity()
 	at := g.rotation.clock()
-	var held *RotationExit
+	d := exitDecision{outcome: exitTake}
 	err := g.state.updateIf(func(st *State) bool {
-		if identity != "" && st.RotationExit != nil && st.RotationExit.MountedSHA256 == identity {
-			held = st.RotationExit
+		switch {
+		case g.acceptances.Load() != sent:
+			d.outcome = exitStale
+			return false
+		case identity == "":
+			return false
+		case st.RotationExit != nil && st.RotationExit.MountedSHA256 == identity:
+			d.outcome = exitHeld
+			if g.holdingExit.CompareAndSwap(false, true) {
+				d = exitDecision{outcome: exitHoldBegins, exitedAt: st.RotationExit.At}
+			}
 			return false
 		}
 		st.RotationExit = &RotationExit{At: at, MountedSHA256: identity}
@@ -48,26 +83,24 @@ func (g *Guard) recordRotationExit() *RotationExit {
 		g.log.Error("could not record the rotation exit; if the restart finds the same file the "+
 			"node rejects, it will exit again", "error", err.Error())
 	}
-	return held
+	return d
 }
 
-// holdExit is the guard staying up instead of exiting a second time: the restart
-// re-resolved nothing, so this is not a rotation, and another restart would be
-// the crash loop §11 forbids. It says so through Status and one audit event per
-// transition, and the probe loop goes on — a success is what ends it.
-func (g *Guard) holdExit(ctx context.Context, exit *RotationExit) {
-	if !g.holdingExit.CompareAndSwap(false, true) {
-		return
-	}
-	// Through the auditor, so it reaches the Security page's trail. The time of
-	// the earlier exit is not a secret and is the operator's evidence that this
-	// is the second lap; the hash never appears.
+// auditHold is the one event for the guard staying up instead of exiting a second
+// time: the restart re-resolved nothing, so this is not a rotation, and another
+// restart would be the crash loop §11 forbids. The probe loop goes on — a success
+// is what ends the hold.
+//
+// Through the auditor, so it reaches the Security page's trail. The time of the
+// earlier exit is not a secret and is the operator's evidence that this is the
+// second lap; the hash never appears.
+func (g *Guard) auditHold(ctx context.Context, exitedAt time.Time) {
 	g.audit(ctx, slog.LevelWarn, "lnd still rejects admin.macaroon, and the file mounted into "+
 		"the guard is the one it rejected before the last rotation restart: this is not a "+
 		"rotation, so the guard is staying up. mount the node's current admin.macaroon, then "+
 		"restart the guard",
 		logging.EventPreflightRefuse, map[string]string{
-			"exited_for_rotation_at": exit.At.UTC().Format(time.RFC3339),
+			"exited_for_rotation_at": exitedAt.UTC().Format(time.RFC3339),
 		})
 }
 
@@ -87,16 +120,25 @@ func (g *Guard) refusalKind() ErrorKind {
 // credential has nothing to remember about it. Through updateIf, because this
 // runs on every successful call — every Status, so every uncached page render —
 // and a healthy guard with no memory must not pay an fsync for each one.
+//
+// THE ORDER IS THE POINT (go-review M1): the count first, so any rejection sent
+// before this success reads as stale; the hold reset INSIDE the lock
+// recordRotationExit decides under, so a hold that began just before cannot be
+// set again just after.
 func (g *Guard) nodeAccepted() {
+	g.acceptances.Add(1)
 	g.rotation.Success()
-	g.holdingExit.Store(false)
 	if err := g.state.updateIf(func(st *State) bool {
+		g.holdingExit.Store(false)
 		if st.RotationExit == nil {
 			return false
 		}
 		st.RotationExit = nil
 		return true
 	}); err != nil {
+		// The state would not load, so no decision can have run under the lock
+		// either; the hold still ends, because the node answered.
+		g.holdingExit.Store(false)
 		g.log.Warn("could not clear the record of the last rotation exit", "error", err.Error())
 	}
 }
