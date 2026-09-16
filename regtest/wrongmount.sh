@@ -88,15 +88,29 @@ die()  { printf '   \033[31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 guard_id()  { docker compose ps -q guard; }
 inspect()   { docker inspect -f "$2" "$1"; }
 inode()     { ls -i "$1" | awk '{print $1}'; }
+csrf()      { grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//'; }
+# How many times the guard has died in this run, from the die-event watcher.
+deaths()    { wc -l < "$EVENTS" | tr -d ' '; }
+# An RFC3339 timestamp on stdin, as epoch seconds. slog and Go's JSON write
+# NANOSECONDS and datetime.fromisoformat takes at most micro, so the fraction is
+# trimmed first.
+iso_epoch() {
+  python3 -c '
+import sys, re, datetime
+raw = sys.stdin.read().strip()
+raw = re.sub(r"\.(\d{6})\d*", r".\1", raw).replace("Z", "+00:00")
+print(int(datetime.datetime.fromisoformat(raw).timestamp()))'
+}
 login() {
   local tok
-  tok=$(curl -s -c "$JAR" "$APP/login" | grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+  tok=$(curl -s -c "$JAR" "$APP/login" | csrf)
   curl -s -b "$JAR" -c "$JAR" -X POST "$APP/login" \
     --data-urlencode "csrf_token=$tok" --data-urlencode "password=$PASS" -o /dev/null
 }
 page() { curl -s -b "$JAR" "$APP/$1"; }
 # The guard's own state file, from its volume. Never printed: it holds the hash.
-guard_state() { docker run --rm -v brollyregtest_guard-data:/g "$TOOL_IMAGE" cat /g/guard-state.json; }
+GUARD_DATA_VOLUME="${GUARD_DATA_VOLUME:-brollyregtest_guard-data}"
+guard_state() { docker run --rm -v "$GUARD_DATA_VOLUME:/g" "$TOOL_IMAGE" cat /g/guard-state.json; }
 # Whether that file holds a rotation exit: 1 or 0, or the script dies. Captured
 # before it is searched, and counted with grep -c: a read that failed must not
 # read as "no memory", and grep -q under pipefail can turn a match into SIGPIPE.
@@ -138,13 +152,7 @@ say "0. baseline"
 RUN_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RUN_START_EPOCH=$(date -u +%s)
 glog() { docker compose logs --since "$RUN_START" "$@" 2>&1; }
-log_epoch() {
-  echo "$1" | grep -o '"time":"[^"]*"' | head -1 | sed 's/.*"time":"//;s/"//' | python3 -c '
-import sys, re, datetime
-raw = sys.stdin.read().strip()
-raw = re.sub(r"\.(\d{6})\d*", r".\1", raw).replace("Z", "+00:00")
-print(int(datetime.datetime.fromisoformat(raw).timestamp()))'
-}
+log_epoch() { echo "$1" | grep -o '"time":"[^"]*"' | head -1 | sed 's/.*"time":"//;s/"//' | iso_epoch; }
 require_from_this_run() {
   local when; when=$(log_epoch "$2")
   [ -n "$when" ] || die "could not read a timestamp out of the $1 line"
@@ -196,14 +204,14 @@ say "2. the first rejection run: one exit, code 3"
 # three rejections that trip are the guard's own probes. The server's own
 # five-minute guard poll would arm it too, only slower. Rendered again every 15s
 # in case the first landed on the page's ten-second status cache.
-START=$(date +%s)
+START=$(date +%s); RENDERED=0
 while [ $(( $(date +%s) - START )) -lt "$TRIP_TIMEOUT" ]; do
   [ -s "$EVENTS" ] && break
-  page node >/dev/null || true
-  sleep 15
+  if [ $(( $(date +%s) - RENDERED )) -ge 15 ]; then page node >/dev/null || true; RENDERED=$(date +%s); fi
+  sleep 1
 done
 [ -s "$EVENTS" ] || die "the guard did not exit within ${TRIP_TIMEOUT}s of being handed a rejected admin.macaroon"
-[ "$(wc -l < "$EVENTS" | tr -d ' ')" = "1" ] || die "the guard died $(wc -l < "$EVENTS" | tr -d ' ') times already: $(cat "$EVENTS")"
+[ "$(deaths)" = "1" ] || die "the guard died $(deaths) times already: $(cat "$EVENTS")"
 [ "$(awk 'END{print $2}' "$EVENTS")" = "3" ] \
   || die "the guard exited $(awk 'END{print $2}' "$EVENTS"); the rotation exit is 3 (exitRotation)"
 ROTATE_LINE=$(glog guard | grep '"audit":"macaroon.rotate"' | tail -1)
@@ -230,7 +238,7 @@ while [ $(( $(date +%s) - START )) -lt "$TRIP_TIMEOUT" ]; do
   page node >/dev/null || true   # arms only, as in step 2; the startup check usually has already
   STILL=$(glog guard | grep '"audit":"preflight.refuse"' | grep "$STILL_REJECTED" | tail -1 || true)
   [ -n "$STILL" ] && break
-  [ "$(wc -l < "$EVENTS" | tr -d ' ')" = "1" ] \
+  [ "$(deaths)" = "1" ] \
     || die "the guard exited a SECOND time over the same bytes — the crash loop as0.10 exists to end (is this stack running the working tree?): $(tail -1 "$EVENTS")"
   sleep 5
 done
@@ -238,8 +246,9 @@ done
 require_from_this_run "preflight.refuse" "$STILL"
 TRANSITION_AT=$(log_epoch "$STILL")
 ok "the second rejection run reached the threshold and said so instead of exiting"
-while [ $(( $(date -u +%s) - TRANSITION_AT )) -lt "$HOLD_SECONDS" ]; do sleep 5; done
-[ "$(wc -l < "$EVENTS" | tr -d ' ')" = "1" ] || die "the guard exited again after the transition: $(tail -1 "$EVENTS")"
+HELD=$(( $(date -u +%s) - TRANSITION_AT ))
+[ "$HELD" -ge "$HOLD_SECONDS" ] || sleep $(( HOLD_SECONDS - HELD ))
+[ "$(deaths)" = "1" ] || die "the guard exited again after the transition: $(tail -1 "$EVENTS")"
 [ "$(inspect "$GUARD" '{{.State.StartedAt}}')" = "$G_STARTED_1" ] || die "the guard's StartedAt moved during the hold"
 [ "$(inspect "$GUARD" '{{.RestartCount}}')" = "$G_RESTARTS_1" ] || die "the guard restarted during the hold"
 ok "still up ${HOLD_SECONDS}s after the transition: StartedAt unchanged, restarts=$G_RESTARTS_1, one die event in the run"
@@ -250,29 +259,28 @@ COUNT=$(glog guard | grep '"audit":"preflight.refuse"' | grep -c "$STILL_REJECTE
 [ "$COUNT" = "1" ] || die "the unchanged-mount preflight.refuse was logged $COUNT times by this run, want exactly 1 — every probe after the transition is the same finding"
 ok "audit=preflight.refuse logged once by this run, across $(( $(date -u +%s) - TRANSITION_AT ))s of probing"
 ROWS=0
-for i in $(seq 1 60); do
+for i in $(seq 1 12); do
   page node >/dev/null || true   # a render is what makes the server collect the guard's events
   ROWS=$(sql "SELECT COUNT(*) FROM audit_events WHERE event='preflight.refuse' AND detail LIKE '%exited_for_rotation_at%' AND created_at >= $RUN_START_EPOCH;")
   [ "$ROWS" -gt 0 ] && break
-  sleep 2
+  sleep 10   # the page's status cache: a render inside it collects nothing new
 done
 [ "$ROWS" = "1" ] || die "audit_events holds $ROWS unchanged-mount preflight.refuse rows from this run, want 1 (§12's durable half, d46.18)"
 ok "and it reached audit_events, once"
 
 # ---------------------------------------------------------------------------
 say "5. the pages say what is wrong"
+says_why() { case "$1" in "no — your node rejects the admin macaroon"*) return 0 ;; esac; return 1; }
 VERDICT=""; LINE=""
 for i in $(seq 1 30); do
   VERDICT=$(security_verdict); LINE=$(node_guard_line)
-  [ "$VERDICT" = "FAIL" ] && case "$LINE" in "no — your node rejects the admin macaroon"*) true ;; *) false ;; esac && break
+  [ "$VERDICT" = "FAIL" ] && says_why "$LINE" && break
   sleep 2
 done
 [ "$VERDICT" = "FAIL" ] || die "the Security row \"$SECURITY_TITLE\" is \"$VERDICT\", want FAIL"
 ok "Security: \"$SECURITY_TITLE\" — FAIL"
-case "$LINE" in
-  "no — your node rejects the admin macaroon"*) ok "Node: LND reachable from the guard — $LINE" ;;
-  *) die "the Node page's guard line is \"$LINE\"; want it to say no, and why" ;;
-esac
+says_why "$LINE" || die "the Node page's guard line is \"$LINE\"; want it to say no, and why"
+ok "Node: LND reachable from the guard — $LINE"
 
 # ---------------------------------------------------------------------------
 say "6. the repair: the real bytes back in place, and a restart"
@@ -282,11 +290,12 @@ cmp -s "$LNDDIR/admin.macaroon" "$REAL" || die "the restore did not write the re
 docker compose restart guard >/dev/null
 ok "real admin.macaroon restored in place; guard restarted"
 for i in $(seq 1 60); do
-  [ "$(node_guard_line)" = "yes" ] && [ "$(security_verdict)" = "pass" ] && break
+  LINE=$(node_guard_line); VERDICT=$(security_verdict)
+  [ "$LINE" = "yes" ] && [ "$VERDICT" = "pass" ] && break
   sleep 2
 done
-[ "$(node_guard_line)" = "yes" ] || die "the Node page still says \"$(node_guard_line)\" after the repair"
-[ "$(security_verdict)" = "pass" ] || die "the Security row is \"$(security_verdict)\" after the repair, want pass"
+[ "$LINE" = "yes" ] || die "the Node page still says \"$LINE\" after the repair"
+[ "$VERDICT" = "pass" ] || die "the Security row is \"$VERDICT\" after the repair, want pass"
 ok "the guard reaches LND again, and the Security row passes"
 CHANGED=$(glog guard | grep 'has changed since the guard exited for rotation' | tail -1 || true)
 [ -n "$CHANGED" ] || die "the restarted guard did not log that the mounted file had changed"
@@ -299,16 +308,13 @@ ok "the memory is cleared"
 # receive bake it refuses a repeat by design (20i.3), and that refusal is not
 # the admin macaroon's doing — so the half is skipped out loud rather than
 # failed or faked.
-# Nanoseconds trimmed to micro before parsing, as log_epoch does.
 STATE=$(guard_state) || die "could not read guard-state.json from the guard's volume"
-BAKED_AT=$(printf '%s' "$STATE" | python3 -c '
-import sys, json, re, datetime
-v = json.load(sys.stdin).get("receive_baked_at", "")
-v = re.sub(r"\.(\d{6})\d*", r".\1", v).replace("Z", "+00:00")
-print(int(datetime.datetime.fromisoformat(v).timestamp()) if v else 0)')
+BAKED=$(printf '%s' "$STATE" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("receive_baked_at", ""))')
+BAKED_AT=0
+[ -n "$BAKED" ] && BAKED_AT=$(printf '%s' "$BAKED" | iso_epoch)
 AGE=$(( $(date -u +%s) - BAKED_AT ))
 if [ "$AGE" -ge 1800 ]; then
-  TOK=$(page node | grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')
+  TOK=$(page node | csrf)
   FLASH=$(curl -s -b "$JAR" -o /dev/null -w '%{redirect_url}' -X POST "$APP/node/relink" --data-urlencode "csrf_token=$TOK")
   case "$FLASH" in
     *flash=saved*) ok "Re-link baked a receive macaroon with the restored admin.macaroon" ;;

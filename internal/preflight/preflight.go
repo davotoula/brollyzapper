@@ -448,8 +448,8 @@ func Run(ctx context.Context, in Inputs) Report {
 	report.MismatchedAddress = mismatchedAddress
 	serverCredential, probed := serverCredentialCheck(in)
 	report.ServerCredential = probed
-	adminMacaroon, adminRejected := guardAdminMacaroonCheck(state, broker)
-	report.AdminMacaroonRejected = adminRejected
+	adminMacaroon := guardAdminMacaroonCheck(state, broker)
+	report.AdminMacaroonRejected = adminMacaroon.State == Fail
 	report.Checks = append(report.Checks,
 		nodeCheck(state, mismatchedAddress != ""),
 		mismatch,
@@ -710,7 +710,7 @@ func guardCheck(broker brokerState) Check {
 // credential for its ADDRESS, which here is false. Sending needs no block of its
 // own: a guard the node rejects cannot register the middleware, and the
 // middleware row already blocks sending.
-func guardAdminMacaroonCheck(state lnd.State, broker brokerState) (Check, bool) {
+func guardAdminMacaroonCheck(state lnd.State, broker brokerState) Check {
 	c := Check{
 		ID:     CheckGuardAdminMacaroon,
 		Title:  "Your node accepts the admin macaroon mounted into the guard",
@@ -720,15 +720,15 @@ func guardAdminMacaroonCheck(state lnd.State, broker brokerState) (Check, bool) 
 	switch {
 	case !broker.wired:
 		notChecked(&c, unwired)
-		return c, false
+		return c
 	case broker.err != nil:
 		notChecked(&c, guardDown)
-		return c, false
+		return c
 	}
 	status := broker.status
 	if status.LNDReachable || status.RefusalKind != guard.KindAdminMacaroonStillRejected {
 		c.State = Pass
-		return c, false
+		return c
 	}
 	c.State = Fail
 	c.Detail = "Your node rejects the admin macaroon mounted into the guard, and it is the same file " +
@@ -741,7 +741,7 @@ func guardAdminMacaroonCheck(state lnd.State, broker brokerState) (Check, bool) 
 		c.Detail += " The app keeps receiving until its current credential expires at " +
 			status.ReceiveExpiry.UTC().Format("2006-01-02 15:04 UTC") + ", and cannot renew it after that."
 	}
-	return c, true
+	return c
 }
 
 // credentialKind is what differs between §11's rows for the two credentials

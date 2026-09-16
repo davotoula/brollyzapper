@@ -1059,6 +1059,10 @@ var auditWriters = []auditWriter{
 		"operator enabling sending, by the renewal tick, or by the node rejecting a credential " +
 		"— none of which a stranger can drive faster than the guard's own MinBakeInterval and " +
 		"wouldRepeatItself allow. That refusal is itself audited and bounded in spend.go."},
+	{file: "internal/guard/rotationmemory.go", why: "the held rotation exit (as0.10). One row per " +
+		"transition into holding, and only the guard's OWN probes reach it — a caller arms the " +
+		"probe loop and never advances it (as0.8) — while the once-guard resets only on the node " +
+		"accepting the guard's admin macaroon. Nothing the server sends changes how often it fires."},
 	{file: "internal/guard/orphans.go", why: "the unattended root key sweep (2o1). It runs on " +
 		"the guard's own schedule — once at startup and once per hourly renewal tick — and " +
 		"writes at most one row per pass, however many keys the pass revoked, so the rate is " +

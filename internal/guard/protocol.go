@@ -225,12 +225,13 @@ type Status struct {
 	SpendUsedMsat  int64 `json:"spend_used_msat,omitempty"`
 	SpendLimitMsat int64 `json:"spend_limit_msat,omitempty"`
 	LNDReachable   bool  `json:"lnd_reachable"`
-	// RefusalKind is the kind of the last bake refusal, or of the guard's refusal
-	// to exit for rotation a second time over the same bytes (as0.10), as one
-	// token from ErrorKinds. Typed like Response.ErrorKind one struct over, and for the
-	// same reason: the type is a string underneath, so a build that receives a
-	// token it does not know still carries it faithfully — knownKind is what
-	// turns an unrecognised one into "no kind", on the way out of the socket.
+	// RefusalKind is the kind of the last bake refusal — or, while the guard is
+	// withholding a second rotation exit, KindAdminMacaroonStillRejected (as0.10)
+	// — as one token from ErrorKinds. Typed like Response.ErrorKind one struct
+	// over, and for the same reason: the type is a string underneath, so a build
+	// that receives a token it does not know still carries it faithfully —
+	// knownKind is what turns an unrecognised one into "no kind", on the way out
+	// of the socket.
 	RefusalKind ErrorKind `json:"refusal_kind,omitempty"`
 	// CredentialAddress is the address the guard locks both credentials to —
 	// SERVER_IP, or the network CIDR when only that is set. A value, not prose.
@@ -337,17 +338,15 @@ const KindAuthorisationRequired ErrorKind = "authorisation_required"
 const KindAddressMismatch ErrorKind = "address_mismatch"
 
 // KindAdminMacaroonStillRejected is the guard declining to exit for rotation a
-// second time (as0.10): the node rejects admin.macaroon again, and the file
-// mounted at the guard's admin-macaroon path holds the same bytes it held when
-// the guard last exited for rotation. So the restart re-resolved nothing, this
-// is not a rotation, and another restart would be the crash loop §11 forbids.
+// second time over the same mounted bytes (as0.10; the reasoning is on
+// RotationExit).
 //
 // A STATUS KIND, NOT A RESPONSE ONE. No operation is refused with it — the
 // guard stays up, answers Status and keeps probing — so it travels only on
 // Status.RefusalKind, and a successful call to the node clears it.
 const KindAdminMacaroonStillRejected ErrorKind = "admin_macaroon_still_rejected"
 
-// ErrorKinds is every token this field may carry. A fourth entry is a decision
+// ErrorKinds is every token this field may carry. Another entry is a decision
 // about what the page says, not an implementation detail — see the test that
 // pins this list, and ErrorKind's expiry condition on Response.
 var ErrorKinds = []ErrorKind{KindCapPair, KindAuthorisationRequired, KindAddressMismatch,

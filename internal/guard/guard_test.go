@@ -1168,12 +1168,7 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 	// over the same volumes, a node still rejecting — and read off Status.
 	stuck := lndtest.Start(t)
 	stuck.SetReject(true)
-	stuckDirs := guardDirs(t, stuck)
-	exitForRotation(t, stuck, stuckDirs, guard.Options{})
-	restarted := openGuard(t, stuck, stuckDirs, fastProbes(guard.Options{}))
-	serving := startServing(t, restarted)
-	_ = restarted.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
-	serving.waitForDegraded(t)
+	degradedGuard(t, stuck, guardDirs(t, stuck))
 	raised[guard.KindAdminMacaroonStillRejected] = true
 
 	for _, kind := range guard.ErrorKinds {

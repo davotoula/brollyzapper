@@ -13,17 +13,13 @@ import (
 )
 
 // as0.10: the guard stayed up instead of crash-looping, and this row is what it
-// stayed up to say.
+// stayed up to say. Why it is keyed on the guard's Status alone, and not on
+// lnd.StateRelink, is on guardAdminMacaroonCheck — the Ready case in the table is
+// the one a row keyed on the server's state would miss.
 //
-// KEYED ON THE GUARD'S STATUS ALONE, never on lnd.StateRelink. In the scenario
-// the row exists for, only the guard's MOUNT is wrong: the server's own receive
-// credential was baked before and still works, so the server is Ready while the
-// guard cannot talk to the node. A row that also required the server's
-// rejection would never fire — the ready case is in the table for that reason.
-//
-// TWO FACTS: the kind, and the node not answering the guard. The kind is read
-// before Status asks the node, so a Status whose own GetInfo just succeeded can
-// still carry it once; reachability is the half that says it is still true.
+// TWO FACTS: the kind, and the node not answering the guard. The guard reads the
+// kind after its own GetInfo, so the two agree within one answer; the row asks
+// for both anyway, and the reachable case pins that it does.
 func TestTheGuardAdminMacaroonRowNeedsTheKindAndAnUnreachableNode(t *testing.T) {
 	stuck := lnd.BrokerStatus{RefusalKind: guard.KindAdminMacaroonStillRejected, ReceiveMacaroonPresent: true}
 	for _, tc := range []struct {

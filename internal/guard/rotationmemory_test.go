@@ -20,13 +20,8 @@ import (
 	"github.com/davotoula/brollyzapper/internal/logging"
 )
 
-// as0.10: the rotation exit is sanctioned ONCE per rotation, not forever.
-//
-// Since as0.8 the guard reaches its threshold unattended, which is right for a
-// stale bind mount and wrong for a PERMANENTLY wrong one: rejection, three
-// probes, exit 3, restart into the same bytes, rejection, … — a crash loop §11
-// forbids, and the guard being down is exactly what takes the Node and Security
-// pages' diagnosis away. These tests hold the memory that breaks the loop.
+// as0.10: the rotation exit is sanctioned ONCE per rotation, not forever. The
+// reasoning is on guard.RotationExit; these tests hold the memory it describes.
 
 // fastProbes is the options every test here runs a serving guard under: probes
 // that do not make the test wait, and an exit delay that does not either.
@@ -36,27 +31,6 @@ func fastProbes(opts guard.Options) guard.Options {
 		opts.Sleep = func(context.Context, time.Duration) error { return nil }
 	}
 	return opts
-}
-
-// serving is a guard running Serve over the socket, with Serve's result
-// observable — serveGuard discards it, and whether Serve RETURNED is the claim.
-type serving struct {
-	client *guard.SocketClient
-	done   chan error
-}
-
-func startServing(t *testing.T, g *guard.Guard) serving {
-	t.Helper()
-	socket := socketPath(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-	s := serving{client: guard.NewSocketClient(socket, guard.DiscardEvents), done: make(chan error, 1)}
-	go func() { s.done <- g.Serve(ctx, socket) }()
-	lndtest.WaitFor(t, "the socket to accept", func() bool {
-		_, err := os.Stat(socket)
-		return err == nil
-	})
-	return s
 }
 
 // waitForExit is the rotation exit, or the test's failure to see one.
@@ -72,25 +46,27 @@ func (s serving) waitForExit(t *testing.T, why string) {
 	}
 }
 
-// waitForDegraded waits for the kind to reach Status over the socket — and fails
+// assertStillServing fails if Serve has returned — as the crash loop, which is
+// the only reason a guard under these tests would.
+func (s serving) assertStillServing(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-s.done:
+		t.Fatalf("Serve returned %v; over the same rejected bytes that is the crash loop — "+
+			"restarting into the same bad file cannot fix it", err)
+	default:
+	}
+}
+
+// waitForDegraded waits for the kind to reach Status over the socket, and fails
 // AS THE CRASH LOOP, not as a timeout, if Serve returns first.
 func (s serving) waitForDegraded(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case err := <-s.done:
-			t.Fatalf("Serve returned %v on the second rejection run over the same bytes; that is "+
-				"the crash loop — restarting into the same bad file cannot fix it", err)
-		default:
-		}
-		if status, err := s.client.Status(t.Context()); err == nil &&
-			status.RefusalKind == guard.KindAdminMacaroonStillRejected {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("Status never carried %q", guard.KindAdminMacaroonStillRejected)
+	lndtest.WaitFor(t, "Status to carry "+string(guard.KindAdminMacaroonStillRejected), func() bool {
+		s.assertStillServing(t)
+		status, err := s.client.Status(t.Context())
+		return err == nil && status.RefusalKind == guard.KindAdminMacaroonStillRejected
+	})
 }
 
 // exitForRotation drives a fresh guard over d through its one sanctioned exit,
@@ -104,18 +80,17 @@ func exitForRotation(t *testing.T, node *lndtest.Node, d dirs, opts guard.Option
 	s.waitForExit(t, "the first rejection run, which is the one exit §6 sanctions")
 }
 
-// storedState reads guard-state.json the way a restarted guard would find it.
-func storedState(t *testing.T, d dirs) guard.State {
+// degradedGuard is the state as0.10 exists for: one rotation exit over d, a
+// restart over the same volumes and the same bytes, and a node still rejecting
+// them — served, and holding its second exit. The node must already be rejecting.
+func degradedGuard(t *testing.T, node *lndtest.Node, d dirs) (*guard.Guard, serving) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(d.data, "guard-state.json"))
-	if err != nil {
-		t.Fatalf("reading the guard's state: %v", err)
-	}
-	var st guard.State
-	if err := json.Unmarshal(raw, &st); err != nil {
-		t.Fatalf("parsing the guard's state: %v", err)
-	}
-	return st
+	exitForRotation(t, node, d, guard.Options{})
+	g := openGuard(t, node, d, fastProbes(guard.Options{}))
+	s := startServing(t, g)
+	_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
+	s.waitForDegraded(t)
+	return g, s
 }
 
 // mountedIdentity is the content hash of what is mounted at the guard's
@@ -161,7 +136,7 @@ func (b *lockedBuffer) String() string {
 
 func capturedLog() (*slog.Logger, *lockedBuffer) {
 	sink := &lockedBuffer{}
-	return slog.New(slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})), sink
+	return logging.New(sink, logging.NewLevelVar(slog.LevelDebug)), sink
 }
 
 // The exit is written down BEFORE the process leaves: the settling delay is the
@@ -217,15 +192,7 @@ func TestASecondRejectionRunOverTheSameBytesDoesNotExitAgain(t *testing.T) {
 	node := lndtest.Start(t)
 	node.SetReject(true)
 	d := guardDirs(t, node)
-	exitForRotation(t, node, d, guard.Options{})
-
-	// The restart: the same volumes, the same mounted bytes, a node that still
-	// rejects them.
-	g := openGuard(t, node, d, fastProbes(guard.Options{}))
-	s := startServing(t, g)
-	_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
-
-	s.waitForDegraded(t)
+	_, s := degradedGuard(t, node, d)
 	status, err := s.client.Status(t.Context())
 	if err != nil {
 		t.Fatalf("Status over the socket: %v", err)
@@ -241,14 +208,9 @@ func TestASecondRejectionRunOverTheSameBytesDoesNotExitAgain(t *testing.T) {
 	lndtest.WaitFor(t, "the probe loop to keep probing past the threshold", func() bool {
 		return len(node.SeenMacaroons()) >= seen+3*guard.DefaultRotationThreshold
 	})
-	select {
-	case err := <-s.done:
-		t.Fatalf("Serve returned %v on the second rejection run over the same bytes; that is the "+
-			"crash loop — restarting into the same bad file cannot fix it", err)
-	default:
-	}
+	s.assertStillServing(t)
 
-	st := storedState(t, d)
+	st := readGuardState(t, d.data)
 	if st.RotationExit == nil {
 		t.Error("the memory was cleared although nothing succeeded; the next restart would exit again")
 	}
@@ -279,7 +241,7 @@ func TestAChangedAdminMacaroonGetsItsOwnExit(t *testing.T) {
 		lndtest.WriteFile(t, d.admin, []byte{0xad, 0x22, 0x22, 0x22})
 		log, sink := capturedLog()
 		g := openGuard(t, node, d, fastProbes(guard.Options{Log: log}))
-		if st := storedState(t, d); st.RotationExit != nil {
+		if st := readGuardState(t, d.data); st.RotationExit != nil {
 			t.Error("the guard started over a different admin macaroon and kept the memory of " +
 				"the old one")
 		}
@@ -291,7 +253,7 @@ func TestAChangedAdminMacaroonGetsItsOwnExit(t *testing.T) {
 		s := startServing(t, g)
 		_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
 		s.waitForExit(t, "a different file, still rejected, is a new rotation and gets its one exit")
-		if st := storedState(t, d); st.RotationExit == nil || st.RotationExit.MountedSHA256 != mountedIdentity(t, d) {
+		if st := readGuardState(t, d.data); st.RotationExit == nil || st.RotationExit.MountedSHA256 != mountedIdentity(t, d) {
 			t.Errorf("the second exit recorded %+v, want the identity of the file now mounted", st.RotationExit)
 		}
 	})
@@ -322,17 +284,12 @@ func TestASuccessClearsTheMemoryAndAHealthyGuardNeverWrites(t *testing.T) {
 	node := lndtest.Start(t)
 	node.SetReject(true)
 	d := guardDirs(t, node)
-	exitForRotation(t, node, d, guard.Options{})
-
-	g := openGuard(t, node, d, fastProbes(guard.Options{}))
-	s := startServing(t, g)
-	_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
-	s.waitForDegraded(t)
+	g, s := degradedGuard(t, node, d)
 
 	// The operator fixes the mount in place; the next PROBE sees it.
 	node.SetReject(false)
 	lndtest.WaitFor(t, "the probe loop to clear the memory", func() bool {
-		return storedState(t, d).RotationExit == nil
+		return readGuardState(t, d.data).RotationExit == nil
 	})
 	status, err := s.client.Status(t.Context())
 	if err != nil {
@@ -370,11 +327,7 @@ func TestASuccessClearsTheMemoryAndAHealthyGuardNeverWrites(t *testing.T) {
 		t.Error("guard-state.json was rewritten by successful calls to a healthy node; clearing " +
 			"the memory must write only when there is a memory to clear")
 	}
-	select {
-	case err := <-s.done:
-		t.Fatalf("Serve returned %v on a guard whose node accepts it", err)
-	default:
-	}
+	s.assertStillServing(t)
 }
 
 // Losing the memory must not cost the recovery: a state file that cannot be
