@@ -11,6 +11,8 @@ package guard
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,7 +80,8 @@ type Guard struct {
 	// goroutine sets it while the socket's goroutines read it in Status.
 	middlewareUp atomic.Bool
 	// lastRefusal is the kind of the most recent bake refusal, or "" when the
-	// last bake succeeded. Status relays it so the Node page can say something
+	// last bake succeeded — or KindAdminMacaroonStillRejected while the guard is
+	// withholding a second rotation exit, until the node accepts a call (as0.10). Status relays it so the Node page can say something
 	// the operator can act on instead of "relink" (`20i.3`).
 	//
 	// A KIND, NEVER THE SENTENCE. The reason itself already reaches the operator
@@ -112,6 +115,15 @@ type Guard struct {
 	sleep           func(ctx context.Context, d time.Duration) error
 
 	rotated chan struct{}
+	// adminMacaroonFile is the path the guard's node client reads admin.macaroon
+	// from on every call. Kept so the rotation exit can record WHICH bytes it
+	// exited over, and a later run can tell the same file from a new one
+	// (as0.10).
+	adminMacaroonFile string
+	// stillRejectedSaid is the once-guard on the degraded transition's audit
+	// event (as0.10). Its own, not `rotated`: closing that ends Serve, which is
+	// the exit this state exists to withhold.
+	stillRejectedSaid atomic.Bool
 
 	// writeCredential is how the guard writes to the credential volume, and it
 	// is WriteCredential outside a test. A field so a test can interrupt a bake
@@ -170,7 +182,7 @@ func New(cfg *config.Guard, opts Options) (*Guard, error) {
 		lnd.FileCredentials(cfg.LNDCertFile, cfg.LNDAdminMacaroonFile),
 		lnd.Options{Log: log})
 
-	return &Guard{
+	g := &Guard{
 		node:                  node,
 		credentialsDir:        cfg.CredentialsDir,
 		certSourcePath:        cfg.LNDCertFile,
@@ -191,7 +203,10 @@ func New(cfg *config.Guard, opts Options) (*Guard, error) {
 		rotated:           make(chan struct{}),
 		writeCredential:   WriteCredential,
 		probeInterval:     probeInterval,
-	}, nil
+		adminMacaroonFile: cfg.LNDAdminMacaroonFile,
+	}
+	g.forgetExitOverAnotherFile()
+	return g, nil
 }
 
 // Close releases the connection to LND.
@@ -925,7 +940,7 @@ func (g *Guard) dispatch(ctx context.Context, req Request) Response {
 // will ever see the replacement (§6).
 func (g *Guard) observe(ctx context.Context, err error) error {
 	if err == nil {
-		g.rotation.Success()
+		g.nodeAccepted()
 		return nil
 	}
 	if !lnd.IsAuthFailure(err) {
@@ -945,7 +960,7 @@ func (g *Guard) observe(ctx context.Context, err error) error {
 // that advance the run toward §6's threshold.
 func (g *Guard) observeProbe(ctx context.Context, err error) {
 	if err == nil {
-		g.rotation.Success()
+		g.nodeAccepted()
 		return
 	}
 	if !lnd.IsAuthFailure(err) {
@@ -956,10 +971,142 @@ func (g *Guard) observeProbe(ctx context.Context, err error) {
 	if !g.rotation.ProbeFailed() {
 		return
 	}
+	// Once past the threshold every further probe lands here, so this is asked
+	// once per probe while degraded: a file read and a state read every
+	// ProbeInterval, and it is what lets a file changed IN PLACE while degraded
+	// still get its exit.
+	identity := g.mountedIdentity()
+	if g.stillRejected(ctx, identity) {
+		return
+	}
 	g.audit(ctx, slog.LevelWarn, "lnd rejected admin.macaroon repeatedly; the node's macaroons "+
 		"look rotated. exiting so the container restart re-resolves the bind mount",
 		logging.EventMacaroonRotate, nil)
+	// BEFORE the exit is declared, and a failure does not stop it: without the
+	// memory the next run behaves as every run did before as0.10, which for a
+	// genuine rotation is the recovery and for a wrong mount is one more lap.
+	// A guard that stayed up over a real rotation because its disk was full
+	// would be the worse failure.
+	at := g.rotation.clock()
+	if err := g.state.update(func(st *State) {
+		st.RotationExit = &RotationExit{At: at, MountedSHA256: identity}
+	}); err != nil {
+		g.log.Error("could not record the rotation exit; if the restart finds the same file the "+
+			"node rejects, it will exit again", "error", err.Error())
+	}
 	g.declareRotated()
+}
+
+// stillRejected is as0.10's decision: this rejection run is over the very bytes
+// the guard last exited for rotation over, so the restart re-resolved nothing,
+// and a second exit would be the crash loop §11 forbids. The guard stays up,
+// says so through Status and one audit event, and keeps probing — a success is
+// what clears it.
+//
+// "CANNOT TELL" MEANS EXIT, as before as0.10. An unreadable mount or state has
+// no identity to compare, and withholding the one recovery a real rotation has
+// on a guess would trade a lap of a loop for a guard that never recovers. The
+// file cannot be unreadable for long here anyway: the node only rejects a
+// macaroon it was sent.
+func (g *Guard) stillRejected(ctx context.Context, identity string) bool {
+	if identity == "" {
+		return false
+	}
+	state, err := g.state.load()
+	if err != nil {
+		g.log.Warn("could not read whether the guard has already exited over this admin "+
+			"macaroon; treating the rejection as a rotation", "error", err.Error())
+		return false
+	}
+	exit := state.RotationExit
+	if exit == nil || exit.MountedSHA256 != identity {
+		return false
+	}
+	g.setLastRefusal(KindAdminMacaroonStillRejected)
+	if g.stillRejectedSaid.CompareAndSwap(false, true) {
+		// Through the auditor, so it reaches the Security page's trail and not
+		// only a log the restart policy would otherwise have been rotating away.
+		// The time of the earlier exit is not a secret and is the operator's
+		// evidence that this is the second lap; the hash never appears.
+		g.audit(ctx, slog.LevelWarn, "lnd still rejects admin.macaroon, and the file mounted into "+
+			"the guard is the one it rejected before the last rotation restart: this is not a "+
+			"rotation, so the guard is staying up. mount the node's current admin.macaroon, then "+
+			"restart the guard",
+			logging.EventPreflightRefuse, map[string]string{
+				"exited_for_rotation_at": exit.At.UTC().Format(time.RFC3339),
+			})
+	}
+	return true
+}
+
+// nodeAccepted is every observation that the node accepted admin.macaroon.
+//
+// It clears the as0.10 memory along with the detector's run: a node that accepts
+// this credential has nothing to remember about it. Through updateIf, because
+// this runs on every successful call — every Status, so every page render — and
+// a healthy guard with no memory must not pay an fsync for each one.
+//
+// The kind is cleared only if it is THIS kind. The address refusal is a
+// different fact, set while the node answers, and a success is not evidence
+// against it.
+func (g *Guard) nodeAccepted() {
+	g.rotation.Success()
+	g.lastRefusal.CompareAndSwap(KindAdminMacaroonStillRejected, ErrorKind(""))
+	if err := g.state.updateIf(func(st *State) bool {
+		if st.RotationExit == nil {
+			return false
+		}
+		st.RotationExit = nil
+		return true
+	}); err != nil {
+		g.log.Warn("could not clear the record of the last rotation exit", "error", err.Error())
+	}
+}
+
+// forgetExitOverAnotherFile clears the memory at start when the file mounted now
+// is not the one the guard exited over (as0.10) — the restart re-resolved the
+// mount onto something new, so what the memory was about is gone, and a second
+// rotation gets its own exit.
+//
+// Done at start for the LINE, not for the decision: stillRejected compares the
+// identity itself, so a guard that skipped this would still exit correctly. The
+// line is the operator's evidence that the fix they made was noticed, and it
+// comes before anything the node says about the new file.
+//
+// An unreadable mount leaves the memory alone: unknown is not changed.
+func (g *Guard) forgetExitOverAnotherFile() {
+	identity := g.mountedIdentity()
+	if identity == "" {
+		return
+	}
+	var exitedAt time.Time
+	if err := g.state.updateIf(func(st *State) bool {
+		if st.RotationExit == nil || st.RotationExit.MountedSHA256 == identity {
+			return false
+		}
+		exitedAt = st.RotationExit.At
+		st.RotationExit = nil
+		return true
+	}); err != nil {
+		g.log.Warn("could not read or clear the record of the last rotation exit", "error", err.Error())
+		return
+	}
+	if !exitedAt.IsZero() {
+		g.log.Info("the admin.macaroon mounted into the guard has changed since the guard exited "+
+			"for rotation; the next rejection, if any, is treated as a new rotation",
+			"exited_for_rotation_at", exitedAt.UTC().Format(time.RFC3339))
+	}
+}
+
+// mountedIdentity is the content hash of the file at the guard's admin-macaroon
+// path, or "" when it cannot be read. See RotationExit.MountedSHA256.
+func (g *Guard) mountedIdentity() string {
+	raw, err := os.ReadFile(g.adminMacaroonFile)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // probeRotation samples LND on the guard's OWN clock, so the rotation decision

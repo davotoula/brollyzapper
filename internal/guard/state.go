@@ -129,6 +129,34 @@ type State struct {
 	// the operator needs, and the secret half is never re-read from a file the
 	// guard has already written once.
 	Authorisation *Authorisation `json:"authorisation,omitempty"`
+
+	// RotationExit is the guard's memory of its own rotation exit, or nil
+	// (as0.10). See RotationExit.
+	RotationExit *RotationExit `json:"rotation_exit,omitempty"`
+}
+
+// RotationExit records that the guard exited for rotation, when, and over which
+// bytes.
+//
+// §6 sanctions that exit ONCE PER ROTATION, not forever: restarting into the
+// same bad bytes is a crash loop, which §11 forbids. Since as0.8 the guard
+// reaches its threshold unattended, so a PERMANENTLY wrong admin.macaroon — the
+// wrong file mounted, a wrong LND_ADMIN_MACAROON — crash-looped, and the guard
+// being down took away the Status that would have said why. This is what lets
+// the second run tell "the restart changed nothing" from "a new rotation".
+type RotationExit struct {
+	At time.Time `json:"at"`
+	// MountedSHA256 is the content hash of the file mounted at the guard's
+	// admin-macaroon path when it exited.
+	//
+	// THE BYTES, NOT THE INODE OR THE MTIME. "The same bad bytes" is §6's own
+	// phrase, and the bytes are the fact: a restart that changed them is a new
+	// question. An inode needs syscall.Stat_t, which macOS does not share with
+	// the Linux image; an mtime is what `cp -p` preserves. A hash of a secret is
+	// still about one, so it is kept here — in a volume the server has no mount
+	// for — and never logged. Named for the digest, not the macaroon, because it
+	// is not the macaroon (the arch rule on secret-bearing fields reads names).
+	MountedSHA256 string `json:"mounted_sha256"`
 }
 
 // maxRetainedAuditEvents bounds the ring. Nothing drains it, so this is what the

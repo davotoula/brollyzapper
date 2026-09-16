@@ -1120,7 +1120,7 @@ func TestSpendCaveatsAreVerifiedBeforeAMacaroonIsAccepted(t *testing.T) {
 // and this repo has already shipped two flash messages nothing could trigger.
 func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 	want := []guard.ErrorKind{guard.KindCapPair, guard.KindAuthorisationRequired,
-		guard.KindAddressMismatch}
+		guard.KindAddressMismatch, guard.KindAdminMacaroonStillRejected}
 	if got := guard.ErrorKinds; !slices.Equal(got, want) {
 		t.Errorf("guard.ErrorKinds = %v, want %v", got, want)
 	}
@@ -1162,6 +1162,20 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 		}
 		raised[resp.ErrorKind] = true
 	}
+	// And the one kind no operation is refused with (as0.10): the guard declining
+	// a second rotation exit over the same bytes. It reaches the wire on Status
+	// alone, so it is reached the way production reaches it — an exit, a restart
+	// over the same volumes, a node still rejecting — and read off Status.
+	stuck := lndtest.Start(t)
+	stuck.SetReject(true)
+	stuckDirs := guardDirs(t, stuck)
+	exitForRotation(t, stuck, stuckDirs, guard.Options{})
+	restarted := openGuard(t, stuck, stuckDirs, fastProbes(guard.Options{}))
+	serving := startServing(t, restarted)
+	_ = restarted.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
+	serving.waitForDegraded(t)
+	raised[guard.KindAdminMacaroonStillRejected] = true
+
 	for _, kind := range guard.ErrorKinds {
 		if !raised[kind] {
 			t.Errorf("no refusal in this test carries kind %q; the server holds copy for a "+
