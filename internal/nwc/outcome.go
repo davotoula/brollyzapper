@@ -150,9 +150,10 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 // the default log_level=info and nothing whatever in the journal.
 //
 // Ruling 5 is not overturned, only narrowed, and the split is what keeps it:
-// INFO here is bounded by the number of PAYMENTS, while the eleven idle
-// get_info/get_balance pairs in two minutes that ruling 5 was written against
-// are a client POLLING, and stay at DEBUG. make_invoice is a read for this
+// INFO here is bounded by the number of payments that SUCCEED — this line is
+// written only when the response published and carried no error — while the
+// eleven idle get_info/get_balance pairs in two minutes that ruling 5 was
+// written against are a client POLLING, and stay at DEBUG. make_invoice is a read for this
 // purpose — it moves no money and its amount is already bounded by
 // lnurl.MaxSendableMsat (l3j).
 //

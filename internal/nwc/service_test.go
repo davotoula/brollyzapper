@@ -1166,6 +1166,9 @@ func (f *fakeRelays) PublishToConnection(ctx context.Context, event gonostr.Even
 	// relay-choice line joins that zap's grep; §8's leg shares the same pool and
 	// must not inherit it. Read here because the context is the mechanism —
 	// asserting on the fake's output would only prove this fake writes no line.
+	//
+	// nil as the fallback is a SENTINEL, not how LoggerOr is called for real: it
+	// makes "nothing was attached" a nil entry here, which no real logger can be.
 	f.publishLoggers = append(f.publishLoggers, logging.LoggerOr(ctx, nil))
 	refuse := f.refusePublishes > 0
 	if refuse {
