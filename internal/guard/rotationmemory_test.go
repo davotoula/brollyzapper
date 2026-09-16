@@ -318,7 +318,7 @@ func TestAChangedAdminMacaroonGetsItsOwnExit(t *testing.T) {
 // atomic rename, so a write is a new inode, and os.SameFile says whether one
 // happened. A healthy guard must never write on success — Status runs per page
 // render, and an fsync per render is a cost nobody would see arrive.
-func TestASuccessClearsTheMemoryOnceAndAHealthyGuardNeverWrites(t *testing.T) {
+func TestASuccessClearsTheMemoryAndAHealthyGuardNeverWrites(t *testing.T) {
 	node := lndtest.Start(t)
 	node.SetReject(true)
 	d := guardDirs(t, node)

@@ -150,12 +150,13 @@ type RotationExit struct {
 	// admin-macaroon path when it exited.
 	//
 	// THE BYTES, NOT THE INODE OR THE MTIME. "The same bad bytes" is §6's own
-	// phrase, and the bytes are the fact: a restart that changed them is a new
-	// question. An inode needs syscall.Stat_t, which macOS does not share with
-	// the Linux image; an mtime is what `cp -p` preserves. A hash of a secret is
-	// still about one, so it is kept here — in a volume the server has no mount
-	// for — and never logged. Named for the digest, not the macaroon, because it
-	// is not the macaroon (the arch rule on secret-bearing fields reads names).
+	// phrase, and the bytes are what the node judges: an in-place write changes
+	// them and keeps the inode, a replacement with identical content changes the
+	// inode and nothing the node sees, and an mtime is what `cp -p` preserves. A
+	// hash of a secret is still about one, so it is kept here — in a volume the
+	// server has no mount for — and never logged. Named for the digest, not the
+	// macaroon, because it is not the macaroon (the arch rule on secret-bearing
+	// fields reads names).
 	MountedSHA256 string `json:"mounted_sha256"`
 }
 

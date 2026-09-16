@@ -703,9 +703,9 @@ func guardCheck(broker brokerState) Check {
 // server's rejection would never fire.
 //
 // BLOCKS NOTHING, decided rather than copied from the address row. Re-link cannot
-// help — the guard asks the node for a root key with the rejected credential and
-// fails before anything is created, so a click costs one refused call and no key
-// and no audit row. But blocking it needs the Node page and the handler's flash
+// help — the guard asks the node for its root key ids with the rejected
+// credential and fails before anything is created, so a click costs a refused
+// call or two and no key and no audit row. But blocking it needs the Node page and the handler's flash
 // to know a second cause, and the flash today says the node refuses the
 // credential for its ADDRESS, which here is false. Sending needs no block of its
 // own: a guard the node rejects cannot register the middleware, and the
