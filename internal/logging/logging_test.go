@@ -536,3 +536,79 @@ func TestEveryDeclaredEventIsInTheVocabulary(t *testing.T) {
 			"not a declared constant", declared, len(logging.Events))
 	}
 }
+
+// et8: LoggerOr is FromContext for a component that already HAS a logger. The
+// difference from FromContext is the whole reason it exists — FromContext falls
+// back to slog.Default(), so a pool that switched to it would lose its own
+// handler on every publish with no request in play, and every test capturing
+// that pool's output would go quiet.
+func TestLoggerOrPrefersTheContextAndFallsBackToTheCallerNotTheDefault(t *testing.T) {
+	var attached, fallback bytes.Buffer
+	level := logging.NewLevelVar(slog.LevelDebug)
+	fallbackLog := logging.New(&fallback, level)
+
+	// Identity, not output: it is the ONE assertion that distinguishes this from
+	// FromContext without reassigning the process-wide slog.Default() out from
+	// under every other test in this package.
+	if got := logging.LoggerOr(context.Background(), fallbackLog); got != fallbackLog {
+		t.Errorf("an empty context returned %p, want the caller's own logger %p — "+
+			"FromContext's slog.Default() fallback is what this exists to avoid",
+			got, fallbackLog)
+	}
+
+	ctx := logging.ContextWithLogger(context.Background(), logging.New(&attached, level))
+	logging.LoggerOr(ctx, fallbackLog).Info("a logger is on the context")
+	if attached.Len() == 0 {
+		t.Errorf("the context's logger was ignored:\n%s", fallback.String())
+	}
+	if fallback.Len() != 0 {
+		t.Errorf("the line went to the fallback as well:\n%s", fallback.String())
+	}
+}
+
+// A cancelled context does not suppress a record.
+//
+// xej moved the NWC answered line from Debug to a levelled Log(ctx, …) taking
+// the REQUEST's context, and that line exists precisely for the case where
+// something went wrong — a stalled payment, a client that gave up. If a
+// cancelled context could swallow it, the bead would have made the blindness
+// worse on exactly the requests it was filed for.
+//
+// It cannot, because New builds a plain slog.JSONHandler and the standard
+// handlers ignore the context. That is a property of a dependency rather than of
+// this package, which is why it is pinned here: nothing in the repo implements
+// slog.Handler, so this test is what would go red if one ever did and dropped
+// records on cancellation.
+func TestACancelledContextStillLogs(t *testing.T) {
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.NewLevelVar(slog.LevelDebug))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	log.Log(ctx, slog.LevelInfo, "an NWC request was answered", "connection", 1)
+
+	if !strings.Contains(buf.String(), "an NWC request was answered") {
+		t.Errorf("a cancelled context suppressed the record, so the line xej added "+
+			"would be missing on exactly the requests it exists for:\n%s", buf.String())
+	}
+}
+
+// go-review of et8: a nil logger attached to the context falls back rather than
+// being handed out. The type assertion succeeds for a typed nil, so the naive
+// form returns a *slog.Logger that panics at the first call — in the pool, some
+// publishes after the attach that caused it.
+func TestLoggerOrFallsBackWhenTheContextHoldsANilLogger(t *testing.T) {
+	var buf bytes.Buffer
+	fallback := logging.New(&buf, logging.NewLevelVar(slog.LevelDebug))
+
+	ctx := logging.ContextWithLogger(context.Background(), nil)
+
+	if got := logging.LoggerOr(ctx, fallback); got != fallback {
+		t.Fatalf("a nil logger on the context was handed back; the next call panics")
+	}
+	logging.LoggerOr(ctx, fallback).Info("still logs")
+	if buf.Len() == 0 {
+		t.Error("nothing was written through the fallback")
+	}
+}

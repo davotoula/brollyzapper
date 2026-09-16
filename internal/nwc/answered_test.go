@@ -66,6 +66,60 @@ func TestTheAnsweredLineCarriesHandleAndPublishTiming(t *testing.T) {
 	}
 }
 
+// xej: the LEVEL of the answered line, per method. Ruling 3's reasoning — "an
+// operator asking why did my phone stop paying must not need debug mode" —
+// applied to the line that explains a stall: INFO for the money-moving method,
+// DEBUG for the reads, so Amethyst's idle balance polls stay out of an
+// operator's log.
+//
+// The level is the whole bead, so this asserts it and not merely the presence
+// of a line.
+func TestTheAnsweredLineIsInfoForAPaymentAndDebugForARead(t *testing.T) {
+	cases := []struct {
+		method Method
+		setUp  func(h *harness)
+		params json.RawMessage
+		level  string
+	}{
+		{
+			method: MethodPayInvoice,
+			setUp: func(h *harness) {
+				h.grantPay()
+				h.sendEnabled(true)
+				h.decodesTo("lnbcrt1xej", 50_000, "a payment")
+			},
+			params: payParams("lnbcrt1xej", 0),
+			level:  "INFO",
+		},
+		{
+			// The one Amethyst polls, and the reason the split exists.
+			method: MethodGetBalance,
+			setUp:  func(*harness) {},
+			level:  "DEBUG",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.method), func(t *testing.T) {
+			h := newHarness(t)
+			tc.setUp(h)
+
+			if resp := h.handle(t, tc.method, tc.params); resp.Error != nil {
+				t.Fatalf("%s was refused, so the fixture is wrong: %+v", tc.method, resp.Error)
+			}
+
+			lines := answeredLines(t, h.logs.String())
+			if len(lines) != 1 {
+				t.Fatalf("%d answered lines for one %s, want 1:\n%s",
+					len(lines), tc.method, h.logs.String())
+			}
+			if lines[0]["level"] != tc.level {
+				t.Errorf("the %s answered line is at %v, want %s",
+					tc.method, lines[0]["level"], tc.level)
+			}
+		})
+	}
+}
+
 // k2z criterion 9: one relay refusing makes accepted one less than relays, on
 // that same line.
 func TestTheAnsweredLineCountsARelayThatRefused(t *testing.T) {

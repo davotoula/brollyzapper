@@ -679,7 +679,7 @@ func (s *Service) handle(ctx context.Context, conn *connection, event *gonostr.E
 	// --- 6. encrypt and publish ---------------------------------------------
 	resp, answered, sent := s.respondAndMeasure(ctx, conn, event, scheme, resp, true)
 	if sent.published && resp.Error == nil {
-		s.reportAnswered(conn, req, entered, sent)
+		s.reportAnswered(ctx, conn, req, entered, sent)
 	}
 	return resp, answered
 }
@@ -707,7 +707,13 @@ func (s *Service) advertised(ctx context.Context, conn *connection) []string {
 		if !permits(conn.row().Permissions, m) {
 			continue
 		}
-		if m == MethodPayInvoice && !sending {
+		// spends, not a comparison with pay_invoice: a spending method added to
+		// Supported() without reaching this line would be ADVERTISED to a wallet
+		// app while sending is off — a pay button on a wallet the operator has
+		// made receive-only, which is the breach this whole function exists to
+		// prevent. One map entry now answers here and at the answered line's
+		// level (xej).
+		if spends(m) && !sending {
 			continue
 		}
 		methods = append(methods, string(m))

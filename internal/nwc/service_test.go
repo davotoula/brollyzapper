@@ -72,6 +72,56 @@ func TestAnAbsurdlyLongMethodNameIsNotEchoedBack(t *testing.T) {
 	}
 }
 
+// With sending off, advertised() omits EXACTLY the methods spends() names —
+// no fewer, and no more.
+//
+// The "no fewer" half is the safety one: a spending method added to Supported()
+// without a `pay` group in methodGroup would be advertised to a wallet app on a
+// receive-only install, which is a pay button on a wallet the operator has
+// deliberately made unable to pay. Before spends() existed, advertised() asked
+// `m == MethodPayInvoice` by hand and the rule lived in a comment — this is that
+// comment turned into the one place that goes red.
+//
+// The "no more" half stops the predicate being widened into a mute: a spends()
+// that answered true for everything would satisfy the first half and hide the
+// whole wallet.
+func TestSendingOffWithholdsExactlyTheSpendingMethods(t *testing.T) {
+	h := newHarness(t)
+	h.grantPay()
+
+	h.sendEnabled(true)
+	withSending := h.service.advertised(t.Context(), h.conn)
+
+	h.sendEnabled(false)
+	withoutSending := h.service.advertised(t.Context(), h.conn)
+
+	for _, m := range Supported() {
+		name := string(m)
+		// THE ANCHOR, and the reason the loop below is not circular: every
+		// method NIP-47 defines that moves money is named for it — pay_invoice,
+		// pay_keysend, multi_pay_invoice, multi_pay_keysend — and no read method
+		// is. Without this, spends() and advertised() could agree with each
+		// other and both be wrong about a new method, which is exactly what a
+		// plant of pay_keysend carrying the `invoice` group did: consistent,
+		// silent, and advertising a spending method on a receive-only wallet.
+		if strings.Contains(name, "pay") != spends(m) {
+			t.Errorf("%s: spends()=%v, but its NAME says otherwise — a payment method "+
+				"reached Supported() without store.PermissionPay in methodGroup, so "+
+				"nothing withholds it while sending is off", m, spends(m))
+		}
+		if !slices.Contains(withSending, name) {
+			t.Fatalf("%s is not advertised even with sending ON and every group granted, "+
+				"so this test is measuring the wrong thing: %v", m, withSending)
+		}
+		withheld := !slices.Contains(withoutSending, name)
+		if withheld != spends(m) {
+			t.Errorf("with sending off %s is withheld=%v, but spends(%s)=%v — the info "+
+				"event and the predicate disagree about which methods move money",
+				m, withheld, m, spends(m))
+		}
+	}
+}
+
 // The info event is a PROMISE, and this is what keeps it one.
 //
 // Supported() is written out — §8's order is editorial and neither the group map
@@ -984,6 +1034,7 @@ type fakeRelays struct {
 	blockPublish     bool
 	publishedAt      []time.Time
 	publishDeadlines []time.Time
+	publishLoggers   []*slog.Logger
 }
 
 // fakeSubscription remembers which relay handed a channel out, so a test with
@@ -1151,6 +1202,11 @@ func (f *fakeRelays) subscribesTo(relayURL string) int {
 	return n
 }
 
+// noContextLogger is what the fake records when NOTHING attached a logger to a
+// publish's context — a real logger, distinct by identity, so the assertion does
+// not depend on nil never being a legitimate fallback.
+var noContextLogger = logging.New(io.Discard, logging.NewLevelVar(slog.LevelDebug))
+
 func (f *fakeRelays) PublishToConnection(ctx context.Context, event gonostr.Event,
 	relays nostr.ConnectionRelays) []nostr.PublishResult {
 	urls := relays.URLs()
@@ -1160,6 +1216,16 @@ func (f *fakeRelays) PublishToConnection(ctx context.Context, event gonostr.Even
 	f.publishedAt = append(f.publishedAt, time.Now())
 	deadline, _ := ctx.Deadline()
 	f.publishDeadlines = append(f.publishDeadlines, deadline)
+	// et8: whether anything attached a logger to the context this publish rides.
+	// The zap publisher attaches one carrying the payment hash so the pool's
+	// relay-choice line joins that zap's grep; §8's leg shares the same pool and
+	// must not inherit it. Read here because the context is the mechanism —
+	// asserting on the fake's output would only prove this fake writes no line.
+	//
+	// A DISTINCT logger as the fallback, not nil: logging.Default() exists
+	// precisely because some components are handed a nil logger, so a nil
+	// sentinel would go vacuous — and green — the day one reaches this seam.
+	f.publishLoggers = append(f.publishLoggers, logging.LoggerOr(ctx, noContextLogger))
 	refuse := f.refusePublishes > 0
 	if refuse {
 		f.refusePublishes--

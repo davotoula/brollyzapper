@@ -1,6 +1,7 @@
 package nostr_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1290,5 +1291,41 @@ func TestADialWithNoTimeLeftIsNotRecordedAsOverBudget(t *testing.T) {
 
 	if got := costRecords(t, logged.String()).costFor(hole.url); got.Outcome != "not_connected" {
 		t.Errorf("a relay dialled with the deadline already gone is recorded %q, want not_connected", got.Outcome)
+	}
+}
+
+// et8, David's ruling of 16 Sep: §8's pairing leg writes its per-relay lines
+// through the POOL's own logger, never the context's.
+//
+// Publish takes the context's logger so a zap's payment hash reaches the lines
+// that trace it. PublishToConnection deliberately does not: an NWC response
+// carrying a zap's hash would tell an operator the two were one episode, and
+// the pairing legs are not a zap's business.
+//
+// Today nothing attaches a logger on that path — internal/nwc has the test that
+// pins it — so this is the OTHER half, and it is the half that keeps working if
+// something ever does attach one upstream.
+func TestThePairingLegWritesItsCostsThroughThePoolsOwnLogger(t *testing.T) {
+	hole := newBlackHole(t)
+	pool, logged := loggedPool(t, func() []string { return nil })
+	defer pool.Close()
+
+	var attached bytes.Buffer
+	ctx := logging.ContextWithLogger(t.Context(),
+		logging.New(&attached, logging.NewLevelVar(slog.LevelDebug)).
+			With(logging.PaymentHash(strings.Repeat("a", 64))))
+	// Deadline already gone, which is the cheapest way to a recorded cost: the
+	// dial is refused before it waits for anything.
+	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel()
+
+	pool.PublishToConnection(ctx, signedNote(t), nostr.PairingRelays([]string{hole.url}))
+
+	if costRecords(t, logged.String()).costFor(hole.url).Outcome == "" {
+		t.Fatal("no cost record reached the pool's own logger, so this asserts nothing")
+	}
+	if attached.Len() != 0 {
+		t.Errorf("a pairing's publish wrote through the CONTEXT's logger, so an NWC line "+
+			"can carry a zap's payment_hash:\n%s", attached.String())
 	}
 }

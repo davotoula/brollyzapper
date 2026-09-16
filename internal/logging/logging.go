@@ -78,11 +78,36 @@ func ContextWithLogger(ctx context.Context, log *slog.Logger) context.Context {
 
 // FromContext returns the request-scoped logger, or the default one when there
 // is no request in play.
-func FromContext(ctx context.Context) *slog.Logger {
-	if log, ok := ctx.Value(contextKey{}).(*slog.Logger); ok {
+//
+// LoggerOr with Default() as the fallback, rather than its own copy of the
+// lookup: the two differ only in what they fall back to, and a second reader of
+// contextKey would be a second place to change if what is stored ever does.
+func FromContext(ctx context.Context) *slog.Logger { return LoggerOr(ctx, Default()) }
+
+// LoggerOr returns the context's logger, or `fallback` when nothing attached
+// one — FromContext for a component that already HAS a logger of its own (et8).
+//
+// The difference from FromContext is the whole point. FromContext falls back to
+// slog.Default(), which is right for a handler whose only logger IS the
+// request's, and wrong for a long-lived component: the pool writes through the
+// logger it was built with, and switching it to FromContext would send every
+// publish with no request in play to the process-wide default instead — silently
+// dropping the pool's own handler, and with it every test that captures its
+// output.
+//
+// It exists so that a caller who KNOWS which zap this publish is for can say so
+// on the lines the pool writes, without the pool having to learn about zaps.
+// A nil logger STORED on the context falls back too (go-review). The type
+// assertion succeeds for a typed nil, so without the second test this would hand
+// back a *slog.Logger that panics at the first call — a wiring mistake turned
+// into a crash in the pool, some publishes later, far from the attach. Default's
+// doc states the package's preference: a nil logger is a mistake, and it should
+// not also be a change of destination.
+func LoggerOr(ctx context.Context, fallback *slog.Logger) *slog.Logger {
+	if log, ok := ctx.Value(contextKey{}).(*slog.Logger); ok && log != nil {
 		return log
 	}
-	return slog.Default()
+	return fallback
 }
 
 func newRequestID() string {

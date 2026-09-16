@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -585,14 +586,161 @@ func TestTheReceiptLineNamesTheReceiptsTagsAndNoneOfTheirValues(t *testing.T) {
 // as a line missing its fields.
 func receiptLine(t *testing.T, logged string) string {
 	t.Helper()
+	return logLineIn(t, logged, "zap receipt published")
+}
+
+// et8: the relay-selection line joins the payment_hash grep.
+//
+// o34.8 made the payment hash the correlation key — minted, settled, receipt
+// published are three lines on one grep — and the 0.1.22-rc1 trip found the
+// fourth line a tracer wants outside it. "relays chosen for this publish" is
+// written by the POOL, which knows nothing about zaps, so an operator asking
+// "the receipt says relays=5 accepted=5, which five and why" had to find the
+// line by timestamp.
+//
+// ONE publish through a pool that is real where it has to be: the relays-chosen
+// line only exists in internal/nostr, and the zap package has no relay fixture
+// for a real pool to deliver to. choosingPool lets the real pool choose (and
+// log) and then answers as the fake does, so both lines come from the SAME
+// publish into the same buffer — which is the operator's journal, and the claim
+// the bead makes: a grep on the hash returns both.
+func TestTheRelaysChosenLineCarriesTheSamePaymentHashAsTheReceipt(t *testing.T) {
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged, poolsOwn bytes.Buffer
+
+	pool := nostr.NewPool(t.Context(), func() []string { return nil }, nostr.Options{
+		Log: logging.New(&poolsOwn, logging.NewLevelVar(slog.LevelDebug)),
+	})
+	defer pool.Close()
+
+	h.publisherWith(&choosingPool{real: pool}, &logged).PublishNow(t.Context(), hash)
+
+	chosen := hashOn(t, logLineIn(t, logged.String(), "relays chosen for this publish"))
+	if chosen == "" {
+		t.Fatalf("the relays-chosen line carries no payment_hash, so it is outside the grep")
+	}
+	receipt := hashOn(t, receiptLine(t, logged.String()))
+	if chosen != receipt {
+		t.Errorf("payment_hash is %q on the relays-chosen line and %q on the receipt; "+
+			"one grep must return both", chosen, receipt)
+	}
+
+	// The pool's OWN logger must not have taken it: the line went through the
+	// context the zap publisher attached, which is what carries the hash. If
+	// this buffer has it, the attachment did nothing and the hash above came
+	// from somewhere else.
+	if strings.Contains(poolsOwn.String(), "relays chosen for this publish") {
+		t.Errorf("the pool wrote the line to its own logger, so the context was not "+
+			"consulted:\n%s", poolsOwn.String())
+	}
+}
+
+// hashOn is a line's payment_hash, or "" when it has none — parsed, never
+// matched as a substring, so a hash appearing anywhere else on the line cannot
+// be mistaken for the attribute.
+func hashOn(t *testing.T, line string) string {
+	t.Helper()
+	var record struct {
+		PaymentHash string `json:"payment_hash"`
+	}
+	if err := json.Unmarshal([]byte(line), &record); err != nil {
+		t.Fatalf("the line is not JSON: %s", line)
+	}
+	return record.PaymentHash
+}
+
+// logLineIn is the last line carrying msg, or a failure saying there was none.
+func logLineIn(t *testing.T, logged, msg string) string {
+	t.Helper()
 	line := ""
 	for _, candidate := range strings.Split(strings.TrimSpace(logged), "\n") {
-		if strings.Contains(candidate, "zap receipt published") {
+		var record struct {
+			Msg string `json:"msg"`
+		}
+		if json.Unmarshal([]byte(candidate), &record) == nil && record.Msg == msg {
 			line = candidate
 		}
 	}
 	if line == "" {
-		t.Fatalf("no receipt line was logged at all:\n%s", logged)
+		t.Fatalf("no %q line was logged at all:\n%s", msg, logged)
 	}
 	return line
+}
+
+// et8, extended by David's ruling of 16 Sep: the PER-RELAY outcome lines carry
+// the payment hash too.
+//
+// The first cut put the hash on "relays chosen for this publish" alone, which
+// inverted the purpose. logRelayCosts writes only when a publish was slow or
+// partial — that is its own guard — so the lines that exist exactly when an
+// operator is tracing a failure were the ones outside the grep, while the happy
+// path was inside it.
+//
+// A configured relay that nothing answers is what makes the publish partial:
+// the operator's own relays are exempt from the allow-list, so a closed local
+// port reaches the dial and fails there, which is a real not_connected rather
+// than a refusal on content.
+func TestThePerRelayLinesOfAPartialPublishCarryThePaymentHash(t *testing.T) {
+	h := newHarness(t)
+	hash := h.settle(t, zapRequest(t, nil))
+	var logged, poolsOwn bytes.Buffer
+
+	dead := closedPort(t)
+	pool := nostr.NewPool(t.Context(), func() []string { return []string{dead} }, nostr.Options{
+		Log: logging.New(&poolsOwn, logging.NewLevelVar(slog.LevelDebug)),
+	})
+	defer pool.Close()
+
+	h.publisherWith(pool, &logged).PublishNow(t.Context(), hash)
+
+	perRelay := logLineIn(t, logged.String(), "relay outcome in a slow or partial publish")
+	chosen := logLineIn(t, logged.String(), "relays chosen for this publish")
+	if got := hashOn(t, perRelay); got == "" || got != hashOn(t, chosen) {
+		t.Errorf("payment_hash is %q on the per-relay line and %q on the relays-chosen "+
+			"line; one grep must return both, and the per-relay line is the one that "+
+			"only appears when something went wrong", got, hashOn(t, chosen))
+	}
+	if strings.Contains(poolsOwn.String(), "relay outcome in a slow or partial publish") {
+		t.Errorf("the per-relay line went to the pool's own logger, so the context was "+
+			"not consulted:\n%s", poolsOwn.String())
+	}
+}
+
+// closedPort is a local address nothing is listening on — bound and released, so
+// the port is real and the dial is refused rather than left hanging.
+func closedPort(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("closing the probe listener: %v", err)
+	}
+	return "ws://" + addr
+}
+
+// choosingPool lets the REAL pool choose its relays — which is what writes the
+// lines under test — and then answers as the fake does, so one publish produces
+// both the pool's line and the receipt's.
+//
+// The same idiom as slowPool above. It exists because the alternative was two
+// publishes of the same hash, where the second only worked because the first
+// had failed and reschedule had left the pending row behind: a dependency on
+// retry semantics the test neither asserted nor mentioned, and one that would
+// have turned it red for a reason its name disclaims.
+type choosingPool struct {
+	fakePool
+	real *nostr.Pool
+}
+
+func (c *choosingPool) Publish(ctx context.Context, event gonostr.Event,
+	extra ...string) []nostr.PublishResult {
+	// Discarded: with no relays configured this cannot deliver, and delivery is
+	// the fake's job. What it is called for is the choosing, and the lines the
+	// choosing writes.
+	c.real.Publish(ctx, event, extra...)
+	return c.fakePool.Publish(ctx, event, extra...)
 }
