@@ -2,6 +2,107 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.22 — 2026-09-16
+
+The safety-and-observability release. A paired wallet can no longer flood the node with NWC
+requests; the Security page says **as of when** each verdict was true and no longer calls a check
+it could not run a failure; the receive credential gets the same four checks the spend one has;
+and one grep on a payment hash now reconstructs a zap end to end. Twenty-seven pull requests since
+0.1.21, the largest cut this project has made, most of them checks on the checks. Tripped on the
+reference box as `0.1.22-rc1` on 16 Sep: an in-place update served from the box's own store,
+down for **20 s**, every one of the 19 Security rows `pass`, a zap's receipt to five of five
+relays in **887 ms**, and the sign-out round trip performed at last.
+
+### Changed
+
+- **Each wallet connection is rate-limited.** A pairing that sends NIP-47 requests faster than
+  the bucket refills gets `RATE_LIMITED`, the error §8 always defined and nothing emitted.
+  Before this, a paired client had an unbounded path into the node's invoice database and the
+  SD card. Ordinary use never reaches the limit; a burst is refused per connection, so one
+  misbehaving wallet cannot starve another. `make_invoice` is also bounded by the same ceiling
+  the lightning address advertises.
+- **The Security page's verdicts say when they were true, and "not checked" is its own answer.**
+  The reconciliation row reads "within the node's balance, as of 08:12" only after a check that
+  ran and succeeded; before the first check, or after one that failed, it says so and names the
+  verdict that still stands. Every row the guard answers — root keys, address locks, expiry —
+  reads **not checked** when the guard did not answer or the node could not be asked, in its own
+  cell, rather than FAIL. Not-checked rows never appear in the degraded banner and never block
+  sending: the row that knows *why* (node linked, guard reachable) is the one that fails.
+- **The receive credential now has the four checks the spend credential had**: caveats present,
+  locked to this container, not expired, root key still listed by the node. They report; they
+  block nothing, because receiving is the app's reason to exist.
+- **Sign out.** The header carries a "Sign out everywhere" button when you are signed in. It ends
+  every session, which is what the endpoint always did; there was simply nothing on a page that
+  reached it.
+- **The Node page's "LND reachable from the server" line** is a real probe of the server's own
+  credential against the node, at most once a minute, with the time of the answer — so a server
+  whose own address lock is wrong is visible before a payment is due, not at it.
+- **The authorisation notice on the Sending page is styled** as a raised panel, so the sentence
+  telling you where the confirmation code went stops reading as body text.
+
+### Fixed
+
+- **An answered NWC request logs its publish leg, and a payment's is at the default level.** One
+  line, written only when a publish actually began: how long the handling took, how long the
+  publish took, how many relays, how many accepted. Silent responses are no longer
+  indistinguishable from slow ones. For `pay_invoice` it is INFO — the rc1 trip found a wallet's
+  "did not respond within 60 seconds" leaving nothing in the journal at `log_level=info` — and it
+  stays DEBUG for the reads a wallet polls with.
+- **A guard-side race in redeeming a confirmation code.** The grant was judged from a state
+  loaded before the store's lock was taken, so a code entered at exactly the wrong moment could
+  be judged against a stale grant. Redeem now judges under the lock, and the live grant has one
+  writer that always audits.
+- **Four first-start log lines claimed more than the code knew.** "baking the receive macaroon"
+  fired before the attempt and read like success in a failing loop; the invoice stream WARNed
+  "reconnecting" on every first start; "lnd rejected our macaroon; re-link needed" fired for a
+  node that was merely booting; the guard's startup line promised the server would ask again.
+  Each now says what is actually happening. No behaviour change.
+- **Which IP lock wins is pinned.** `SERVER_IP` over `NETWORK_CIDR`, as the docs said and nothing
+  asserted, with a test over the four combinations and both credentials.
+- **An unreadable `admin.macaroon` names its owner** on the startup check, with the exact
+  `RUN_AS_UID`/`RUN_AS_GID` to set — on a stock node it is that file (0640), not the
+  certificate, that fails.
+- **One grep on the payment hash reconstructs a zap**: the invoice minted, settled, the receipt
+  published, and — found missing on the rc1 trip — the relays chosen for that publish and the
+  per-relay outcome of a slow or partial one. The public callback's own lines carry a request id
+  as well, so the gate's refusals can be told apart from one another.
+
+### Added
+
+- **A `.rootkey` sidecar beside each baked credential**, written before the macaroon, naming the
+  root key it was baked under — the guard cannot read that id back out of a macaroon. With it, the
+  guard sweeps root keys that no credential names, unattended and provably: a credential with no
+  sidecar stops the sweep entirely, a bake narrows its own sweep to the key it superseded, and the
+  kill switch spares only the receive sidecar. Existing installs have no sidecars, so **the sweep
+  does nothing until each credential is next re-baked** — at age five days of a seven-day life,
+  the receive one first and the spend one an hour later.
+- **The README carries the mark and an OpenSSF Scorecard badge**; the repository has a social
+  preview. No effect on the app.
+
+### Gate and lint controls
+
+None of these change behaviour. Each is a check on the checks:
+
+- `staticcheck` in the gate, pinned; Dependabot for Go, actions and base images; OpenSSF
+  Scorecard weekly and on push, results published (7.4); `govulncheck` over the regtest tool
+  modules; every workflow write grant on a per-job allowlist; every action pinned by commit.
+- `FuzzHandle` drives the NWC request path past the proof — request JSON, tag structure, sealing —
+  and `make fuzz` enumerates every target rather than naming them.
+- The three deployment lints read one parsed compose, not its text: proxy checks read settings,
+  a mount-source parser replaces three regexes, every image variable's default is executed, and
+  the regtest pins are re-proved from empty volumes per bump.
+- `internal/arch`: three rules read code rather than prose (the bounded set, template routes,
+  preimage reveals); the class rule reads `{{define}}` bodies; the guard's grant has one writer,
+  no audit under the state lock, and the grant is judged under it.
+
+### Upgrading
+
+**Nothing to do, on umbrelOS or plain Docker.** No migration (schema stays 15), no new setting,
+no compose change beyond comments, no key baked or revoked by the update. An in-place update
+recreates both containers; the rc1 trip measured **20 s** down and 25 s to openable. The rate
+limit needs no configuration. The `.rootkey` sidecars appear at each credential's next re-bake,
+not at the update; nothing is swept until then.
+
 ## 0.1.21 — 2026-09-12
 
 The release that makes BrollyZapper deployable on plain Docker beside any LND, not only as an
