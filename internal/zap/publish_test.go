@@ -586,16 +586,7 @@ func TestTheReceiptLineNamesTheReceiptsTagsAndNoneOfTheirValues(t *testing.T) {
 // as a line missing its fields.
 func receiptLine(t *testing.T, logged string) string {
 	t.Helper()
-	line := ""
-	for _, candidate := range strings.Split(strings.TrimSpace(logged), "\n") {
-		if strings.Contains(candidate, "zap receipt published") {
-			line = candidate
-		}
-	}
-	if line == "" {
-		t.Fatalf("no receipt line was logged at all:\n%s", logged)
-	}
-	return line
+	return logLineIn(t, logged, "zap receipt published")
 }
 
 // et8: the relay-selection line joins the payment_hash grep.
@@ -607,13 +598,12 @@ func receiptLine(t *testing.T, logged string) string {
 // "the receipt says relays=5 accepted=5, which five and why" had to find the
 // line by timestamp.
 //
-// TWO POOLS, because one of them has to be REAL: the relays-chosen line only
-// exists in internal/nostr, and the zap package has no relay fixture for it to
-// deliver to. So the first publish goes through a real, relay-less pool — which
-// still chooses (finds nothing) and still logs the line — and the second
-// through the fake, which produces the receipt line. Both write to the same
-// buffer, which is the operator's journal, and the assertion is the one the
-// bead asks for: a grep on the hash returns both.
+// ONE publish through a pool that is real where it has to be: the relays-chosen
+// line only exists in internal/nostr, and the zap package has no relay fixture
+// for a real pool to deliver to. choosingPool lets the real pool choose (and
+// log) and then answers as the fake does, so both lines come from the SAME
+// publish into the same buffer — which is the operator's journal, and the claim
+// the bead makes: a grep on the hash returns both.
 func TestTheRelaysChosenLineCarriesTheSamePaymentHashAsTheReceipt(t *testing.T) {
 	h := newHarness(t)
 	hash := h.settle(t, zapRequest(t, nil))
@@ -624,14 +614,13 @@ func TestTheRelaysChosenLineCarriesTheSamePaymentHashAsTheReceipt(t *testing.T) 
 	})
 	defer pool.Close()
 
-	h.publisherWith(pool, &logged).PublishNow(t.Context(), hash)
-	h.publisherWith(&fakePool{}, &logged).PublishNow(t.Context(), hash)
+	h.publisherWith(&choosingPool{real: pool}, &logged).PublishNow(t.Context(), hash)
 
 	chosen := hashOn(t, logLineIn(t, logged.String(), "relays chosen for this publish"))
-	receipt := hashOn(t, receiptLine(t, logged.String()))
 	if chosen == "" {
 		t.Fatalf("the relays-chosen line carries no payment_hash, so it is outside the grep")
 	}
+	receipt := hashOn(t, receiptLine(t, logged.String()))
 	if chosen != receipt {
 		t.Errorf("payment_hash is %q on the relays-chosen line and %q on the receipt; "+
 			"one grep must return both", chosen, receipt)
@@ -731,4 +720,27 @@ func closedPort(t *testing.T) string {
 		t.Fatalf("closing the probe listener: %v", err)
 	}
 	return "ws://" + addr
+}
+
+// choosingPool lets the REAL pool choose its relays — which is what writes the
+// lines under test — and then answers as the fake does, so one publish produces
+// both the pool's line and the receipt's.
+//
+// The same idiom as slowPool above. It exists because the alternative was two
+// publishes of the same hash, where the second only worked because the first
+// had failed and reschedule had left the pending row behind: a dependency on
+// retry semantics the test neither asserted nor mentioned, and one that would
+// have turned it red for a reason its name disclaims.
+type choosingPool struct {
+	fakePool
+	real *nostr.Pool
+}
+
+func (c *choosingPool) Publish(ctx context.Context, event gonostr.Event,
+	extra ...string) []nostr.PublishResult {
+	// Discarded: with no relays configured this cannot deliver, and delivery is
+	// the fake's job. What it is called for is the choosing, and the lines the
+	// choosing writes.
+	c.real.Publish(ctx, event, extra...)
+	return c.fakePool.Publish(ctx, event, extra...)
 }

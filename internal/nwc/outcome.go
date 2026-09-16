@@ -164,17 +164,23 @@ func (s *Service) reportOutcome(ctx context.Context, conn *connection, req Reque
 // and incomplete prose at that: it named this line and not advertised(), where
 // the same omission would have put a pay button on a wallet the operator had
 // made receive-only.
-func (s *Service) reportAnswered(conn *connection, req Request, entered time.Time, sent delivery) {
+func (s *Service) reportAnswered(ctx context.Context, conn *connection, req Request,
+	entered time.Time, sent delivery) {
 	// The server's share is the whole of it less the publish.
 	handleMS := (time.Since(entered) - sent.took).Milliseconds()
-	line := []any{"connection", conn.row().ID, "method", req.Method,
-		"handle_ms", handleMS, "publish_ms", sent.took.Milliseconds(),
-		"relays", sent.relays, "accepted", sent.accepted}
+	// ONE call at a chosen level, not two calls under a branch: the message is
+	// the grep key — answeredLines matches it, and so does an operator's journal
+	// search — so two spellings of it could drift, and a drift in the DEBUG half
+	// is invisible at the default log_level=info, which is the blindness this
+	// bead exists to remove. auditBounded below takes the same shape.
+	level := slog.LevelDebug
 	if spends(req.Method) {
-		s.log.Info("an NWC request was answered", line...)
-		return
+		level = slog.LevelInfo
 	}
-	s.log.Debug("an NWC request was answered", line...)
+	s.log.Log(ctx, level, "an NWC request was answered",
+		"connection", conn.row().ID, "method", req.Method,
+		"handle_ms", handleMS, "publish_ms", sent.took.Milliseconds(),
+		"relays", sent.relays, "accepted", sent.accepted)
 }
 
 // recordRefusal remembers, ON THE CONNECTION, the last thing this pairing was

@@ -1202,6 +1202,11 @@ func (f *fakeRelays) subscribesTo(relayURL string) int {
 	return n
 }
 
+// noContextLogger is what the fake records when NOTHING attached a logger to a
+// publish's context — a real logger, distinct by identity, so the assertion does
+// not depend on nil never being a legitimate fallback.
+var noContextLogger = logging.New(io.Discard, logging.NewLevelVar(slog.LevelDebug))
+
 func (f *fakeRelays) PublishToConnection(ctx context.Context, event gonostr.Event,
 	relays nostr.ConnectionRelays) []nostr.PublishResult {
 	urls := relays.URLs()
@@ -1217,9 +1222,10 @@ func (f *fakeRelays) PublishToConnection(ctx context.Context, event gonostr.Even
 	// must not inherit it. Read here because the context is the mechanism —
 	// asserting on the fake's output would only prove this fake writes no line.
 	//
-	// nil as the fallback is a SENTINEL, not how LoggerOr is called for real: it
-	// makes "nothing was attached" a nil entry here, which no real logger can be.
-	f.publishLoggers = append(f.publishLoggers, logging.LoggerOr(ctx, nil))
+	// A DISTINCT logger as the fallback, not nil: logging.Default() exists
+	// precisely because some components are handed a nil logger, so a nil
+	// sentinel would go vacuous — and green — the day one reaches this seam.
+	f.publishLoggers = append(f.publishLoggers, logging.LoggerOr(ctx, noContextLogger))
 	refuse := f.refusePublishes > 0
 	if refuse {
 		f.refusePublishes--

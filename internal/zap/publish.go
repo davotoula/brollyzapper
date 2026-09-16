@@ -226,7 +226,8 @@ func (p *Publisher) attempt(ctx context.Context, zap store.SettledZap, pending s
 	// logging.PaymentHash, never a raw slog.String: it truncates to the same
 	// prefix the minted/settled/published lines carry, which is what makes the
 	// four lines one grep rather than three plus a near miss.
-	withHash := logging.ContextWithLogger(ctx, p.log.With(logging.PaymentHash(zap.PaymentHash)))
+	withHash := logging.ContextWithLogger(ctx,
+		p.log.With(logging.PaymentHash(zap.PaymentHash)))
 	results := p.pool.Publish(withHash, *event, relays...)
 	publishMS := time.Since(started).Milliseconds()
 	accepted := nostr.Accepted(results)

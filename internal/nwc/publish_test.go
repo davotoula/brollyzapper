@@ -279,7 +279,7 @@ func TestAnNWCResponsePublishRidesAContextWithNoLoggerAttached(t *testing.T) {
 		t.Fatal("nothing was published, so this asserts nothing")
 	}
 	for i, log := range h.relays.publishLoggers {
-		if log != nil {
+		if log != noContextLogger {
 			t.Errorf("publish %d rode a logger attached to its context; the zap "+
 				"publisher's payment_hash has leaked onto the pairing leg", i)
 		}

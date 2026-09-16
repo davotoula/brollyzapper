@@ -78,12 +78,11 @@ func ContextWithLogger(ctx context.Context, log *slog.Logger) context.Context {
 
 // FromContext returns the request-scoped logger, or the default one when there
 // is no request in play.
-func FromContext(ctx context.Context) *slog.Logger {
-	if log, ok := ctx.Value(contextKey{}).(*slog.Logger); ok {
-		return log
-	}
-	return slog.Default()
-}
+//
+// LoggerOr with Default() as the fallback, rather than its own copy of the
+// lookup: the two differ only in what they fall back to, and a second reader of
+// contextKey would be a second place to change if what is stored ever does.
+func FromContext(ctx context.Context) *slog.Logger { return LoggerOr(ctx, Default()) }
 
 // LoggerOr returns the context's logger, or `fallback` when nothing attached
 // one — FromContext for a component that already HAS a logger of its own (et8).
