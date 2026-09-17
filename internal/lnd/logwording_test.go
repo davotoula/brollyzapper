@@ -75,6 +75,21 @@ func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
 	return logRecord{}, false
 }
 
+// count is how many records carry msg.
+func (b *syncBuffer) count(t *testing.T, msg string) int {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for line := range strings.SplitSeq(b.buf.String(), "\n") {
+		var r logRecord
+		if line != "" && json.Unmarshal([]byte(line), &r) == nil && r.Msg == msg {
+			n++
+		}
+	}
+	return n
+}
+
 // runStream runs the invoice stream until the test ends.
 func runStream(t *testing.T, client *lnd.Client, resume lnd.SettleIndexStore, handle lnd.InvoiceHandler) {
 	t.Helper()
@@ -340,6 +355,55 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 				t.Errorf("the node's State service was asked %d times; want asked=%v", calls, tc.asksStage)
 			}
 		})
+	}
+}
+
+// A real rotation, in the order the regtest stack meets it. LND restarts, and
+// the stream's first refusal comes from a node that is still starting: that
+// says connecting, asks the guard at INFO — which is what wakes the guard — and
+// spends ReBakeInterval. Once the node is up it refuses the stale macaroon and
+// the Node page says re-link. If the sentence rode only on a request, the log
+// would say nothing above Debug for the rest of the minute, and the guard's
+// re-bake usually lands inside it: page and log disagree for the whole episode,
+// the 20i.22 bug by another route.
+//
+// Bounded: once per entry into re-link, not once per refused attempt.
+func TestReLinkIsSaidWhenTheStateEntersItEvenBetweenReBakeRequests(t *testing.T) {
+	node := lndtest.Start(t)
+	dir := t.TempDir()
+	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+	node.SetWalletState(lnrpc.WalletState_WAITING_TO_START)
+
+	var logged syncBuffer
+	broker := &lndtest.Broker{}
+	opts := testOptions(broker)
+	opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
+	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
+	t.Cleanup(func() { _ = client.Close() })
+	runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
+
+	lndtest.WaitFor(t, "the request made while the node was starting", func() bool { return broker.Bakes() > 0 })
+	if got := logged.count(t, relinkNeeded); got != 0 {
+		t.Fatalf("a starting node was logged as re-link %d times", got)
+	}
+
+	// The node comes up, and refuses the macaroon it no longer has a root key for.
+	node.SetRejectLikeLND(true)
+	node.SetWalletState(lnrpc.WalletState_SERVER_ACTIVE)
+	lndtest.WaitFor(t, "the re-link line", func() bool { return logged.count(t, relinkNeeded) > 0 })
+
+	// Many more refusals in the same episode, at the tests' 1ms backoff.
+	seen := len(node.SeenMacaroons())
+	lndtest.WaitFor(t, "more refused attempts", func() bool { return len(node.SeenMacaroons()) > seen+20 })
+	if got := logged.count(t, relinkNeeded); got != 1 {
+		t.Errorf("re-link was said %d times over one episode, want once", got)
+	}
+	if got := broker.Bakes(); got != 1 {
+		t.Errorf("the guard was asked %d times inside ReBakeInterval, want 1 — the sentence "+
+			"is not a request", got)
+	}
+	if got := client.State(); got != lnd.StateRelink {
+		t.Errorf("State = %q, want %q", got, lnd.StateRelink)
 	}
 }
 

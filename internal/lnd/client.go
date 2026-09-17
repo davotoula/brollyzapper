@@ -381,8 +381,9 @@ func (c *Client) observe(err error) error {
 // credential within one backoff whether or not anyone is looking. An arch rule
 // asserts this is the only call site.
 func (c *Client) observeStream(ctx context.Context, err error) error {
+	previous := c.State()
 	if state, rejected := c.recordState(ctx, err); rejected {
-		c.requestReBake(ctx, err, state)
+		c.requestReBake(ctx, err, previous, state)
 	}
 	return err
 }
@@ -408,28 +409,37 @@ const reBakeTimeout = 5 * time.Second
 // requestReBake is §6's recovery: the node stopped accepting our macaroon —
 // almost always because it was rotated — so the guard is asked for a new one.
 // The server does not exit; the guard's bounded exit is the only sanctioned
-// one in the codebase. state is what recordState recorded for cause.
-func (c *Client) requestReBake(ctx context.Context, cause error, state State) {
+// one in the codebase. state is what recordState recorded for cause, and
+// previous the state before it.
+func (c *Client) requestReBake(ctx context.Context, cause error, previous, state State) {
 	// No broker means this process cannot re-link and must not say it can. The
 	// guard builds a Client of its own with none, and "re-link needed" is a
 	// sentence about the server (§6).
 	if c.broker == nil {
 		return
 	}
-	if !c.mayReBake() {
+	asked := c.mayReBake()
+	// The request is broad; the sentence takes the state recordState recorded,
+	// so the log says re-link exactly when the Node page does (20i.22). Not
+	// IsAuthFailure: a real rotation arrives as Unknown and is re-link by the
+	// node's stage (2f0), which a code test cannot see.
+	//
+	// And re-link is said on ENTERING the state even when the interval holds the
+	// request back. A rotation usually arrives with the interval already spent,
+	// by the request made while LND was still starting — the one that wakes the
+	// guard — and the guard's re-bake usually lands before the minute is up, so a
+	// sentence that rode only on a request would never be written (2f0).
+	switch {
+	case state == StateRelink && (asked || previous != StateRelink):
+		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
+	case asked:
+		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
+			"code", status.Code(cause).String(), "error", cause.Error())
+	}
+	if !asked {
 		c.log.Debug("not asking the guard to re-bake again yet",
 			"error", cause.Error(), "interval", ReBakeInterval.String())
 		return
-	}
-	// The request below is broad; the sentence takes the state recordState
-	// recorded, so the log says re-link exactly when the Node page does (20i.22).
-	// Not IsAuthFailure: a real rotation arrives as Unknown and is re-link by the
-	// node's stage (2f0), which a code test cannot see.
-	if state == StateRelink {
-		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
-	} else {
-		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
-			"code", status.Code(cause).String(), "error", cause.Error())
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, reBakeTimeout)
