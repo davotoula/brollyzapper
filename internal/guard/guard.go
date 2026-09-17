@@ -825,6 +825,11 @@ func (g *Guard) Status(ctx context.Context) (Status, error) {
 	// admin UI shows, not a failure the server has to interpret (§11).
 	if _, err := g.node.GetInfo(ctx); err != nil {
 		g.observe(ctx, err)
+		// WHICH no (dqd): a locked wallet and a rejected macaroon are one code
+		// on the wire, and the node's own State service is what tells them
+		// apart. Asked only here, so a healthy page render costs nothing more;
+		// a service that cannot be asked either leaves it empty.
+		status.NodeWalletState, _ = g.node.GetState(ctx)
 	} else {
 		g.observe(ctx, nil)
 		status.LNDReachable = true
@@ -944,16 +949,24 @@ func (g *Guard) dispatch(ctx context.Context, req Request) Response {
 	}
 }
 
-// observe feeds the rotation detector. A run of authentication failures against
-// admin.macaroon means the node's macaroons were rotated, and a single-file
-// bind mount follows the inode — so no amount of retrying inside this process
-// will ever see the replacement (§6).
+// observe feeds the rotation detector. A run of rejections of admin.macaroon
+// means the node's macaroons were rotated, and a single-file bind mount follows
+// the inode — so no amount of retrying inside this process will ever see the
+// replacement (§6).
+//
+// THE BROAD TEST, and it only arms (dqd). LND refuses a macaroon it will not
+// accept with code Unknown, which IsAuthFailure never matched, so on a node with
+// readable stale bytes the exit was unreachable. But Unknown is also every
+// answer from a node that is starting or locked, and from here that cannot be
+// told apart — so this line says nothing to the operator, and the probe, which
+// asks the node's stage first, decides whether the refusal was about the
+// credential and says so.
 func (g *Guard) observe(ctx context.Context, err error) error {
 	if err == nil {
 		g.nodeAccepted()
 		return nil
 	}
-	if !lnd.IsAuthFailure(err) {
+	if !lnd.IsCredentialRejected(err) {
 		return err
 	}
 	// Whatever noticed, the guard now starts watching for ITSELF (as0.8) — and
@@ -962,12 +975,16 @@ func (g *Guard) observe(ctx context.Context, err error) error {
 	// push the guard toward its own exit: Re-link has no rate limit, and
 	// clicking it is exactly what an operator does while the node is rejecting.
 	g.rotation.Rejected()
-	g.log.Warn("lnd rejected admin.macaroon", "error", err.Error())
+	g.log.Debug("lnd refused a call made with admin.macaroon; probing whether it was the credential",
+		"error", err.Error())
 	return err
 }
 
 // observeProbe is observe for the guard's OWN samples: the only observations
 // that advance the run toward §6's threshold.
+//
+// Called only for a node whose stage admits calls (probeRotation asks first), so
+// a refusal here reached the macaroon check and is about the credential.
 //
 // sent is g.acceptances as it stood when the probe went out.
 func (g *Guard) observeProbe(ctx context.Context, err error, sent uint64) {
@@ -975,12 +992,18 @@ func (g *Guard) observeProbe(ctx context.Context, err error, sent uint64) {
 		g.nodeAccepted()
 		return
 	}
-	if !lnd.IsAuthFailure(err) {
+	if !lnd.IsCredentialRejected(err) {
 		// The node did not answer, so the credential was never tested. Not a
 		// rejection, and deliberately not counted: unreachable means unknown.
 		return
 	}
-	if !g.rotation.ProbeFailed() {
+	run, tripped := g.rotation.probeFailed()
+	if run == 1 {
+		// Once per run, here and not in observe: this is the one place the
+		// node's stage is known, so the one place the sentence is true.
+		g.log.Warn("lnd rejected admin.macaroon", "error", err.Error())
+	}
+	if !tripped {
 		return
 	}
 	switch d := g.recordRotationExit(sent); d.outcome {
@@ -1027,6 +1050,18 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		case <-ticker.C:
 		}
 		if !g.rotation.Armed() {
+			continue
+		}
+		// THE STAGE FIRST (dqd). A node that is starting, or whose wallet is
+		// locked, refuses every call with the same code it refuses a rotated
+		// macaroon with — its state check runs before its macaroon check — so
+		// its refusal says nothing about the credential and is not counted. Nor
+		// is a State service that cannot be asked: unreachable means unknown.
+		// First rather than after a failed GetInfo, because within one LND
+		// process the stage only moves forward: "active" before the call is
+		// still active during it, where "not ready" after a failure may already
+		// be stale.
+		if stage, err := g.node.GetState(ctx); err != nil || !stage.AdmitsCalls() {
 			continue
 		}
 		sent := g.acceptances.Load()

@@ -104,6 +104,12 @@ type BrokerStatus struct {
 	// address the node is disagreeing with, and an address is a fact rather
 	// than a sentence — the rule is against relaying the guard's WORDS.
 	CredentialAddress string
+	// NodeWalletState is the stage the node reported itself in when the guard
+	// could not reach it (dqd), so "LND reachable from the guard — no" can say
+	// the wallet is locked or the node is still starting. Empty when the node
+	// answered, or when its State service could not be asked either. A value
+	// named by LND, not the guard's sentence.
+	NodeWalletState WalletState
 }
 
 // RefusalKind is a fixed token naming one kind of guard refusal.

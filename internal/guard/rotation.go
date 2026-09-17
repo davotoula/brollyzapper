@@ -99,6 +99,13 @@ func (d *RotationDetector) Armed() bool {
 // a loaded node, a TLS handshake that stalled — from being counted as adjacent
 // to one from before the trouble started.
 func (d *RotationDetector) ProbeFailed() bool {
+	_, tripped := d.probeFailed()
+	return tripped
+}
+
+// probeFailed is ProbeFailed with the run's length, so the guard can say so once
+// at the start of a run — including one the gap check restarted.
+func (d *RotationDetector) probeFailed() (run int, tripped bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
@@ -107,7 +114,7 @@ func (d *RotationDetector) ProbeFailed() bool {
 	}
 	d.lastProbe = now
 	d.consecutive++
-	return d.consecutive >= d.threshold
+	return d.consecutive, d.consecutive >= d.threshold
 }
 
 // Success clears the run: §6 says three CONSECUTIVE failures, and a call that

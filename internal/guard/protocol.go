@@ -236,6 +236,11 @@ type Status struct {
 	// CredentialAddress is the address the guard locks both credentials to —
 	// SERVER_IP, or the network CIDR when only that is set. A value, not prose.
 	CredentialAddress string `json:"credential_address,omitempty"`
+	// NodeWalletState is the stage the node's State service reported when
+	// GetInfo failed (dqd): a locked wallet and a rejected macaroon are the same
+	// code on the wire, and only this tells the operator which. Empty when the
+	// node answered or the State service could not be asked. A value, not prose.
+	NodeWalletState lnd.WalletState `json:"node_wallet_state,omitempty"`
 }
 
 // ErrMacaroonRotated is returned by Serve when the node stopped accepting
