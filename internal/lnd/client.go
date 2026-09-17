@@ -466,11 +466,12 @@ func (c *Client) mayReBake() bool {
 // Both codes appear: Unauthenticated for a macaroon LND cannot verify,
 // PermissionDenied for one that verifies but grants too little.
 //
-// This is the narrow question, and it is the one the guard asks about
-// admin.macaroon: a verified-and-refused macaroon means the node's macaroons
-// were rotated, and a container restart re-resolves the bind mount onto the
-// replacement. The server asks the broader question below — see the note there
-// on why the two are deliberately different.
+// This is the narrow question, and the server's operator-facing re-link state
+// asks it for the codes that need no stage: they are a verdict whatever the node
+// is doing. LND itself answers most rejections with codes.Unknown, which only
+// the broader question below matches, and recordState asks the node's stage
+// before it calls one of those re-link (2f0). The guard asks the broader
+// question too, gated the same way (dqd).
 func IsAuthFailure(err error) bool {
 	switch status.Code(err) {
 	case codes.Unauthenticated, codes.PermissionDenied:

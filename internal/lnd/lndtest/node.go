@@ -192,7 +192,8 @@ func WriteFile(t testing.TB, path string, data []byte) {
 }
 
 // SetReject makes every RPC fail with codes.Unauthenticated — the narrow shape
-// lnd.IsAuthFailure matches, which the server's re-link state keys on.
+// lnd.IsAuthFailure matches, which the server's re-link state reads without
+// asking the node's stage.
 //
 // THIS IS NOT WHAT LND ANSWERS A MACAROON IT WILL NOT ACCEPT; that is
 // SetRejectLikeLND, code Unknown (dqd). The one real source of this shape

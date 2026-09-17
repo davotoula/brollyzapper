@@ -529,15 +529,15 @@ func TestRelinkInterruptsAnInFlightBackoff(t *testing.T) {
 	}
 }
 
-// The two classifications are deliberately different — the server re-bakes on
-// the broad question, the guard exits on the narrow one — so the IMPLICATION
-// between them is asserted rather than left to drift. Anything the guard treats
-// as rotation, the server must also treat as a rejected credential.
+// The two classifications are deliberately different — the broad one decides a
+// re-bake, the narrow one says re-link without asking the node's stage — so the
+// IMPLICATION between them is asserted rather than left to drift. Anything the
+// Node page calls re-link on the code alone must also be re-baked.
 //
 // Every code, not the two IsAuthFailure happens to name today: a version that
 // listed those two would still pass if IsAuthFailure were widened to include
-// Unavailable, which is exactly the drift — the guard exiting on connectivity —
-// that the asymmetry exists to prevent.
+// Unavailable, which is exactly the drift — a node that is down reading as
+// re-link, with no stage asked — that the asymmetry exists to prevent.
 func TestEveryAuthFailureIsAlsoACredentialRejection(t *testing.T) {
 	var narrow int
 	for code := codes.OK; code <= codes.Unauthenticated; code++ {
