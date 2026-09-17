@@ -388,6 +388,8 @@ func TestReLinkIsSaidWhenTheStateEntersItEvenBetweenReBakeRequests(t *testing.T)
 	}
 
 	// The node comes up, and refuses the macaroon it no longer has a root key for.
+	// Rejection first: the other order leaves a moment where the node is up and
+	// accepts, and a stream that subscribes then waits on an empty ledger forever.
 	node.SetRejectLikeLND(true)
 	node.SetWalletState(lnrpc.WalletState_SERVER_ACTIVE)
 	lndtest.WaitFor(t, "the re-link line", func() bool { return logged.count(t, relinkNeeded) > 0 })
