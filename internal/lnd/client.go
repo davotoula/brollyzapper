@@ -276,30 +276,72 @@ func (c *Client) reconnect() {
 }
 
 // recordState maps a call's outcome onto the state the admin UI shows, and
-// reports whether the node ANSWERED and would not accept what we sent.
+// returns the state it recorded together with whether the node ANSWERED and
+// would not accept what we sent. A failure that says nothing about either moves
+// nothing and returns "".
 //
-// The state takes the narrow test even where the caller acts on the broad one:
-// "re-link needed" is a sentence claiming the node verified our macaroon and
-// refused it, and LND answers codes.Unknown while it is merely restarting.
-func (c *Client) recordState(err error) bool {
+// "Re-link needed" claims the node was up and refused our macaroon. LND answers
+// codes.Unknown for that — a rotation is "root key with id N doesn't exist" — and
+// for merely not being ready: its state interceptor runs before its macaroon
+// check and refuses a starting node or a locked wallet with the same code. So a
+// rejection the code does not settle by itself is decided by the node's stage,
+// which is dqd's rule for the guard applied to the server (2f0). The broad
+// question still decides the re-bake; only the state waits for the stage.
+func (c *Client) recordState(ctx context.Context, err error) (State, bool) {
+	var state State
+	rejected := false
 	switch {
 	case err == nil:
-		c.setState(StateReady)
+		state = StateReady
 	case errors.Is(err, ErrNotLinked) || !c.creds.Ready():
 		// Once the connection is cached, an absent credential no longer arrives
 		// as the sentinel: grpc-go stringifies the per-RPC credential's error
 		// into an Unauthenticated status, so errors.Is stops matching. Asking
 		// the credential source directly is what keeps "the guard has not
 		// written it yet" from being reported as "the node rejected it".
-		c.setState(StateNotLinked)
+		state = StateNotLinked
 	case IsAuthFailure(err):
-		c.setState(StateRelink)
-		return true
+		// A verdict with no stage to ask about: PermissionDenied is LND's, and
+		// Unauthenticated is our own client failing to read the macaroon, which
+		// is a rejection whatever the node is doing.
+		state, rejected = StateRelink, true
 	case IsCredentialRejected(err):
-		c.setState(StateConnecting)
-		return true
+		state, rejected = c.rejectionState(ctx), true
+	default:
+		return "", false
 	}
-	return false
+	c.setState(state)
+	return state, rejected
+}
+
+// stageTimeout bounds rejectionState's question. The node answered the call a
+// moment ago, so its State service answers in milliseconds or not at all, and
+// this runs on the invoice stream: a stalled dial must not hold the stream down
+// for longer than reBakeTimeout would. Would change if a real node is measured
+// answering GetState slower than this while answering Lightning calls.
+const stageTimeout = 5 * time.Second
+
+// rejectionState is the state for a rejection whose code a node that is not
+// ready also answers with: re-link only when the node reports a stage that
+// admits calls. A node that is not accepting calls, or whose stage cannot be
+// read, is not known to be up, and says nothing about the credential.
+//
+// Accepted with it, as for the guard: LND's middleware interceptor runs after
+// the macaroon check and refuses with the same code, so a stalled read-only
+// middleware on a running node reads as re-link. A click is cheap, and the
+// re-bake is asked for either way.
+func (c *Client) rejectionState(ctx context.Context) State {
+	ctx, cancel := context.WithTimeout(ctx, stageTimeout)
+	defer cancel()
+	stage, err := c.GetState(ctx)
+	if err != nil {
+		c.log.Debug("could not ask the node's stage about a rejected call", "error", err.Error())
+		return StateConnecting
+	}
+	if !stage.AdmitsCalls() {
+		return StateConnecting
+	}
+	return StateRelink
 }
 
 // observe records the outcome of a PER-REQUEST call. It moves the state and
@@ -339,8 +381,8 @@ func (c *Client) observe(err error) error {
 // credential within one backoff whether or not anyone is looking. An arch rule
 // asserts this is the only call site.
 func (c *Client) observeStream(ctx context.Context, err error) error {
-	if c.recordState(err) {
-		c.requestReBake(ctx, err)
+	if state, rejected := c.recordState(ctx, err); rejected {
+		c.requestReBake(ctx, err, state)
 	}
 	return err
 }
@@ -366,8 +408,8 @@ const reBakeTimeout = 5 * time.Second
 // requestReBake is §6's recovery: the node stopped accepting our macaroon —
 // almost always because it was rotated — so the guard is asked for a new one.
 // The server does not exit; the guard's bounded exit is the only sanctioned
-// one in the codebase.
-func (c *Client) requestReBake(ctx context.Context, cause error) {
+// one in the codebase. state is what recordState recorded for cause.
+func (c *Client) requestReBake(ctx context.Context, cause error, state State) {
 	// No broker means this process cannot re-link and must not say it can. The
 	// guard builds a Client of its own with none, and "re-link needed" is a
 	// sentence about the server (§6).
@@ -379,9 +421,11 @@ func (c *Client) requestReBake(ctx context.Context, cause error) {
 			"error", cause.Error(), "interval", ReBakeInterval.String())
 		return
 	}
-	// The request below is broad; the sentence takes recordState's narrow test,
-	// so the log says re-link exactly when the Node page does (20i.22).
-	if IsAuthFailure(cause) {
+	// The request below is broad; the sentence takes the state recordState
+	// recorded, so the log says re-link exactly when the Node page does (20i.22).
+	// Not IsAuthFailure: a real rotation arrives as Unknown and is re-link by the
+	// node's stage (2f0), which a code test cannot see.
+	if state == StateRelink {
 		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
 	} else {
 		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
@@ -443,7 +487,7 @@ func IsAuthFailure(err error) bool {
 //
 // So this fails TOWARD re-baking, and ReBakeInterval is what makes that safe:
 // the cost of a false positive is one request per minute, not one per failure.
-// The operator-facing state takes the narrow test instead — see observe.
+// The operator-facing state asks the node's stage as well — see recordState.
 //
 // Errors that never reached the node — an unreadable tls.cert, a dial failure —
 // are not gRPC statuses at all and are excluded, because re-baking cannot fix

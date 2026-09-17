@@ -198,14 +198,19 @@ func TestOnlyOneInvoiceStreamMayRun(t *testing.T) {
 	}
 }
 
-// Spec §6: on auth failure the server shows a re-link state and re-requests a
-// bake through the guard. It never exits.
-func TestAuthFailureAsksTheGuardToReBakeAndKeepsRunning(t *testing.T) {
+// Spec §6: on a rejected macaroon the server shows a re-link state and
+// re-requests a bake through the guard. It never exits.
+//
+// Rejected the way LND rejects one — code Unknown, on a node that is up — and
+// not with the Unauthenticated the fake used to offer, which LND does not send:
+// this test passed for the whole of the re-link state's life while a real
+// rotation never reached it (2f0).
+func TestARejectedMacaroonAsksTheGuardToReBakeAndKeepsRunning(t *testing.T) {
 	node := lndtest.Start(t)
 	dir := t.TempDir()
 	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
 	node.SetLedger(lndtest.SettledInvoice("hash-1", 1, 1_000))
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 
 	broker := &lndtest.Broker{}
 	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), testOptions(broker))
@@ -227,7 +232,7 @@ func TestAuthFailureAsksTheGuardToReBakeAndKeepsRunning(t *testing.T) {
 	lndtest.WaitFor(t, "a bake request", func() bool { return broker.Bakes() > 0 })
 
 	// Once the guard has re-baked, the same process recovers on its own.
-	node.SetReject(false)
+	node.SetRejectLikeLND(false)
 	select {
 	case index := <-handled:
 		if index != 1 {
@@ -332,9 +337,9 @@ func (m *memoryResume) SetLastSettleIndex(_ context.Context, index uint64) error
 // the stream reconnected with capped backoff forever, and the credential stayed
 // bad until an operator clicked Re-link 45 seconds later.
 //
-// TestAuthFailureAsksTheGuardToReBakeAndKeepsRunning passed throughout, because
-// the fake node rejects with Unauthenticated: the spec's scenario, not the
-// field's. This drives the field's, verbatim.
+// The §6 re-bake test passed throughout, because the fake node rejected with
+// Unauthenticated: the spec's scenario, not the field's. This drives the
+// field's, verbatim.
 func TestACredentialTheNodeCannotParseAsksTheGuardToReBake(t *testing.T) {
 	node := lndtest.Start(t)
 	dir := t.TempDir()
@@ -359,13 +364,13 @@ func TestACredentialTheNodeCannotParseAsksTheGuardToReBake(t *testing.T) {
 	lndtest.WaitFor(t, "a bake request for a credential the node cannot parse",
 		func() bool { return broker.Bakes() > 0 })
 
-	// But NOT the re-link state. "Re-link needed" is an operator-facing claim
-	// that the node verified our macaroon and refused it, and LND answers
-	// codes.Unknown while it is merely restarting. The reaction is broad; the
-	// sentence on the page is narrow.
-	if got := client.State(); got == lnd.StateRelink {
-		t.Errorf("State = %q for a credential the node could not parse; that sentence "+
-			"belongs to a macaroon the node verified and refused", got)
+	// And the re-link state, because the node is up (2f0). Until 2f0 this
+	// asserted the opposite: LND answers codes.Unknown while it is merely
+	// restarting too, so the state took the narrow code test and this case read
+	// "connecting" — on the box, while the operator had to click Re-link and the
+	// page never said so. The node's stage is what tells the two apart now.
+	if got := client.State(); got != lnd.StateRelink {
+		t.Errorf("State = %q for a credential a running node could not parse, want %q", got, lnd.StateRelink)
 	}
 
 	cancel()
@@ -439,6 +444,40 @@ func TestConnectivityFailuresDoNotAskForAReBake(t *testing.T) {
 	}
 	if got := client.State(); got == lnd.StateRelink {
 		t.Errorf("State = %q for an unanswering node, want anything but re-link", got)
+	}
+}
+
+// o34.10, kept by 2f0: a per-request call's failure is an answer about the
+// request, so it neither moves the state nor asks the node's stage. The stage
+// question belongs to the invoice stream alone; asked here, every stranger's
+// failed callback would cost a State call and could write "re-link" over a
+// connection the stream knows is fine.
+func TestARejectedPerRequestCallAsksNoStageAndMovesNothing(t *testing.T) {
+	node := lndtest.Start(t)
+	dir := t.TempDir()
+	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+
+	broker := &lndtest.Broker{}
+	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), testOptions(broker))
+	defer client.Close()
+	if _, err := client.GetInfo(t.Context()); err != nil {
+		t.Fatalf("GetInfo before the rejection: %v", err)
+	}
+
+	node.SetRejectLikeLND(true)
+	for range 3 {
+		if _, err := client.AddInvoice(t.Context(), &lnrpc.Invoice{ValueMsat: 1_000}); err == nil {
+			t.Fatal("the node accepted a call it was told to refuse")
+		}
+	}
+	if calls, _ := node.StateCalls(); calls != 0 {
+		t.Errorf("three rejected per-request calls asked the node's stage %d times, want 0", calls)
+	}
+	if got := client.State(); got != lnd.StateReady {
+		t.Errorf("State = %q after rejected per-request calls, want it left at %q", got, lnd.StateReady)
+	}
+	if got := broker.Bakes(); got != 0 {
+		t.Errorf("%d bake requests from per-request calls, want 0", got)
 	}
 }
 

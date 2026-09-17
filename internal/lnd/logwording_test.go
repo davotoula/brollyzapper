@@ -224,31 +224,83 @@ func TestTheStreamRetryLineIsWordedByStateAndWhetherItWasUp(t *testing.T) {
 
 // 20i.22. On the 0.1.21 box trip, LND booting through a core-app update was
 // logged as WARN "lnd rejected our macaroon; re-link needed", with errors
-// saying "waiting to start" and "wallet locked". The state code takes the
-// narrow test on purpose and said "connecting"; the log took the broad one, and
-// an operator who believed the log would re-link for nothing.
+// saying "waiting to start" and "wallet locked". The state took a narrower test
+// than the log, and an operator who believed the log would re-link for nothing.
+// The rule that fixed it stands: the sentence says re-link exactly when the
+// state does.
 //
-// The request to the guard is broad and stays broad. Only the sentence follows
-// the narrow test.
-func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
+// 2f0 changed what decides the state, so this table is by STAGE. LND answers a
+// rotated macaroon ("root key with id N doesn't exist", measured 17 Sep 2026)
+// with code Unknown, exactly as it answers a node that is starting or locked,
+// so the narrow code test never said re-link on a real rotation. Now a rejection
+// the code does not settle asks the node's State service, and only a stage that
+// admits calls reads as re-link.
+//
+// The request to the guard is broad and stays broad; every row asks.
+func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		cause  error
-		relink bool
+		name string
+		// stage is LND's name for the node's stage; SERVER_ACTIVE when empty, as
+		// lndtest.Start leaves it. A name, not the enum: NON_EXISTING is its zero.
+		stage lnd.WalletState
+		// cause is what an admitted call fails with; a stage that does not admit
+		// calls refuses with its own error first, as LND's interceptor order does.
+		cause    error
+		stateErr error
+		relink   bool
+		// asksStage is whether the node's State service was consulted: the codes
+		// that settle it by themselves must not cost a call.
+		asksStage bool
 	}{
-		{"unauthenticated", status.Error(codes.Unauthenticated, "verification failed: signature mismatch"), true},
-		{"permission denied", status.Error(codes.PermissionDenied, "permission denied"), true},
-		{"a node that is starting", status.Error(codes.Unknown, "waiting to start, RPC services not available"), false},
-		{"a locked wallet", status.Error(codes.Unknown, "wallet locked, unlock it to enable full RPC access"), false},
-		{"a macaroon the parser refused", status.Error(codes.Unknown, "cannot determine data format of binary-encoded macaroon"), false},
-		// A code other than Unknown, so the code attribute is read from the cause.
-		{"an internal error", status.Error(codes.Internal, "unexpected failure"), false},
+		// Settled by the code alone: our own client failing to read the macaroon
+		// is Unauthenticated, and PermissionDenied is a verdict.
+		{name: "unauthenticated", cause: status.Error(codes.Unauthenticated, "verification failed: signature mismatch"), relink: true},
+		{name: "permission denied", cause: status.Error(codes.PermissionDenied, "permission denied"), relink: true},
+
+		// A rotation, as LND answers it: the node is up and refuses the bytes.
+		{name: "a rotation, as measured", cause: status.Error(codes.Unknown,
+			"cannot retrieve macaroon: cannot get macaroon: root key with id 355822853575254257 doesn't exist"),
+			relink: true, asksStage: true},
+		{name: "another node's macaroon", cause: lndtest.RejectedLikeLND(), relink: true, asksStage: true},
+		{name: "a rotation while the RPC server is active", stage: lnd.WalletRPCActive,
+			cause: lndtest.RejectedLikeLND(), relink: true, asksStage: true},
+
+		// The same code from a node that is not accepting calls says nothing
+		// about the credential. The fake refuses with LND's state error by itself.
+		{name: "a node waiting to start", stage: lnd.WalletWaitingToStart, asksStage: true},
+		{name: "a node starting up", stage: lnd.WalletUnlocked, asksStage: true},
+		{name: "a locked wallet", stage: lnd.WalletLocked, asksStage: true},
+		{name: "a node with no wallet", stage: lnd.WalletNonExisting, asksStage: true},
+
+		// A node whose stage cannot be read is not known to be up.
+		{name: "a State service that will not answer", cause: lndtest.RejectedLikeLND(),
+			stateErr: status.Error(codes.Unimplemented, "unknown service lnrpc.State"), asksStage: true},
+
+		// d46.20's box case: LND's parser refusing a corrupt recv.macaroon on a
+		// node that is up. It said "connecting" until 2f0, and it is exactly the
+		// case where the operator had to click Re-link while the UI never said so.
+		{name: "a macaroon the parser refused", cause: status.Error(codes.Unknown,
+			"cannot determine data format of binary-encoded macaroon"), relink: true, asksStage: true},
+		// LND's own macaroon check never answers Internal; its panic recovery
+		// does, around every interceptor and handler. Re-link, as the guard counts
+		// it: one rule for "the node is up and would not take the call". A code
+		// other than Unknown, so the code attribute on the INFO rows is read from
+		// the cause rather than assumed.
+		{name: "an internal error", cause: status.Error(codes.Internal, "internal server error"), relink: true, asksStage: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
 			dir := t.TempDir()
 			node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+			if tc.stage != "" {
+				stage, known := lnrpc.WalletState_value[string(tc.stage)]
+				if !known {
+					t.Fatalf("%q is not a stage LND defines", tc.stage)
+				}
+				node.SetWalletState(lnrpc.WalletState(stage))
+			}
 			node.SetRejectWith(tc.cause)
+			node.SetStateError(tc.stateErr)
 
 			var logged syncBuffer
 			broker := &lndtest.Broker{}
@@ -266,15 +318,26 @@ func TestTheReBakeLineIsWordedByTheNarrowTest(t *testing.T) {
 			if !ok {
 				t.Fatal("the guard was asked to re-bake and nothing said so")
 			}
-			// Only a cause the state calls Relink may say re-link; anything else
+			// Only a failure the state calls Relink may say re-link; anything else
 			// names the code the node answered with.
-			wantLevel, wantMsg, wantCode := "INFO", reBakeInCaseStale, status.Code(tc.cause).String()
+			wantState, wantLevel, wantMsg, wantCode := lnd.StateConnecting, "INFO", reBakeInCaseStale, "Unknown"
+			if tc.cause != nil {
+				wantCode = status.Code(tc.cause).String()
+			}
 			if tc.relink {
-				wantLevel, wantMsg, wantCode = "WARN", relinkNeeded, ""
+				wantState, wantLevel, wantMsg, wantCode = lnd.StateRelink, "WARN", relinkNeeded, ""
 			}
 			if got.Level != wantLevel || got.Msg != wantMsg || got.Code != wantCode {
-				t.Errorf("%v logged %s %q code=%q, want %s %q code=%q",
-					tc.cause, got.Level, got.Msg, got.Code, wantLevel, wantMsg, wantCode)
+				t.Errorf("logged %s %q code=%q, want %s %q code=%q",
+					got.Level, got.Msg, got.Code, wantLevel, wantMsg, wantCode)
+			}
+			// The page and the log read one verdict. Every attempt meets the same
+			// refusal, so the state cannot have moved on since the line was written.
+			if got := client.State(); got != wantState {
+				t.Errorf("State = %q, want %q — the log and the Node page disagree", got, wantState)
+			}
+			if calls, _ := node.StateCalls(); (calls > 0) != tc.asksStage {
+				t.Errorf("the node's State service was asked %d times; want asked=%v", calls, tc.asksStage)
 			}
 		})
 	}
