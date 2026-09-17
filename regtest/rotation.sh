@@ -18,7 +18,8 @@
 #     -> restart: on-failure brings it back and Docker re-resolves the mount
 #     -> the guard re-copies tls.cert and re-bakes recv.macaroon on a new root key
 #     -> the server, whose recv.macaroon LND no longer has a root key for, says
-#        re-link while it waits (2f0)
+#        re-link while it waits — on the second refusal from a node reporting a
+#        running stage, since the first cannot be told from LND shutting down (2f0)
 #     -> the server, which never exited, recovers with no operator action
 #
 #   ./rotation.sh
@@ -384,8 +385,11 @@ NODE_DURING=$(curl -s -b "$JAR" "$APP/node" | sed -n 's|.*<dt>Connection</dt><dd
 # the page is racy against the guard's re-bake, which is already under way.
 #
 # Expected to be there already: the server's stream meets the stale macaroon
-# within one backoff of LND coming up, and the guard spent at least its 30s
-# rotation window and 10s settling delay before section 2 let us through. The
+# within one backoff of LND coming up, and says re-link on the attempt after
+# that — a refusal from a node reporting a running stage takes a second
+# observation to confirm, and that one waits minBackoff rather than the grown
+# delay (2f0). The guard spent at least its 30s rotation window and 10s
+# settling delay before section 2 let us through. The
 # short wait is for the log reaching docker, not for the server — once the
 # guard's restart (already under way, restart: on-failure) re-bakes
 # recv.macaroon, a line not yet written never will be.
