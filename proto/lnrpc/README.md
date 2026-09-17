@@ -1,9 +1,15 @@
 # Vendored LND protocol definitions
 
-`lightning.proto` and `routerrpc/router.proto` are copied verbatim from
-[`lightningnetwork/lnd`](https://github.com/lightningnetwork/lnd) at tag
-**v0.21.2-beta** (`lnrpc/lightning.proto` and `lnrpc/routerrpc/router.proto`),
-under lnd's MIT licence — a copy of which is `LICENSE.lnd` in this directory.
+`lightning.proto`, `stateservice.proto` and `routerrpc/router.proto` are copied
+verbatim from [`lightningnetwork/lnd`](https://github.com/lightningnetwork/lnd) at
+tag **v0.21.2-beta** (`lnrpc/lightning.proto`, `lnrpc/stateservice.proto` and
+`lnrpc/routerrpc/router.proto`), under lnd's MIT licence — a copy of which is
+`LICENSE.lnd` in this directory.
+
+`stateservice.proto` arrived with `dqd` (17 Sep 2026): the guard asks
+`/lnrpc.State/GetState` — which LND answers without a macaroon, in every wallet
+state — to tell a node that is not ready from a node that refuses the credential,
+because LND answers both with gRPC code `Unknown`.
 
 Nothing here is hand-edited. To move to a newer LND, replace the file from that
 tag and re-run `make proto` (the `lnd` module drags in cgo, which `CGO_ENABLED=0` forbids — the reason the
