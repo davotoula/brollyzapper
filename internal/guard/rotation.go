@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// Rotation-detection defaults (spec §6): three consecutive authentication
-// failures inside thirty seconds mean the node's macaroons were rotated.
+// Rotation-detection defaults (spec §6): three consecutive rejections of
+// admin.macaroon inside thirty seconds mean the node's macaroons were rotated.
 const (
 	DefaultRotationWindow    = 30 * time.Second
 	DefaultRotationThreshold = 3
@@ -27,7 +27,7 @@ const (
 	ProbeInterval = 10 * time.Second
 )
 
-// RotationDetector decides when repeated authentication failures stop looking
+// RotationDetector decides when repeated rejections of admin.macaroon stop looking
 // like a flaky node and start looking like rotation.
 //
 // It counts ONLY the guard's own probes (§6, as0.8). Anything else that sees

@@ -144,7 +144,7 @@ func capturedLog() (*slog.Logger, *lockedBuffer) {
 // after — or never, because the write raced the exit — is no memory at all.
 func TestTheRotationExitIsRecordedBeforeTheGuardExits(t *testing.T) {
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	d := guardDirs(t, node)
 	log, sink := capturedLog()
 
@@ -190,7 +190,7 @@ func TestTheRotationExitIsRecordedBeforeTheGuardExits(t *testing.T) {
 // process and lost it on the wire would leave every page test green.
 func TestASecondRejectionRunOverTheSameBytesDoesNotExitAgain(t *testing.T) {
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	d := guardDirs(t, node)
 	_, s := degradedGuard(t, node, d)
 	status, err := s.client.Status(t.Context())
@@ -234,7 +234,7 @@ func TestASecondRejectionRunOverTheSameBytesDoesNotExitAgain(t *testing.T) {
 func TestAChangedAdminMacaroonGetsItsOwnExit(t *testing.T) {
 	t.Run("changed before the restart", func(t *testing.T) {
 		node := lndtest.Start(t)
-		node.SetReject(true)
+		node.SetRejectLikeLND(true)
 		d := guardDirs(t, node)
 		exitForRotation(t, node, d, guard.Options{})
 
@@ -260,7 +260,7 @@ func TestAChangedAdminMacaroonGetsItsOwnExit(t *testing.T) {
 
 	t.Run("changed in place while the guard runs", func(t *testing.T) {
 		node := lndtest.Start(t)
-		node.SetReject(true)
+		node.SetRejectLikeLND(true)
 		d := guardDirs(t, node)
 		exitForRotation(t, node, d, guard.Options{})
 
@@ -282,12 +282,12 @@ func TestAChangedAdminMacaroonGetsItsOwnExit(t *testing.T) {
 // render, and an fsync per render is a cost nobody would see arrive.
 func TestASuccessClearsTheMemoryAndAHealthyGuardNeverWrites(t *testing.T) {
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	d := guardDirs(t, node)
 	g, s := degradedGuard(t, node, d)
 
 	// The operator fixes the mount in place; the next PROBE sees it.
-	node.SetReject(false)
+	node.SetRejectLikeLND(false)
 	lndtest.WaitFor(t, "the probe loop to clear the memory", func() bool {
 		return readGuardState(t, d.data).RotationExit == nil
 	})
@@ -338,7 +338,7 @@ func TestAStateWriteThatFailsDoesNotStopTheRotationExit(t *testing.T) {
 		t.Skip("root writes through directory permissions; this needs a write that fails")
 	}
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	d := guardDirs(t, node)
 	g := openGuard(t, node, d, fastProbes(guard.Options{}))
 	if err := os.Chmod(d.data, 0o500); err != nil {

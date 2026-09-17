@@ -39,7 +39,10 @@ func newMemoryTestGuard(t *testing.T) (*Guard, string) {
 	}, admin
 }
 
-var rejected = status.Error(codes.Unauthenticated, "verification failed: signature mismatch")
+// rejected is LND's answer to a macaroon it will not accept (dqd, measured 16 Sep
+// 2026): code Unknown. lndtest.RejectedLikeLND is the same value for the tests
+// that run a node.
+var rejected = status.Error(codes.Unknown, "verification failed: signature mismatch after caveat verification")
 
 func declared(g *Guard) bool {
 	select {

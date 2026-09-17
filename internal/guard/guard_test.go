@@ -313,8 +313,8 @@ func TestStatusReportsCredentialPresenceAndReachability(t *testing.T) {
 	}
 
 	// A node that stops answering must show as unreachable, not as an error the
-	// server has to interpret.
-	node.SetReject(true)
+	// server has to interpret. Refusing the way LND does (dqd).
+	node.SetRejectLikeLND(true)
 	status, err = g.Status(t.Context())
 	if err != nil {
 		t.Fatalf("Status with a rejecting node: %v", err)
@@ -401,7 +401,7 @@ func TestCredentialWritesReplaceAtomicallyAndLeaveNoTempFiles(t *testing.T) {
 	}
 }
 
-// Spec §6: three consecutive auth failures within 30 s mean the node's
+// Spec §6: three consecutive rejections within 30 s mean the node's
 // macaroons were rotated. The clock is injected; no test waits 30 seconds.
 func TestRotationIsDetectedAfterThreeConsecutiveRejectedProbes(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -477,9 +477,9 @@ func TestProbesFurtherApartThanTheWindowAreNotAConsecutiveRun(t *testing.T) {
 
 // Spec §6: the guard's bounded exit is the one sanctioned exit in the codebase,
 // because it is the only way to re-resolve a rename-replaced bind mount.
-func TestRepeatedAuthFailuresEndTheProcessWithTheRotationError(t *testing.T) {
+func TestRepeatedRejectionsEndTheProcessWithTheRotationError(t *testing.T) {
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	// The probe loop has its own timer, so this hook sees the exit delay and
 	// nothing else — which is what lets the assertion below be exact.
 	slept := make(chan time.Duration, 4)
@@ -510,7 +510,7 @@ func TestRepeatedAuthFailuresEndTheProcessWithTheRotationError(t *testing.T) {
 			t.Fatalf("Serve = %v, want ErrMacaroonRotated", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the guard did not exit after three consecutive auth failures")
+		t.Fatal("the guard did not exit after three consecutive rejections")
 	}
 	select {
 	case d := <-slept:
@@ -572,13 +572,14 @@ func TestARestartRebakesWhenTheNodeNoLongerListsTheRootKey(t *testing.T) {
 // circuit-breaker exists to prevent.
 //
 // Two shapes of "cannot tell", and they are genuinely different: a node that
-// REFUSES (Unauthenticated — which is also the rotation signal) and a node that
-// does not answer at all (Unavailable — the case where observe's IsAuthFailure
-// filter is the entire guard-rail). The first version of this test only had the
-// former, under a name that claimed the latter.
+// REFUSES (code Unknown, the way LND refuses a macaroon — which is also the
+// rotation signal, dqd) and a node that does not answer at all (Unavailable —
+// the case where observe's IsCredentialRejected filter is the entire
+// guard-rail). The first version of this test only had the former, under a name
+// that claimed the latter.
 func TestANodeThatCannotAnswerIsNotTreatedAsARotation(t *testing.T) {
 	for name, refuse := range map[string]func(*lndtest.Node){
-		"a node that refuses":         func(n *lndtest.Node) { n.SetReject(true) },
+		"a node that refuses":         func(n *lndtest.Node) { n.SetRejectLikeLND(true) },
 		"a node that does not answer": func(n *lndtest.Node) { n.SetRejectWith(status.Error(codes.Unavailable, "node is down")) },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -671,7 +672,7 @@ func TestCallingTheGuardRepeatedlyCannotMakeItExit(t *testing.T) {
 	if err := g.BakeReceive(t.Context()); err != nil {
 		t.Fatalf("warming the guard: %v", err)
 	}
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -708,7 +709,7 @@ func TestCallingTheGuardRepeatedlyCannotMakeItExit(t *testing.T) {
 // touches it again. If it exits, the second and third samples were its own.
 func TestOneRejectionIsEnoughForTheGuardToDetectRotationOnItsOwn(t *testing.T) {
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	g, _ := newGuardWithOptions(t, node, guard.Options{
 		// Instant, so the probe loop's interval and the settling delay do not
 		// make this test wait thirty seconds to learn something about ordering.
@@ -747,7 +748,7 @@ func TestOneRejectionIsEnoughForTheGuardToDetectRotationOnItsOwn(t *testing.T) {
 // an exit, a restart, and a fresh root key on the operator's node.
 func TestATransientFailureEndsTheProbeLoopInsteadOfTrippingIt(t *testing.T) {
 	node := lndtest.Start(t)
-	node.SetReject(true)
+	node.SetRejectLikeLND(true)
 	g, _ := newGuardWithOptions(t, node, guard.Options{
 		// The loop has its own timer now, so this is what drives it; the Sleep
 		// hook is the exit delay alone.
@@ -770,9 +771,9 @@ func TestATransientFailureEndsTheProbeLoopInsteadOfTrippingIt(t *testing.T) {
 	// so the test passes whichever one is broken. Planted exactly that and it
 	// reported a pass. Alternating leaves only the cleared run.
 	for range 5 {
-		node.SetReject(true)
+		node.SetRejectLikeLND(true)
 		_ = g.Handle(ctx, guard.Request{Op: guard.OpBakeReceive})
-		node.SetReject(false)
+		node.SetRejectLikeLND(false)
 		if _, err := g.Status(ctx); err != nil {
 			t.Fatalf("Status while the node is healthy: %v", err)
 		}
@@ -1167,7 +1168,7 @@ func TestTheErrorKindsAreExactlyThese(t *testing.T) {
 	// alone, so it is reached the way production reaches it — an exit, a restart
 	// over the same volumes, a node still rejecting — and read off Status.
 	stuck := lndtest.Start(t)
-	stuck.SetReject(true)
+	stuck.SetRejectLikeLND(true)
 	degradedGuard(t, stuck, guardDirs(t, stuck))
 	raised[guard.KindAdminMacaroonStillRejected] = true
 
