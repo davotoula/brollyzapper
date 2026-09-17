@@ -75,12 +75,18 @@ type Client struct {
 
 	state         atomic.Value // State
 	streamRunning atomic.Bool
+	// suspectedRelink is set by one refusal from a node that reports a stage
+	// admitting calls, and read by the NEXT stream outcome, which either confirms
+	// it or clears it. See relinkState for why one refusal is not enough, and
+	// RunInvoiceStream, which shortens the wait before that second observation.
+	suspectedRelink atomic.Bool
 
 	mu   sync.Mutex
 	conn *grpc.ClientConn
 	// stateConn is the second connection GetState uses: TLS verified exactly as
-	// conn is, and no per-RPC credential at all. Dialled on first use, so a
-	// client that never asks — the server's — never holds one.
+	// conn is, and no per-RPC credential at all. Dialled on first use: the
+	// server's client asks only about a refused stream (recordState), and
+	// reconnect closes it with conn.
 	stateConn *grpc.ClientConn
 	// certErr is the last certificate-name verdict, remembered so a REFUSED
 	// connection costs no more than a successful one.
@@ -276,30 +282,116 @@ func (c *Client) reconnect() {
 }
 
 // recordState maps a call's outcome onto the state the admin UI shows, and
-// reports whether the node ANSWERED and would not accept what we sent.
+// returns the state it recorded together with whether the node ANSWERED and
+// would not accept what we sent. A failure that says nothing about either moves
+// nothing and returns "".
 //
-// The state takes the narrow test even where the caller acts on the broad one:
-// "re-link needed" is a sentence claiming the node verified our macaroon and
-// refused it, and LND answers codes.Unknown while it is merely restarting.
-func (c *Client) recordState(err error) bool {
+// "Re-link needed" claims the node was up and refused our macaroon. LND answers
+// codes.Unknown for that — a rotation is "root key with id N doesn't exist" — and
+// for merely not being ready (see WalletState.AdmitsCalls). So a rejection the
+// code does not settle by itself is decided by the node's stage, which is dqd's
+// rule for the guard applied to the server (2f0). The broad question still
+// decides the re-bake; only the state waits for the stage.
+//
+// delivered is whether the call had already been accepted — a stream that
+// delivered something. LND checks the macaroon once, when a stream opens, so a
+// later failure on it is the handler's (SubscribeInvoices answers an invoice it
+// cannot convert with code Unknown) and is not read by the stage.
+func (c *Client) recordState(ctx context.Context, err error, delivered bool) (State, bool) {
+	// Taken, not read: this outcome decides the suspicion afresh, and only
+	// relinkState below may set it again. Every other outcome — a delivery, a
+	// node that went away, an unreadable certificate — ends it, which is what
+	// makes "two in a row" mean two consecutive stream outcomes.
+	suspected := c.suspectedRelink.Swap(false)
+	var state State
+	rejected := false
 	switch {
 	case err == nil:
-		c.setState(StateReady)
+		state = StateReady
 	case errors.Is(err, ErrNotLinked) || !c.creds.Ready():
 		// Once the connection is cached, an absent credential no longer arrives
 		// as the sentinel: grpc-go stringifies the per-RPC credential's error
 		// into an Unauthenticated status, so errors.Is stops matching. Asking
 		// the credential source directly is what keeps "the guard has not
 		// written it yet" from being reported as "the node rejected it".
-		c.setState(StateNotLinked)
+		state = StateNotLinked
 	case IsAuthFailure(err):
-		c.setState(StateRelink)
-		return true
+		// A verdict with no stage to ask about: PermissionDenied is LND's, and
+		// Unauthenticated is our own client failing to read the macaroon, which
+		// is a rejection whatever the node is doing.
+		state, rejected = StateRelink, true
+	case IsCredentialRejected(err) && delivered:
+		state, rejected = StateConnecting, true
 	case IsCredentialRejected(err):
-		c.setState(StateConnecting)
-		return true
+		state, rejected = c.relinkState(ctx, suspected), true
+	default:
+		return "", false
 	}
-	return false
+	c.setState(state)
+	return state, rejected
+}
+
+// stageTimeout bounds rejectionState's question, dial included: reconnect closes
+// the State connection with the main one after every stream failure, so each
+// question dials afresh. The node answered the call a moment ago, so its State
+// service answers in milliseconds or not at all, and this runs on the invoice
+// stream: a stalled dial must not hold the stream down for longer than
+// reBakeTimeout would. Would change if a real node is measured answering
+// GetState slower than this while answering Lightning calls.
+const stageTimeout = 5 * time.Second
+
+// relinkState is the state for a rejection whose code a node that is not ready
+// also answers with (see WalletState.AdmitsCalls): re-link needs the node to
+// report a stage that admits calls, TWICE IN A ROW.
+//
+// The stage alone is not enough, because LND has no stopping stage. Its
+// InterceptorChain goes no further than SetServerActive, and its cleanups run in
+// reverse order — rpcServer.Stop first, the macaroon service's Close well before
+// grpcServer.Stop (lnd.go 382, 494, 669; config_builder.go ~504, v0.21.2-beta).
+// A reconnect landing in that window is refused with a plain error, code
+// Unknown, "macaroon store is locked" (macaroons/store.go ~250), while GetState
+// still answers SERVER_ACTIVE. One refusal would therefore record re-link for
+// every Lightning update, and hold it for the whole restart, since the attempts
+// that follow fail with Unavailable and move nothing — which is 20i.22's bug and
+// exactly what §6's d46.20 amendment warns a broad state would do (David's
+// ruling, 17 Sep 2026, on 2f0's go-review).
+//
+// A node shutting down answers the confirming attempt with Unavailable, or not
+// at all. A node that rotated its macaroons answers it the same way it answered
+// the first, so a rotation costs one extra attempt — minBackoff, not a full
+// backoff, because RunInvoiceStream shortens the wait while the suspicion holds.
+//
+// Accepted with it, as for the guard: LND's middleware interceptor runs after
+// the macaroon check and refuses with the same code, so a stalled read-only
+// middleware on a running node reads as re-link. A click is cheap, and the
+// re-bake is asked for either way.
+func (c *Client) relinkState(ctx context.Context, suspected bool) State {
+	if c.rejectionState(ctx) != StateRelink {
+		return StateConnecting
+	}
+	// Already re-link: the state itself is the standing confirmation, so a
+	// refusal that arrives while it holds does not go back through connecting.
+	if suspected || c.State() == StateRelink {
+		return StateRelink
+	}
+	c.suspectedRelink.Store(true)
+	return StateConnecting
+}
+
+// rejectionState reads the node's stage: re-link only when it admits calls. A
+// node whose stage cannot be read is not known to be up, and says nothing about
+// the credential.
+func (c *Client) rejectionState(ctx context.Context) State {
+	ctx, cancel := context.WithTimeout(ctx, stageTimeout)
+	defer cancel()
+	stage, err := c.GetState(ctx)
+	if err != nil {
+		c.log.Debug("could not ask the node's stage about a rejected call", "error", err.Error())
+	}
+	if err == nil && stage.AdmitsCalls() {
+		return StateRelink
+	}
+	return StateConnecting
 }
 
 // observe records the outcome of a PER-REQUEST call. It moves the state and
@@ -338,9 +430,13 @@ func (c *Client) observe(err error) error {
 // lifetime: nothing a stranger sends can make it fail, and it will notice a bad
 // credential within one backoff whether or not anyone is looking. An arch rule
 // asserts this is the only call site.
-func (c *Client) observeStream(ctx context.Context, err error) error {
-	if c.recordState(err) {
-		c.requestReBake(ctx, err)
+//
+// delivered says whether this stream had received anything before err; see
+// recordState.
+func (c *Client) observeStream(ctx context.Context, err error, delivered bool) error {
+	previous := c.State()
+	if state, rejected := c.recordState(ctx, err, delivered); rejected {
+		c.requestReBake(ctx, err, previous, state)
 	}
 	return err
 }
@@ -366,26 +462,37 @@ const reBakeTimeout = 5 * time.Second
 // requestReBake is §6's recovery: the node stopped accepting our macaroon —
 // almost always because it was rotated — so the guard is asked for a new one.
 // The server does not exit; the guard's bounded exit is the only sanctioned
-// one in the codebase.
-func (c *Client) requestReBake(ctx context.Context, cause error) {
+// one in the codebase. state is what recordState recorded for cause, and
+// previous the state before it.
+func (c *Client) requestReBake(ctx context.Context, cause error, previous, state State) {
 	// No broker means this process cannot re-link and must not say it can. The
 	// guard builds a Client of its own with none, and "re-link needed" is a
 	// sentence about the server (§6).
 	if c.broker == nil {
 		return
 	}
-	if !c.mayReBake() {
+	asked := c.mayReBake()
+	// The request is broad; the sentence takes the state recordState recorded,
+	// so the log says re-link exactly when the Node page does (20i.22). Not
+	// IsAuthFailure: a real rotation arrives as Unknown and is re-link by the
+	// node's stage (2f0), which a code test cannot see.
+	//
+	// And re-link is said on ENTERING the state even when the interval holds the
+	// request back. A rotation usually arrives with the interval already spent,
+	// by the request made while LND was still starting — the one that wakes the
+	// guard — and the guard's re-bake usually lands before the minute is up, so a
+	// sentence that rode only on a request would never be written (2f0).
+	switch {
+	case state == StateRelink && (asked || previous != StateRelink):
+		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
+	case asked:
+		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
+			"code", status.Code(cause).String(), "error", cause.Error())
+	}
+	if !asked {
 		c.log.Debug("not asking the guard to re-bake again yet",
 			"error", cause.Error(), "interval", ReBakeInterval.String())
 		return
-	}
-	// The request below is broad; the sentence takes recordState's narrow test,
-	// so the log says re-link exactly when the Node page does (20i.22).
-	if IsAuthFailure(cause) {
-		c.log.Warn("lnd rejected our macaroon; re-link needed", "error", cause.Error())
-	} else {
-		c.log.Info("the node answered with an error; asking the guard to re-bake in case the credential is stale",
-			"code", status.Code(cause).String(), "error", cause.Error())
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, reBakeTimeout)
@@ -412,11 +519,12 @@ func (c *Client) mayReBake() bool {
 // Both codes appear: Unauthenticated for a macaroon LND cannot verify,
 // PermissionDenied for one that verifies but grants too little.
 //
-// This is the narrow question, and it is the one the guard asks about
-// admin.macaroon: a verified-and-refused macaroon means the node's macaroons
-// were rotated, and a container restart re-resolves the bind mount onto the
-// replacement. The server asks the broader question below — see the note there
-// on why the two are deliberately different.
+// This is the narrow question, and the server's operator-facing re-link state
+// asks it for the codes that need no stage: they are a verdict whatever the node
+// is doing. LND itself answers most rejections with codes.Unknown, which only
+// the broader question below matches, and recordState asks the node's stage
+// before it calls one of those re-link (2f0). The guard asks the broader
+// question too, gated the same way (dqd).
 func IsAuthFailure(err error) bool {
 	switch status.Code(err) {
 	case codes.Unauthenticated, codes.PermissionDenied:
@@ -443,7 +551,7 @@ func IsAuthFailure(err error) bool {
 //
 // So this fails TOWARD re-baking, and ReBakeInterval is what makes that safe:
 // the cost of a false positive is one request per minute, not one per failure.
-// The operator-facing state takes the narrow test instead — see observe.
+// The operator-facing state asks the node's stage as well — see recordState.
 //
 // Errors that never reached the node — an unreadable tls.cert, a dial failure —
 // are not gRPC statuses at all and are excluded, because re-baking cannot fix

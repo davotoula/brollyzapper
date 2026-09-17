@@ -17,6 +17,9 @@
 #     -> audit=macaroon.rotate, a 10s settling pause, exit non-zero
 #     -> restart: on-failure brings it back and Docker re-resolves the mount
 #     -> the guard re-copies tls.cert and re-bakes recv.macaroon on a new root key
+#     -> the server, whose recv.macaroon LND no longer has a root key for, says
+#        re-link while it waits — on the second refusal from a node reporting a
+#        running stage, since the first cannot be told from LND shutting down (2f0)
 #     -> the server, which never exited, recovers with no operator action
 #
 #   ./rotation.sh
@@ -38,6 +41,12 @@
 #
 # ./wrongmount.sh is the proof of that shape on any platform: it plants readable
 # rejected bytes in place, so this script does not plant them too.
+#
+# THE SERVER'S REJECTION IS LND'S ON EVERY PLATFORM. recv.macaroon lives in the
+# credentials named volume, not a host bind mount, so the stale bytes reach the
+# node, which answers code Unknown, "root key with id N doesn't exist" (measured
+# 17 Sep 2026 with lncli). That is what makes section 3's re-link line provable
+# on macOS.
 #
 # Afterwards the stack is left working. Nothing here is destructive beyond the
 # regtest node's own macaroons, which it regenerates.
@@ -262,11 +271,19 @@ ls "$LNDDIR"/macaroons.db >/dev/null 2>&1 || die "$LNDDIR/macaroons.db is not wh
 rm -f "$LNDDIR"/macaroons.db "$LNDDIR"/*.macaroon
 ok "macaroons.db and every *.macaroon removed"
 docker compose start lnd >/dev/null
+LND_START_EPOCH=$(date -u +%s)
+LND_ANSWERED_AFTER=""
 for i in $(seq 1 90); do
   lncli_recv getinfo >/dev/null 2>&1 && break
   sleep 1
 done
 lncli_recv getinfo >/dev/null 2>&1 || die "LND did not come back"
+# Section 3 reads this: past about a minute the server's retry gap has reached
+# its ceiling, and the guard can re-bake before the server meets the stale
+# macaroon at all. That is timing, not a defect, so section 3 says so and does
+# not assert rather than failing a working system (2f0 go-review).
+LND_ANSWERED_AFTER=$(( $(date -u +%s) - LND_START_EPOCH ))
+note "LND answered ${LND_ANSWERED_AFTER}s after it was started"
 for i in $(seq 1 30); do [ -f "$LNDDIR/admin.macaroon" ] && break; sleep 1; done
 [ -f "$LNDDIR/admin.macaroon" ] || die "LND did not write a new admin.macaroon"
 ensure_peered
@@ -365,6 +382,46 @@ NODE_DURING=$(curl -s -b "$JAR" "$APP/node" | sed -n 's|.*<dt>Connection</dt><dd
 [ "$NODE_DURING" != "ready" ] \
   && ok "the Node page shows the connection as \"$NODE_DURING\" while the credential is dead — a state, not a crash (§11)" \
   || die "the Node page says the connection is ready while the node is rejecting our macaroon"
+# 2f0: the operator is TOLD. LND refuses the stale recv.macaroon with the code it
+# also gives a starting node, so until 2f0 the server logged "re-bake in case the
+# credential is stale" at INFO and the page said connecting, on every real
+# rotation. The log line, not the page's relink state: the line is durable, and
+# the page is racy against the guard's re-bake, which is already under way.
+#
+# Expected to be there already: the server's stream meets the stale macaroon
+# within one backoff of LND coming up, and says re-link on the attempt after
+# that — a refusal from a node reporting a running stage takes a second
+# observation to confirm, and that one waits minBackoff rather than the grown
+# delay (2f0). The guard spent at least its 30s rotation window and 10s
+# settling delay before section 2 let us through. The
+# short wait is for the log reaching docker, not for the server — once the
+# guard's restart (already under way, restart: on-failure) re-bakes
+# recv.macaroon, a line not yet written never will be.
+RELINK_LINE=""
+RELINK_DEADLINE=40
+for i in $(seq 1 10); do
+  # The LATEST: a line from LND's shutdown may precede the one this asserts.
+  RELINK_LINE=$(glog brollyzapper | grep 'lnd rejected our macaroon; re-link needed' | tail -1 || true)
+  [ -n "$RELINK_LINE" ] && break
+  sleep 2
+done
+if [ -z "$RELINK_LINE" ] && [ "$LND_ANSWERED_AFTER" -ge "$RELINK_DEADLINE" ]; then
+  # NOT ASSERTED, and said as plainly as an ok: LND took ${LND_ANSWERED_AFTER}s,
+  # by which point the server's retry gap is at or near its 60s ceiling and the
+  # guard (10s probe + 30s window + 10s exit + restart) can re-bake before the
+  # server ever meets the stale macaroon. Deliberately not an ok line.
+  printf '   \033[33m--\033[0m   NOT ASSERTED: the server re-link line, because LND took %ss to answer and the guard can re-bake before the server retries. Re-run on a warm machine to assert it.\n' "$LND_ANSWERED_AFTER"
+else
+  [ -n "$RELINK_LINE" ] || die "the server never logged \"lnd rejected our macaroon; re-link needed\" while LND refused its recv.macaroon, though LND answered in ${LND_ANSWERED_AFTER}s; the operator was told connecting (2f0)"
+  require_from_this_run "server re-link" "$RELINK_LINE"
+  # After LND was STARTED, not merely after the run began: section 1 stops LND
+  # first, and a line written while it shut down would satisfy the run check
+  # without the rotation path having done anything (2f0 go-review).
+  RELINK_AT=$(log_epoch "$RELINK_LINE")
+  [ "$RELINK_AT" -ge "$LND_START_EPOCH" ] \
+    || die "the server's re-link line was written $(( LND_START_EPOCH - RELINK_AT ))s before LND was started again — during its shutdown, not after the rotation"
+  ok "the server logged \"re-link needed\" after the rotated LND started — LND's Unknown, read by the node's stage, confirmed by a second refusal (2f0)"
+fi
 
 # ---------------------------------------------------------------------------
 say "4. the guard came back and re-baked"

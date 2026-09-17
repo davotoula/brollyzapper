@@ -50,6 +50,8 @@ type Node struct {
 	macaroons []string
 	// rejectErr, when set, makes every RPC fail with it.
 	rejectErr error
+	// rejectScript answers the next calls one at a time, before rejectErr.
+	rejectScript []error
 	// walletState is what the State service reports, and what LND's state
 	// interceptor admits a call in: only RPC_ACTIVE and SERVER_ACTIVE reach the
 	// macaroon check. Start sets SERVER_ACTIVE.
@@ -71,8 +73,10 @@ type Node struct {
 	listPermissionsCalls  int
 	// ledger is every settled invoice the node remembers, settle_index ascending.
 	ledger []*lnrpc.Invoice
-	// breakAfter, when > 0, drops the invoice stream after that many sends.
+	// breakAfter, when > 0, drops the invoice stream after that many sends, with
+	// breakErr (Unavailable when nil).
 	breakAfter int
+	breakErr   error
 	// subscriptions records the settle_index each SubscribeInvoices resumed
 	// from — the assertion that resume semantics are right.
 	subscriptions []uint64
@@ -192,7 +196,8 @@ func WriteFile(t testing.TB, path string, data []byte) {
 }
 
 // SetReject makes every RPC fail with codes.Unauthenticated — the narrow shape
-// lnd.IsAuthFailure matches, which the server's re-link state keys on.
+// lnd.IsAuthFailure matches, which the server's re-link state reads without
+// asking the node's stage.
 //
 // THIS IS NOT WHAT LND ANSWERS A MACAROON IT WILL NOT ACCEPT; that is
 // SetRejectLikeLND, code Unknown (dqd). The one real source of this shape
@@ -385,6 +390,16 @@ func (n *Node) SetBreakAfter(count int) {
 	n.breakAfter = count
 }
 
+// SetBreakError is what a stream dropped by SetBreakAfter fails with: a handler
+// error AFTER the macaroon was accepted. LND's SubscribeInvoices returns plain
+// errors — code Unknown — when it cannot convert an invoice or its aux data
+// parser refuses one (rpcserver.go, SubscribeInvoices, v0.21.2-beta).
+func (n *Node) SetBreakError(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.breakErr = err
+}
+
 // macaroonUnder builds the macaroon this node answers with for a root key id.
 func macaroonUnder(rootKeyID uint64) ([]byte, error) {
 	m, err := macaroonpkg.New(fmt.Appendf(nil, "root-key-%d", rootKeyID),
@@ -474,6 +489,18 @@ func (n *Node) BakeRequests() []*lnrpc.BakeMacaroonRequest {
 	return append([]*lnrpc.BakeMacaroonRequest(nil), n.bakeRequests...)
 }
 
+// ScriptRejects sets what the next calls to authorise answer, one error (or
+// nil, meaning accept) per call; once used up, SetRejectWith's answer applies.
+//
+// Scripted rather than set, so a test can give one rejection and then a node
+// that has gone away, instead of racing the stream's reconnect to swap the
+// answer between two attempts.
+func (n *Node) ScriptRejects(errs ...error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.rejectScript = append([]error(nil), errs...)
+}
+
 // authorise records the macaroon the client sent and applies the reject switch.
 func (n *Node) authorise(ctx context.Context) error {
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -493,6 +520,10 @@ func (n *Node) authorise(ctx context.Context) error {
 		n.macaroons = append(n.macaroons, values[0])
 	}
 	rejectErr := n.rejectErr
+	if len(n.rejectScript) > 0 {
+		rejectErr = n.rejectScript[0]
+		n.rejectScript = n.rejectScript[1:]
+	}
 	n.mu.Unlock()
 
 	if len(values) != 1 || values[0] == "" {
@@ -893,8 +924,11 @@ func (n *Node) SubscribeInvoices(req *lnrpc.InvoiceSubscription, stream lnrpc.Li
 	n.mu.Lock()
 	n.subscriptions = append(n.subscriptions, req.SettleIndex)
 	ledger := append([]*lnrpc.Invoice(nil), n.ledger...)
-	breakAfter := n.breakAfter
+	breakAfter, breakErr := n.breakAfter, n.breakErr
 	n.mu.Unlock()
+	if breakErr == nil {
+		breakErr = status.Error(codes.Unavailable, "transport closing")
+	}
 
 	sent := 0
 	for _, invoice := range ledger {
@@ -903,7 +937,7 @@ func (n *Node) SubscribeInvoices(req *lnrpc.InvoiceSubscription, stream lnrpc.Li
 			continue
 		}
 		if breakAfter > 0 && sent == breakAfter {
-			return status.Error(codes.Unavailable, "transport closing")
+			return breakErr
 		}
 		if err := stream.Send(invoice); err != nil {
 			return err

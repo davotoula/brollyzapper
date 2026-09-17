@@ -70,12 +70,33 @@ func (c *Client) RunInvoiceStream(ctx context.Context, resume SettleIndexStore, 
 			attempt = 0
 		}
 		if err != nil {
+			var local localFailure
+			if errors.As(err, &local) {
+				// OURS, not the node's: this attempt never asked it, so it can
+				// neither confirm a suspected rejection nor stand between two that
+				// would (relinkState). It must also not leave the suspicion
+				// standing, because the wait below is shortened while one holds —
+				// a resume point that keeps failing would spin at minBackoff, one
+				// reconnect and one WARN a second, for as long as sqlite is locked.
+				c.suspectedRelink.Store(false)
+			}
 			// The connection is dropped rather than reused so the next attempt
 			// re-reads tls.cert, which LND regenerates on expiry.
 			c.reconnect()
 			c.logRetry(ctx, err, attempt+1, worked)
 		}
-		if err := c.waitBeforeRetry(ctx, backoffDelay(attempt, c.minBackoff, c.maxBackoff)); err != nil {
+		delay := backoffDelay(attempt, c.minBackoff, c.maxBackoff)
+		// A refusal from a node that says it is up is one observation, and
+		// relinkState needs a second before it will say re-link. Waiting out a
+		// grown backoff for it would leave the Node page on "connecting" for up
+		// to a minute of a real rotation — and on the regtest stack the guard
+		// re-bakes inside that minute, so the operator would never be told at
+		// all. One shortened wait per suspicion: the outcome of that attempt
+		// either confirms it or clears it.
+		if c.suspectedRelink.Load() {
+			delay = c.minBackoff
+		}
+		if err := c.waitBeforeRetry(ctx, delay); err != nil {
 			return err
 		}
 	}
@@ -122,7 +143,7 @@ func (c *Client) streamOnce(ctx context.Context, resume SettleIndexStore, handle
 	}
 	client, err := c.lightning()
 	if err != nil {
-		return false, c.observeStream(ctx, err)
+		return false, c.observeStream(ctx, err, false)
 	}
 
 	// LND sends every settlement with a settle_index STRICTLY GREATER than the
@@ -132,17 +153,17 @@ func (c *Client) streamOnce(ctx context.Context, resume SettleIndexStore, handle
 	// wallet (proto: lnrpc.InvoiceSubscription.settle_index).
 	stream, err := client.SubscribeInvoices(ctx, &lnrpc.InvoiceSubscription{SettleIndex: last})
 	if err != nil {
-		return false, c.observeStream(ctx, err)
+		return false, c.observeStream(ctx, err, false)
 	}
 
 	var received bool
 	for {
 		invoice, err := stream.Recv()
 		if err != nil {
-			return received, c.observeStream(ctx, err)
+			return received, c.observeStream(ctx, err, received)
 		}
 		received = true
-		c.observeStream(ctx, nil)
+		c.observeStream(ctx, nil, true)
 		if invoice.State != lnrpc.Invoice_SETTLED {
 			continue
 		}
