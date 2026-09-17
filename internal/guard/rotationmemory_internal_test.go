@@ -8,10 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/davotoula/brollyzapper/internal/lnd"
+	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
 	"github.com/davotoula/brollyzapper/internal/logging"
 )
 
@@ -39,10 +37,8 @@ func newMemoryTestGuard(t *testing.T) (*Guard, string) {
 	}, admin
 }
 
-// rejected is LND's answer to a macaroon it will not accept (dqd, measured 16 Sep
-// 2026): code Unknown. lndtest.RejectedLikeLND is the same value for the tests
-// that run a node.
-var rejected = status.Error(codes.Unknown, "verification failed: signature mismatch after caveat verification")
+// rejected is LND's answer to a macaroon it will not accept (dqd): code Unknown.
+var rejected = lndtest.RejectedLikeLND()
 
 func declared(g *Guard) bool {
 	select {

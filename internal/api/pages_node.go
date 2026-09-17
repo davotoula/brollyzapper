@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/preflight"
 	"github.com/davotoula/brollyzapper/internal/web"
 )
@@ -25,7 +26,7 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 			view.ReceiveMacaroonPresent = status.ReceiveMacaroonPresent
 			view.SpendMacaroonPresent = status.SpendMacaroonPresent
 			view.ReceiveExpiry = status.ReceiveExpiry
-			view.NodeWalletState = string(status.NodeWalletState)
+			view.NodeStage = nodeStage(status.NodeWalletState)
 		}
 	}
 	// FROM THE REPORT, NOT COMPUTED HERE (`20i.11`). This page used to hold the
@@ -47,6 +48,24 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	data.Node = view
 	data.Flash = flashFrom(r)
 	s.render(w, "node", data)
+}
+
+// nodeStage turns the stage the node reported into the Node page's token, so the
+// template holds wording and nothing about LND's names (dqd). UNLOCKED and
+// WAITING_TO_START are one sentence to an operator: the node is not up yet.
+// Every other value — an active stage, one this build does not know, or none —
+// explains nothing and is empty.
+func nodeStage(state lnd.WalletState) string {
+	switch state {
+	case lnd.WalletLocked:
+		return "locked"
+	case lnd.WalletUnlocked, lnd.WalletWaitingToStart:
+		return "starting"
+	case lnd.WalletNonExisting:
+		return "no_wallet"
+	default:
+		return ""
+	}
 }
 
 // relink asks the guard for a fresh receive macaroon. §6: the server never
