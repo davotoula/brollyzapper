@@ -117,6 +117,13 @@ func (d *RotationDetector) probeFailed() (run int, tripped bool) {
 	return d.consecutive, d.consecutive >= d.threshold
 }
 
+// counting reports whether the current run holds at least one rejected probe.
+func (d *RotationDetector) counting() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.consecutive > 0
+}
+
 // Success clears the run: §6 says three CONSECUTIVE failures, and a call that
 // worked means the credential is fine.
 func (d *RotationDetector) Success() {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/davotoula/brollyzapper/internal/guard"
 	"github.com/davotoula/brollyzapper/internal/lnd"
@@ -166,4 +167,62 @@ func TestStatusCarriesTheNodesStageWhenTheGuardCannotReachIt(t *testing.T) {
 		t.Errorf("with the node answering, Status = reachable %v, stage %q; want reachable, no stage",
 			status.LNDReachable, status.NodeWalletState)
 	}
+}
+
+// "The credential was not rotated after all" is a sentence about a rejection the
+// probe COUNTED. Arming is broad since dqd — a node that is starting refuses the
+// middleware registration and Status with code Unknown, so every LND restart arms
+// the loop — and a success after nothing was counted must not tell an operator
+// reading the log that a rotation had been suspected.
+func TestTheNotRotatedAfterAllLineFollowsOnlyACountedRejection(t *testing.T) {
+	const recovered = "lnd is answering again; the credential was not rotated after all"
+	// Slow enough that one counted rejection cannot become three before the
+	// node is put right, which would be an exit rather than this line.
+	const interval = 40 * time.Millisecond
+
+	t.Run("the node was starting", func(t *testing.T) {
+		node := lndtest.Start(t)
+		d := guardDirs(t, node)
+		log, sink := capturedLog()
+		g := openGuard(t, node, d, fastProbes(guard.Options{Log: log, ProbeInterval: interval}))
+		s := startServing(t, g)
+
+		node.SetWalletState(lnrpc.WalletState_WAITING_TO_START)
+		_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
+		lndtest.WaitFor(t, "a probe to find the node not ready", func() bool {
+			calls, _ := node.StateCalls()
+			return calls >= 2
+		})
+		seen := len(node.SeenMacaroons())
+		node.SetWalletState(lnrpc.WalletState_SERVER_ACTIVE)
+		lndtest.WaitFor(t, "a probe to find the node accepting the credential", func() bool {
+			return len(node.SeenMacaroons()) > seen
+		})
+		// The line would be written straight after that probe returns; the next
+		// ticks are the proof the loop has gone quiet, so it had its chance.
+		time.Sleep(5 * interval)
+		s.assertStillServing(t)
+		if strings.Contains(sink.String(), recovered) {
+			t.Errorf("a node that was only starting was reported as a rotation that was not:\n%s", sink.String())
+		}
+	})
+
+	t.Run("the node refused the credential", func(t *testing.T) {
+		node := lndtest.Start(t)
+		d := guardDirs(t, node)
+		log, sink := capturedLog()
+		g := openGuard(t, node, d, fastProbes(guard.Options{Log: log, ProbeInterval: interval}))
+		s := startServing(t, g)
+
+		node.SetRejectLikeLND(true)
+		_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
+		lndtest.WaitFor(t, "a probe to count a rejection", func() bool {
+			return rejectedLines(t, sink.String()) == 1
+		})
+		node.SetRejectLikeLND(false)
+		lndtest.WaitFor(t, "the recovery line", func() bool {
+			s.assertStillServing(t)
+			return strings.Contains(sink.String(), recovered)
+		})
+	})
 }

@@ -1065,10 +1065,17 @@ func (g *Guard) probeRotation(ctx context.Context) {
 			continue
 		}
 		sent := g.acceptances.Load()
+		// Read before the probe, whose success clears it.
+		suspected := g.rotation.counting()
 		_, err := g.node.GetInfo(ctx)
 		g.observeProbe(ctx, err, sent)
 		if err == nil {
-			g.log.Info("lnd is answering again; the credential was not rotated after all")
+			// Only after a rejection was COUNTED. Arming is broad (dqd): every
+			// LND restart arms the loop, and a node that was merely starting was
+			// never suspected of anything.
+			if suspected {
+				g.log.Info("lnd is answering again; the credential was not rotated after all")
+			}
 			continue
 		}
 		select {
