@@ -447,40 +447,6 @@ func TestConnectivityFailuresDoNotAskForAReBake(t *testing.T) {
 	}
 }
 
-// o34.10, kept by 2f0: a per-request call's failure is an answer about the
-// request, so it neither moves the state nor asks the node's stage. The stage
-// question belongs to the invoice stream alone; asked here, every stranger's
-// failed callback would cost a State call and could write "re-link" over a
-// connection the stream knows is fine.
-func TestARejectedPerRequestCallAsksNoStageAndMovesNothing(t *testing.T) {
-	node := lndtest.Start(t)
-	dir := t.TempDir()
-	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
-
-	broker := &lndtest.Broker{}
-	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), testOptions(broker))
-	defer client.Close()
-	if _, err := client.GetInfo(t.Context()); err != nil {
-		t.Fatalf("GetInfo before the rejection: %v", err)
-	}
-
-	node.SetRejectLikeLND(true)
-	for range 3 {
-		if _, err := client.AddInvoice(t.Context(), &lnrpc.Invoice{ValueMsat: 1_000}); err == nil {
-			t.Fatal("the node accepted a call it was told to refuse")
-		}
-	}
-	if calls, _ := node.StateCalls(); calls != 0 {
-		t.Errorf("three rejected per-request calls asked the node's stage %d times, want 0", calls)
-	}
-	if got := client.State(); got != lnd.StateReady {
-		t.Errorf("State = %q after rejected per-request calls, want it left at %q", got, lnd.StateReady)
-	}
-	if got := broker.Bakes(); got != 0 {
-		t.Errorf("%d bake requests from per-request calls, want 0", got)
-	}
-}
-
 // d46.20 criterion 4. §6's capped backoff is right for a node that is not
 // answering and wrong for a credential that has just been replaced: on the box
 // the UI sat at "connecting" for minutes after Re-link had already fixed the
@@ -663,7 +629,10 @@ func (pinnedResume) SetLastSettleIndex(context.Context, uint64) error { return n
 // 10,000-row audit trail down to nothing but itself.
 //
 // A per-request call answers about the REQUEST. Only the invoice stream may
-// conclude anything about the credential.
+// conclude anything about the credential — and only the stream asks the node's
+// stage about one (2f0): asked here, every stranger's failed callback would cost
+// a State call and could write "re-link" over a connection the stream knows is
+// fine.
 func TestAPerRequestFailureNeverAsksTheGuardToReBake(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -707,6 +676,12 @@ func TestAPerRequestFailureNeverAsksTheGuardToReBake(t *testing.T) {
 				t.Errorf("a failed %s asked the guard to bake %d times; a per-request call "+
 					"answers about the request, and this one is reachable from the public "+
 					"LNURL callback", tc.name, got)
+			}
+			if calls, _ := node.StateCalls(); calls != 0 {
+				t.Errorf("a failed %s asked the node's stage %d times, want 0", tc.name, calls)
+			}
+			if got := client.State(); got == lnd.StateRelink {
+				t.Errorf("a failed %s moved the state to %q; a per-request failure moves nothing", tc.name, got)
 			}
 		})
 	}

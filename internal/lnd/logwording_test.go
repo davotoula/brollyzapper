@@ -55,11 +55,14 @@ func (b *syncBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
-// first is the first record whose message is one of msgs.
-func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
+// records is every line written so far, as an operator's grep sees it. A line
+// that is not JSON fails the test rather than being skipped, so a count of zero
+// cannot come from lines the parser dropped.
+func (b *syncBuffer) records(t *testing.T) []logRecord {
 	t.Helper()
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var out []logRecord
 	for line := range strings.SplitSeq(b.buf.String(), "\n") {
 		if line == "" {
 			continue
@@ -68,6 +71,15 @@ func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Fatalf("a log line is not JSON: %q", line)
 		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// first is the first record whose message is one of msgs.
+func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
+	t.Helper()
+	for _, r := range b.records(t) {
 		if slices.Contains(msgs, r.Msg) {
 			return r, true
 		}
@@ -78,16 +90,31 @@ func (b *syncBuffer) first(t *testing.T, msgs ...string) (logRecord, bool) {
 // count is how many records carry msg.
 func (b *syncBuffer) count(t *testing.T, msg string) int {
 	t.Helper()
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	n := 0
-	for line := range strings.SplitSeq(b.buf.String(), "\n") {
-		var r logRecord
-		if line != "" && json.Unmarshal([]byte(line), &r) == nil && r.Msg == msg {
+	for _, r := range b.records(t) {
+		if r.Msg == msg {
 			n++
 		}
 	}
 	return n
+}
+
+// runLoggedStream runs the invoice stream against node at the tests' 1ms
+// backoff, logging at Debug into the returned buffer.
+func runLoggedStream(t *testing.T, node *lndtest.Node) (*lnd.Client, *lndtest.Broker, *syncBuffer) {
+	t.Helper()
+	dir := t.TempDir()
+	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+	logged := &syncBuffer{}
+	broker := &lndtest.Broker{}
+	opts := testOptions(broker)
+	opts.Log = logging.New(logged, logging.NewLevelVar(slog.LevelDebug))
+	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
+	// A cleanup, not a defer: cleanups run last-in first-out, so the stream is
+	// cancelled and joined before the connection under it is closed.
+	t.Cleanup(func() { _ = client.Close() })
+	runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
+	return client, broker, logged
 }
 
 // runStream runs the invoice stream until the test ends.
@@ -263,69 +290,54 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 		cause    error
 		stateErr error
 		relink   bool
-		// asksStage is whether the node's State service was consulted: the codes
-		// that settle it by themselves must not cost a call.
-		asksStage bool
+		// settledByCode is a code that is a verdict whatever the node is doing,
+		// so the node's State service must not be asked at all.
+		settledByCode bool
 	}{
 		// Settled by the code alone: our own client failing to read the macaroon
 		// is Unauthenticated, and PermissionDenied is a verdict.
-		{name: "unauthenticated", cause: status.Error(codes.Unauthenticated, "verification failed: signature mismatch"), relink: true},
-		{name: "permission denied", cause: status.Error(codes.PermissionDenied, "permission denied"), relink: true},
+		{name: "unauthenticated", cause: status.Error(codes.Unauthenticated, "verification failed: signature mismatch"), relink: true, settledByCode: true},
+		{name: "permission denied", cause: status.Error(codes.PermissionDenied, "permission denied"), relink: true, settledByCode: true},
 
 		// A rotation, as LND answers it: the node is up and refuses the bytes.
 		{name: "a rotation, as measured", cause: status.Error(codes.Unknown,
 			"cannot retrieve macaroon: cannot get macaroon: root key with id 355822853575254257 doesn't exist"),
-			relink: true, asksStage: true},
-		{name: "another node's macaroon", cause: lndtest.RejectedLikeLND(), relink: true, asksStage: true},
+			relink: true},
+		{name: "another node's macaroon", cause: lndtest.RejectedLikeLND(), relink: true},
 		{name: "a rotation while the RPC server is active", stage: lnd.WalletRPCActive,
-			cause: lndtest.RejectedLikeLND(), relink: true, asksStage: true},
+			cause: lndtest.RejectedLikeLND(), relink: true},
 
 		// The same code from a node that is not accepting calls says nothing
 		// about the credential. The fake refuses with LND's state error by itself.
-		{name: "a node waiting to start", stage: lnd.WalletWaitingToStart, asksStage: true},
-		{name: "a node starting up", stage: lnd.WalletUnlocked, asksStage: true},
-		{name: "a locked wallet", stage: lnd.WalletLocked, asksStage: true},
-		{name: "a node with no wallet", stage: lnd.WalletNonExisting, asksStage: true},
+		{name: "a node waiting to start", stage: lnd.WalletWaitingToStart},
+		{name: "a node starting up", stage: lnd.WalletUnlocked},
+		{name: "a locked wallet", stage: lnd.WalletLocked},
+		{name: "a node with no wallet", stage: lnd.WalletNonExisting},
 
 		// A node whose stage cannot be read is not known to be up.
 		{name: "a State service that will not answer", cause: lndtest.RejectedLikeLND(),
-			stateErr: status.Error(codes.Unimplemented, "unknown service lnrpc.State"), asksStage: true},
+			stateErr: status.Error(codes.Unimplemented, "unknown service lnrpc.State")},
 
 		// d46.20's box case: LND's parser refusing a corrupt recv.macaroon on a
 		// node that is up. It said "connecting" until 2f0, and it is exactly the
 		// case where the operator had to click Re-link while the UI never said so.
 		{name: "a macaroon the parser refused", cause: status.Error(codes.Unknown,
-			"cannot determine data format of binary-encoded macaroon"), relink: true, asksStage: true},
+			"cannot determine data format of binary-encoded macaroon"), relink: true},
 		// LND's own macaroon check never answers Internal; its panic recovery
 		// does, around every interceptor and handler. Re-link, as the guard counts
 		// it: one rule for "the node is up and would not take the call". A code
 		// other than Unknown, so the code attribute on the INFO rows is read from
 		// the cause rather than assumed.
-		{name: "an internal error", cause: status.Error(codes.Internal, "internal server error"), relink: true, asksStage: true},
+		{name: "an internal error", cause: status.Error(codes.Internal, "internal server error"), relink: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := lndtest.Start(t)
-			dir := t.TempDir()
-			node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
 			if tc.stage != "" {
-				stage, known := lnrpc.WalletState_value[string(tc.stage)]
-				if !known {
-					t.Fatalf("%q is not a stage LND defines", tc.stage)
-				}
-				node.SetWalletState(lnrpc.WalletState(stage))
+				node.SetWalletState(lnrpc.WalletState(lnrpc.WalletState_value[string(tc.stage)]))
 			}
 			node.SetRejectWith(tc.cause)
 			node.SetStateError(tc.stateErr)
-
-			var logged syncBuffer
-			broker := &lndtest.Broker{}
-			opts := testOptions(broker)
-			opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
-			client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
-			// A cleanup, not a defer: cleanups run last-in first-out, so the stream
-			// is cancelled and joined before the connection under it is closed.
-			t.Cleanup(func() { _ = client.Close() })
-			runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
+			client, broker, logged := runLoggedStream(t, node)
 
 			// The line is written before the request, so a request means the line exists.
 			lndtest.WaitFor(t, "a re-bake request", func() bool { return broker.Bakes() > 0 })
@@ -351,8 +363,9 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 			if got := client.State(); got != wantState {
 				t.Errorf("State = %q, want %q — the log and the Node page disagree", got, wantState)
 			}
-			if calls, _ := node.StateCalls(); (calls > 0) != tc.asksStage {
-				t.Errorf("the node's State service was asked %d times; want asked=%v", calls, tc.asksStage)
+			if calls, _ := node.StateCalls(); (calls == 0) != tc.settledByCode {
+				t.Errorf("the node's State service was asked %d times; the code settles it alone: %v",
+					calls, tc.settledByCode)
 			}
 		})
 	}
@@ -370,17 +383,8 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 // Bounded: once per entry into re-link, not once per refused attempt.
 func TestReLinkIsSaidWhenTheStateEntersItEvenBetweenReBakeRequests(t *testing.T) {
 	node := lndtest.Start(t)
-	dir := t.TempDir()
-	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
 	node.SetWalletState(lnrpc.WalletState_WAITING_TO_START)
-
-	var logged syncBuffer
-	broker := &lndtest.Broker{}
-	opts := testOptions(broker)
-	opts.Log = logging.New(&logged, logging.NewLevelVar(slog.LevelDebug))
-	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
-	t.Cleanup(func() { _ = client.Close() })
-	runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
+	client, broker, logged := runLoggedStream(t, node)
 
 	lndtest.WaitFor(t, "the request made while the node was starting", func() bool { return broker.Bakes() > 0 })
 	if got := logged.count(t, relinkNeeded); got != 0 {

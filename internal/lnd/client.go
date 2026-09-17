@@ -282,11 +282,10 @@ func (c *Client) reconnect() {
 //
 // "Re-link needed" claims the node was up and refused our macaroon. LND answers
 // codes.Unknown for that — a rotation is "root key with id N doesn't exist" — and
-// for merely not being ready: its state interceptor runs before its macaroon
-// check and refuses a starting node or a locked wallet with the same code. So a
-// rejection the code does not settle by itself is decided by the node's stage,
-// which is dqd's rule for the guard applied to the server (2f0). The broad
-// question still decides the re-bake; only the state waits for the stage.
+// for merely not being ready (see WalletState.AdmitsCalls). So a rejection the
+// code does not settle by itself is decided by the node's stage, which is dqd's
+// rule for the guard applied to the server (2f0). The broad question still
+// decides the re-bake; only the state waits for the stage.
 func (c *Client) recordState(ctx context.Context, err error) (State, bool) {
 	var state State
 	rejected := false
@@ -314,17 +313,19 @@ func (c *Client) recordState(ctx context.Context, err error) (State, bool) {
 	return state, rejected
 }
 
-// stageTimeout bounds rejectionState's question. The node answered the call a
-// moment ago, so its State service answers in milliseconds or not at all, and
-// this runs on the invoice stream: a stalled dial must not hold the stream down
-// for longer than reBakeTimeout would. Would change if a real node is measured
-// answering GetState slower than this while answering Lightning calls.
+// stageTimeout bounds rejectionState's question, dial included: reconnect closes
+// the State connection with the main one after every stream failure, so each
+// question dials afresh. The node answered the call a moment ago, so its State
+// service answers in milliseconds or not at all, and this runs on the invoice
+// stream: a stalled dial must not hold the stream down for longer than
+// reBakeTimeout would. Would change if a real node is measured answering
+// GetState slower than this while answering Lightning calls.
 const stageTimeout = 5 * time.Second
 
 // rejectionState is the state for a rejection whose code a node that is not
-// ready also answers with: re-link only when the node reports a stage that
-// admits calls. A node that is not accepting calls, or whose stage cannot be
-// read, is not known to be up, and says nothing about the credential.
+// ready also answers with (see WalletState.AdmitsCalls): re-link only when the
+// node reports a stage that admits calls. A node whose stage cannot be read is
+// not known to be up, and says nothing about the credential.
 //
 // Accepted with it, as for the guard: LND's middleware interceptor runs after
 // the macaroon check and refuses with the same code, so a stalled read-only
@@ -336,12 +337,11 @@ func (c *Client) rejectionState(ctx context.Context) State {
 	stage, err := c.GetState(ctx)
 	if err != nil {
 		c.log.Debug("could not ask the node's stage about a rejected call", "error", err.Error())
-		return StateConnecting
 	}
-	if !stage.AdmitsCalls() {
-		return StateConnecting
+	if err == nil && stage.AdmitsCalls() {
+		return StateRelink
 	}
-	return StateRelink
+	return StateConnecting
 }
 
 // observe records the outcome of a PER-REQUEST call. It moves the state and
