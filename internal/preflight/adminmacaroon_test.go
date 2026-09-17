@@ -21,7 +21,12 @@ import (
 // kind after its own GetInfo, so the two agree within one answer; the row asks
 // for both anyway, and the reachable case pins that it does.
 func TestTheGuardAdminMacaroonRowNeedsTheKindAndAnUnreachableNode(t *testing.T) {
-	stuck := lnd.BrokerStatus{RefusalKind: guard.KindAdminMacaroonStillRejected, ReceiveMacaroonPresent: true}
+	// SERVER_ACTIVE because that is what a holding guard's Status carries: it asks
+	// the node's stage whenever GetInfo fails (dqd), and a node that is refusing
+	// the macaroon is up.
+	stuck := lnd.BrokerStatus{RefusalKind: guard.KindAdminMacaroonStillRejected, ReceiveMacaroonPresent: true,
+		NodeWalletState: lnd.WalletServerActive}
+	stuckIn := func(state lnd.WalletState) lnd.BrokerStatus { s := stuck; s.NodeWalletState = state; return s }
 	for _, tc := range []struct {
 		name   string
 		state  lnd.State
@@ -36,6 +41,13 @@ func TestTheGuardAdminMacaroonRowNeedsTheKindAndAnUnreachableNode(t *testing.T) 
 			lnd.BrokerStatus{}, preflight.Pass},
 		{"another kind, unreachable", lnd.StateRelink,
 			lnd.BrokerStatus{RefusalKind: guard.KindAddressMismatch}, preflight.Pass},
+		// dqd, ruled 17 Sep 2026: the kind outlives a node that stopped accepting
+		// calls, and "rejects" is then not a claim about now.
+		{"the kind, the node in RPC_ACTIVE: it admits calls", lnd.StateReady, stuckIn(lnd.WalletRPCActive), preflight.Fail},
+		{"the kind, the wallet locked", lnd.StateReady, stuckIn(lnd.WalletLocked), preflight.NotChecked},
+		{"the kind, the node starting", lnd.StateReady, stuckIn(lnd.WalletWaitingToStart), preflight.NotChecked},
+		{"the kind, no stage: the State service did not answer either", lnd.StateReady, stuckIn(""), preflight.NotChecked},
+		{"the kind, a stage this build does not know", lnd.StateReady, stuckIn("7"), preflight.NotChecked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := inputs(t)
@@ -81,7 +93,7 @@ func TestTheGuardAdminMacaroonRowNeedsTheKindAndAnUnreachableNode(t *testing.T) 
 func TestTheGuardAdminMacaroonRowCitesTheReceiveExpiryOnlyWhileReceiving(t *testing.T) {
 	expiry := time.Date(2026, 9, 23, 8, 30, 0, 0, time.UTC)
 	status := lnd.BrokerStatus{RefusalKind: guard.KindAdminMacaroonStillRejected,
-		ReceiveMacaroonPresent: true, ReceiveExpiry: expiry}
+		ReceiveMacaroonPresent: true, ReceiveExpiry: expiry, NodeWalletState: lnd.WalletServerActive}
 	for state, want := range map[lnd.State]bool{lnd.StateReady: true, lnd.StateRelink: false} {
 		t.Run(string(state), func(t *testing.T) {
 			in := inputs(t)

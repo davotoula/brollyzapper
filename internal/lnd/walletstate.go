@@ -43,6 +43,24 @@ func (s WalletState) AdmitsCalls() bool {
 	return s == WalletRPCActive || s == WalletServerActive
 }
 
+// Stage is why a node in this state is not accepting calls, as one token an
+// operator-facing page can hold copy for: "locked", "starting" (UNLOCKED and
+// WAITING_TO_START are one sentence to an operator — the node is not up yet) or
+// "no_wallet". Empty for a stage that admits calls, for no stage, and for one
+// this build does not know.
+func (s WalletState) Stage() string {
+	switch s {
+	case WalletLocked:
+		return "locked"
+	case WalletUnlocked, WalletWaitingToStart:
+		return "starting"
+	case WalletNonExisting:
+		return "no_wallet"
+	default:
+		return ""
+	}
+}
+
 // GetState asks the node which stage it is in.
 //
 // OVER ITS OWN CONNECTION, with no macaroon: LND exempts the State service from

@@ -192,7 +192,7 @@ func TestTheNodePageSaysWhyTheGuardCannotReachTheNode(t *testing.T) {
 		want   bool
 	}{
 		{"the guard is holding its second exit", lnd.BrokerStatus{ReceiveMacaroonPresent: true,
-			RefusalKind: guard.KindAdminMacaroonStillRejected}, true},
+			RefusalKind: guard.KindAdminMacaroonStillRejected, NodeWalletState: lnd.WalletServerActive}, true},
 		{"the node is merely down", lnd.BrokerStatus{ReceiveMacaroonPresent: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -267,5 +267,37 @@ func TestTheNodePageSaysWhichStageTheNodeIsIn(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// dqd, ruled 17 Sep 2026: a guard holding its second exit over a node whose
+// wallet is then locked. §11's rule is one report per render, read by both pages;
+// the stage reached the Node page off Status and the pages disagreed — "wallet
+// locked" beside a Security row saying the node rejects the mount.
+//
+// ONE VALUE: the Node page's sentence and the row's verdict both come from the
+// report's stage. The node is not accepting calls, so "rejects" is not a claim
+// about now; the row is not checked, and names why.
+func TestAHeldGuardOverALockedWalletIsOneVerdictOnBothPages(t *testing.T) {
+	const title = "Your node accepts the admin macaroon mounted into the guard"
+	h := newHarness(t, livePreflight(lnd.StateReady, nil))
+	h.broker.Answer = lnd.BrokerStatus{ReceiveMacaroonPresent: true,
+		RefusalKind: guard.KindAdminMacaroonStillRejected, NodeWalletState: lnd.WalletLocked}
+	cookie := h.login(t)
+	node := h.get(t, "/node", cookie).Body.String()
+	raw := h.get(t, "/security", cookie).Body.String()
+
+	if !strings.Contains(node, "<dd>no — the node's wallet is locked") {
+		t.Errorf("the Node page does not say the wallet is locked:\n%s", node)
+	}
+	if strings.Contains(node, "your node rejects the admin macaroon") {
+		t.Errorf("the Node page accuses the mount of a node that cannot look at it:\n%s", node)
+	}
+	verdict, detail := securityRow(t, raw, title)
+	if verdict != "not checked" {
+		t.Errorf("the admin-macaroon row reads %q with the wallet locked, want not checked: %q", verdict, detail)
+	}
+	if !strings.Contains(detail, "wallet is locked") {
+		t.Errorf("the row does not name the stage it could not ask through: %q", detail)
 	}
 }

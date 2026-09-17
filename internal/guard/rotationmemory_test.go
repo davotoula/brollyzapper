@@ -200,6 +200,12 @@ func TestASecondRejectionRunOverTheSameBytesDoesNotExitAgain(t *testing.T) {
 	if status.LNDReachable {
 		t.Error("Status says LND is reachable while the node rejects the guard's credential")
 	}
+	// The stage is what lets the Security row say Fail rather than not checked
+	// (dqd): a holding guard over a node that is up must report it as up.
+	if !status.NodeWalletState.AdmitsCalls() {
+		t.Errorf("a holding guard's Status carries stage %q; the row reads anything but an active "+
+			"stage as the node not accepting calls, and would never fail", status.NodeWalletState)
+	}
 
 	// THE PROBE LOOP GOES ON, which is also the proof there was no exit: the loop
 	// returns once rotation is declared, so rejected probes still arriving after
