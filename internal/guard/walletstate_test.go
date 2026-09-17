@@ -65,6 +65,9 @@ func TestANodeThatIsNotReadyIsNeverCountedAsARotation(t *testing.T) {
 			_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
 
 			lndtest.WaitFor(t, "the probe loop to ask the node's stage many times over", func() bool {
+				// An exit ends the loop, so it would otherwise surface as this
+				// wait timing out; failing here names it.
+				s.assertStillServing(t)
 				calls, _ := node.StateCalls()
 				return calls >= 10*guard.DefaultRotationThreshold
 			})
