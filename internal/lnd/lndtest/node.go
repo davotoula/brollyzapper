@@ -58,6 +58,9 @@ type Node struct {
 	// carried macaroon metadata — which the node does not need and the guard has
 	// no reason to send.
 	stateCalls, stateCallsWithMacaroon int
+	// stateErr makes GetState fail, as a front that does not route lnrpc.State
+	// would.
+	stateErr error
 	// getInfoErr is GetInfo's HANDLER failing after the macaroon was accepted —
 	// LND's getChainSyncInfo with the chain backend down, say.
 	getInfoErr error
@@ -294,6 +297,13 @@ func (n *Node) ListPermissions(ctx context.Context, _ *lnrpc.ListPermissionsRequ
 	return &lnrpc.ListPermissionsResponse{}, nil
 }
 
+// SetStateError makes GetState fail with err while every other RPC works.
+func (n *Node) SetStateError(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.stateErr = err
+}
+
 // StateCalls is how many GetState calls the node answered, and how many of them
 // carried a macaroon.
 func (n *Node) StateCalls() (calls, withMacaroon int) {
@@ -318,6 +328,9 @@ func (s *stateService) GetState(ctx context.Context, _ *lnrpc.GetStateRequest) (
 	s.node.stateCalls++
 	if len(md.Get("macaroon")) > 0 {
 		s.node.stateCallsWithMacaroon++
+	}
+	if s.node.stateErr != nil {
+		return nil, s.node.stateErr
 	}
 	return &lnrpc.GetStateResponse{State: s.node.walletState}, nil
 }

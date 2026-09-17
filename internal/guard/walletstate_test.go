@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/davotoula/brollyzapper/internal/guard"
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
@@ -252,11 +255,15 @@ func TestAGetInfoThatFailsUnknownWhileTheNodeIsActiveIsNeverCounted(t *testing.T
 	// the probe gets a run of chances to count, not one.
 	for range 5 * guard.DefaultRotationThreshold {
 		before := node.ListPermissionsCalls()
-		if _, err := s.client.Status(t.Context()); err != nil {
-			t.Fatalf("Status: %v", err)
-		}
 		lndtest.WaitFor(t, "a probe to ask the node about the credential", func() bool {
 			s.assertStillServing(t)
+			// ARMED INSIDE THE WAIT, not once before it: the handler counts the
+			// call before the probe's success disarms the loop, so a Status sent
+			// once, between the two, is undone by that success and no probe
+			// follows (code-review, 17 Sep).
+			if _, err := s.client.Status(t.Context()); err != nil {
+				t.Fatalf("Status: %v", err)
+			}
 			return node.ListPermissionsCalls() > before
 		})
 	}
@@ -266,5 +273,46 @@ func TestAGetInfoThatFailsUnknownWhileTheNodeIsActiveIsNeverCounted(t *testing.T
 	}
 	if n := rejectedLines(t, sink.String()); n != 0 {
 		t.Errorf("%q logged %d times for a node that accepted the credential every time", rejectedLine, n)
+	}
+}
+
+// A node that answers Lightning calls but not its State service leaves the probe
+// unable to tell a rotation from a node that is not ready — so it counts
+// nothing, which is safe, and turns rotation detection off, which must not be
+// silent (code-review, 17 Sep 2026). Said ONCE per armed run: the ruling against
+// per-probe lines stands. A node that is not there at all says nothing, as
+// before: that is the node down, not detection off.
+func TestAStateServiceTheNodeWillNotAnswerIsSaidOncePerRun(t *testing.T) {
+	const off = "the node did not answer its State service"
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"unimplemented", status.Error(codes.Unimplemented, "unknown service lnrpc.State"), 1},
+		{"unavailable", status.Error(codes.Unavailable, "connection refused"), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := lndtest.Start(t)
+			node.SetStateError(tc.err)
+			node.SetRejectLikeLND(true)
+			d := guardDirs(t, node)
+			log, sink := capturedLog()
+			g := openGuard(t, node, d, fastProbes(guard.Options{Log: log}))
+			s := startServing(t, g)
+			_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
+
+			lndtest.WaitFor(t, "many probes to find the State service refusing", func() bool {
+				s.assertStillServing(t)
+				calls, _ := node.StateCalls()
+				return calls >= 10*guard.DefaultRotationThreshold
+			})
+			if got := strings.Count(sink.String(), off); got != tc.want {
+				t.Errorf("%q logged %d times over one armed run, want %d:\n%s", off, got, tc.want, sink.String())
+			}
+			if n := rejectedLines(t, sink.String()); n != 0 {
+				t.Errorf("a rejection was counted without the node's stage: %d lines", n)
+			}
+		})
 	}
 }

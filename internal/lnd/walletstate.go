@@ -2,6 +2,11 @@ package lnd
 
 import (
 	"context"
+	"errors"
+	"fmt"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/davotoula/brollyzapper/internal/lnd/lnrpc"
 )
@@ -81,6 +86,13 @@ func (c *Client) ListPermissions(ctx context.Context) error {
 	return c.observe(err)
 }
 
+// ErrNoStateService means something answered the dial and would not answer
+// /lnrpc.State/GetState — a front that does not route the service, say. Distinct
+// from the node being down, which is a transport code and not this: a guard that
+// cannot ask the stage cannot tell a rotation from a node that is not ready, and
+// that is worth saying, where a node that is down is not.
+var ErrNoStateService = errors.New("lnd: the node answered, but not its State service")
+
 // GetState asks the node which stage it is in.
 //
 // OVER ITS OWN CONNECTION, with no macaroon: LND exempts the State service from
@@ -100,6 +112,13 @@ func (c *Client) GetState(ctx context.Context) (WalletState, error) {
 	}
 	resp, err := lnrpc.NewStateClient(conn).GetState(ctx, &lnrpc.GetStateRequest{})
 	if err != nil {
+		if st, ok := status.FromError(err); ok {
+			switch st.Code() {
+			case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
+			default:
+				return "", fmt.Errorf("%w: %w", ErrNoStateService, err)
+			}
+		}
 		return "", err
 	}
 	return WalletState(resp.GetState().String()), nil

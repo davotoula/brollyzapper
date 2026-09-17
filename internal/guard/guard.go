@@ -1046,6 +1046,9 @@ func (g *Guard) probeRotation(ctx context.Context) {
 	// durations matched". Separate timers, exact assertion.
 	ticker := time.NewTicker(g.probeInterval)
 	defer ticker.Stop()
+	// saidNoState is whether this armed run has already said the State service
+	// will not answer: once per run, never per probe.
+	saidNoState := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -1053,6 +1056,7 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		case <-ticker.C:
 		}
 		if !g.rotation.Armed() {
+			saidNoState = false
 			continue
 		}
 		// THE STAGE FIRST (dqd). A node that is starting, or whose wallet is
@@ -1064,13 +1068,23 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		// process the stage only moves forward: "active" before the call is
 		// still active during it, where "not ready" after a failure may already
 		// be stale.
-		if stage, err := g.node.GetState(ctx); err != nil || !stage.AdmitsCalls() {
+		stage, err := g.node.GetState(ctx)
+		if errors.Is(err, lnd.ErrNoStateService) && !saidNoState {
+			// Not counting is safe; being silent about it is not. Without the
+			// stage no refusal can count, so a real rotation would go undetected
+			// for as long as this lasts (code-review, 17 Sep 2026).
+			saidNoState = true
+			g.log.Warn("the node did not answer its State service, so the guard cannot tell a "+
+				"rotated admin.macaroon from a node that is not ready, and is not detecting rotation",
+				"error", err.Error())
+		}
+		if err != nil || !stage.AdmitsCalls() {
 			continue
 		}
 		sent := g.acceptances.Load()
 		// Read before the probe, whose success clears it.
 		suspected := g.rotation.counting()
-		err := g.node.ListPermissions(ctx)
+		err = g.node.ListPermissions(ctx)
 		g.observeProbe(ctx, err, sent)
 		if err == nil {
 			// Only after a rejection was COUNTED. Arming is broad (dqd): every
