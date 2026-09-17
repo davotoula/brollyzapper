@@ -71,8 +71,10 @@ type Node struct {
 	listPermissionsCalls  int
 	// ledger is every settled invoice the node remembers, settle_index ascending.
 	ledger []*lnrpc.Invoice
-	// breakAfter, when > 0, drops the invoice stream after that many sends.
+	// breakAfter, when > 0, drops the invoice stream after that many sends, with
+	// breakErr (Unavailable when nil).
 	breakAfter int
+	breakErr   error
 	// subscriptions records the settle_index each SubscribeInvoices resumed
 	// from — the assertion that resume semantics are right.
 	subscriptions []uint64
@@ -384,6 +386,16 @@ func (n *Node) SetBreakAfter(count int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.breakAfter = count
+}
+
+// SetBreakError is what a stream dropped by SetBreakAfter fails with: a handler
+// error AFTER the macaroon was accepted. LND's SubscribeInvoices returns plain
+// errors — code Unknown — when it cannot convert an invoice or its aux data
+// parser refuses one (rpcserver.go, SubscribeInvoices, v0.21.2-beta).
+func (n *Node) SetBreakError(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.breakErr = err
 }
 
 // macaroonUnder builds the macaroon this node answers with for a root key id.
@@ -894,8 +906,11 @@ func (n *Node) SubscribeInvoices(req *lnrpc.InvoiceSubscription, stream lnrpc.Li
 	n.mu.Lock()
 	n.subscriptions = append(n.subscriptions, req.SettleIndex)
 	ledger := append([]*lnrpc.Invoice(nil), n.ledger...)
-	breakAfter := n.breakAfter
+	breakAfter, breakErr := n.breakAfter, n.breakErr
 	n.mu.Unlock()
+	if breakErr == nil {
+		breakErr = status.Error(codes.Unavailable, "transport closing")
+	}
 
 	sent := 0
 	for _, invoice := range ledger {
@@ -904,7 +919,7 @@ func (n *Node) SubscribeInvoices(req *lnrpc.InvoiceSubscription, stream lnrpc.Li
 			continue
 		}
 		if breakAfter > 0 && sent == breakAfter {
-			return status.Error(codes.Unavailable, "transport closing")
+			return breakErr
 		}
 		if err := stream.Send(invoice); err != nil {
 			return err

@@ -79,8 +79,9 @@ type Client struct {
 	mu   sync.Mutex
 	conn *grpc.ClientConn
 	// stateConn is the second connection GetState uses: TLS verified exactly as
-	// conn is, and no per-RPC credential at all. Dialled on first use, so a
-	// client that never asks — the server's — never holds one.
+	// conn is, and no per-RPC credential at all. Dialled on first use: the
+	// server's client asks only about a refused stream (recordState), and
+	// reconnect closes it with conn.
 	stateConn *grpc.ClientConn
 	// certErr is the last certificate-name verdict, remembered so a REFUSED
 	// connection costs no more than a successful one.
@@ -286,7 +287,12 @@ func (c *Client) reconnect() {
 // code does not settle by itself is decided by the node's stage, which is dqd's
 // rule for the guard applied to the server (2f0). The broad question still
 // decides the re-bake; only the state waits for the stage.
-func (c *Client) recordState(ctx context.Context, err error) (State, bool) {
+//
+// delivered is whether the call had already been accepted — a stream that
+// delivered something. LND checks the macaroon once, when a stream opens, so a
+// later failure on it is the handler's (SubscribeInvoices answers an invoice it
+// cannot convert with code Unknown) and is not read by the stage.
+func (c *Client) recordState(ctx context.Context, err error, delivered bool) (State, bool) {
 	var state State
 	rejected := false
 	switch {
@@ -304,6 +310,8 @@ func (c *Client) recordState(ctx context.Context, err error) (State, bool) {
 		// Unauthenticated is our own client failing to read the macaroon, which
 		// is a rejection whatever the node is doing.
 		state, rejected = StateRelink, true
+	case IsCredentialRejected(err) && delivered:
+		state, rejected = StateConnecting, true
 	case IsCredentialRejected(err):
 		state, rejected = c.rejectionState(ctx), true
 	default:
@@ -380,9 +388,12 @@ func (c *Client) observe(err error) error {
 // lifetime: nothing a stranger sends can make it fail, and it will notice a bad
 // credential within one backoff whether or not anyone is looking. An arch rule
 // asserts this is the only call site.
-func (c *Client) observeStream(ctx context.Context, err error) error {
+//
+// delivered says whether this stream had received anything before err; see
+// recordState.
+func (c *Client) observeStream(ctx context.Context, err error, delivered bool) error {
 	previous := c.State()
-	if state, rejected := c.recordState(ctx, err); rejected {
+	if state, rejected := c.recordState(ctx, err, delivered); rejected {
 		c.requestReBake(ctx, err, previous, state)
 	}
 	return err

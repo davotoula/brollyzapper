@@ -122,7 +122,7 @@ func (c *Client) streamOnce(ctx context.Context, resume SettleIndexStore, handle
 	}
 	client, err := c.lightning()
 	if err != nil {
-		return false, c.observeStream(ctx, err)
+		return false, c.observeStream(ctx, err, false)
 	}
 
 	// LND sends every settlement with a settle_index STRICTLY GREATER than the
@@ -132,17 +132,17 @@ func (c *Client) streamOnce(ctx context.Context, resume SettleIndexStore, handle
 	// wallet (proto: lnrpc.InvoiceSubscription.settle_index).
 	stream, err := client.SubscribeInvoices(ctx, &lnrpc.InvoiceSubscription{SettleIndex: last})
 	if err != nil {
-		return false, c.observeStream(ctx, err)
+		return false, c.observeStream(ctx, err, false)
 	}
 
 	var received bool
 	for {
 		invoice, err := stream.Recv()
 		if err != nil {
-			return received, c.observeStream(ctx, err)
+			return received, c.observeStream(ctx, err, received)
 		}
 		received = true
-		c.observeStream(ctx, nil)
+		c.observeStream(ctx, nil, true)
 		if invoice.State != lnrpc.Invoice_SETTLED {
 			continue
 		}

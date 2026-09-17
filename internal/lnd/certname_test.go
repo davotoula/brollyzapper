@@ -291,7 +291,7 @@ func TestACertificateMismatchDoesNotAskForAReBake(t *testing.T) {
 		t.Fatal("the fixture's credentials are not Ready, so recordState would short-circuit " +
 			"and this test would assert nothing about the error it is named for")
 	}
-	if _, rejected := client.recordState(t.Context(), &CertificateNameError{Dialled: "10.61.7.2"}); rejected {
+	if _, rejected := client.recordState(t.Context(), &CertificateNameError{Dialled: "10.61.7.2"}, false); rejected {
 		t.Error("a certificate-name mismatch asked the guard to re-bake; a fresh macaroon " +
 			"carries the same caveats and cannot change what the certificate names")
 	}

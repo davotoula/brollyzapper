@@ -101,7 +101,7 @@ func (b *syncBuffer) count(t *testing.T, msg string) int {
 
 // runLoggedStream runs the invoice stream against node at the tests' 1ms
 // backoff, logging at Debug into the returned buffer.
-func runLoggedStream(t *testing.T, node *lndtest.Node) (*lnd.Client, *lndtest.Broker, *syncBuffer) {
+func runLoggedStream(t *testing.T, node *lndtest.Node, resume lnd.SettleIndexStore) (*lnd.Client, *lndtest.Broker, *syncBuffer) {
 	t.Helper()
 	dir := t.TempDir()
 	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
@@ -113,7 +113,7 @@ func runLoggedStream(t *testing.T, node *lndtest.Node) (*lnd.Client, *lndtest.Br
 	// A cleanup, not a defer: cleanups run last-in first-out, so the stream is
 	// cancelled and joined before the connection under it is closed.
 	t.Cleanup(func() { _ = client.Close() })
-	runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
+	runStream(t, client, resume, func(context.Context, *lnrpc.Invoice) error { return nil })
 	return client, broker, logged
 }
 
@@ -337,7 +337,7 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 			}
 			node.SetRejectWith(tc.cause)
 			node.SetStateError(tc.stateErr)
-			client, broker, logged := runLoggedStream(t, node)
+			client, broker, logged := runLoggedStream(t, node, &memoryResume{})
 
 			// The line is written before the request, so a request means the line exists.
 			lndtest.WaitFor(t, "a re-bake request", func() bool { return broker.Bakes() > 0 })
@@ -384,7 +384,7 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 func TestReLinkIsSaidWhenTheStateEntersItEvenBetweenReBakeRequests(t *testing.T) {
 	node := lndtest.Start(t)
 	node.SetWalletState(lnrpc.WalletState_WAITING_TO_START)
-	client, broker, logged := runLoggedStream(t, node)
+	client, broker, logged := runLoggedStream(t, node, &memoryResume{})
 
 	lndtest.WaitFor(t, "the request made while the node was starting", func() bool { return broker.Bakes() > 0 })
 	if got := logged.count(t, relinkNeeded); got != 0 {
@@ -410,6 +410,37 @@ func TestReLinkIsSaidWhenTheStateEntersItEvenBetweenReBakeRequests(t *testing.T)
 	}
 	if got := client.State(); got != lnd.StateRelink {
 		t.Errorf("State = %q, want %q", got, lnd.StateRelink)
+	}
+}
+
+// LND checks the macaroon once, when the stream opens. A stream that has
+// delivered was accepted, so a later failure on it is the handler's — LND's
+// SubscribeInvoices answers an invoice it cannot convert, or one its aux data
+// parser refuses, with a plain error, code Unknown, from a node that is up. Read
+// by the stage, that was re-link on every reconnect, since the same invoice is
+// replayed each time (2f0 go-review).
+//
+// The re-bake is still asked for: the request stays broad.
+func TestAFailureAfterTheStreamDeliveredIsNotReadAsReLink(t *testing.T) {
+	node := lndtest.Start(t)
+	node.SetLedger(lndtest.SettledInvoice("hash-1", 1, 1_000), lndtest.SettledInvoice("hash-2", 2, 1_000))
+	node.SetBreakAfter(1)
+	node.SetBreakError(status.Error(codes.Unknown, "error parsing custom data: unknown record type"))
+	// Pinned at zero, so every attempt delivers the first invoice and fails on
+	// the second, the way a replayed bad invoice does.
+	client, broker, logged := runLoggedStream(t, node, pinnedResume{})
+
+	lndtest.WaitFor(t, "a re-bake request", func() bool { return broker.Bakes() > 0 })
+	seen := len(node.SeenMacaroons())
+	lndtest.WaitFor(t, "more failed attempts", func() bool { return len(node.SeenMacaroons()) > seen+20 })
+	if got := logged.count(t, relinkNeeded); got != 0 {
+		t.Errorf("a handler failure after delivery was logged as re-link %d times", got)
+	}
+	if calls, _ := node.StateCalls(); calls != 0 {
+		t.Errorf("the node's stage was asked %d times about a stream it had already accepted", calls)
+	}
+	if got := client.State(); got == lnd.StateRelink {
+		t.Errorf("State = %q after a handler failure on an accepted stream", got)
 	}
 }
 

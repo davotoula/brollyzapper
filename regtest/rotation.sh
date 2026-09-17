@@ -270,11 +270,15 @@ ls "$LNDDIR"/macaroons.db >/dev/null 2>&1 || die "$LNDDIR/macaroons.db is not wh
 rm -f "$LNDDIR"/macaroons.db "$LNDDIR"/*.macaroon
 ok "macaroons.db and every *.macaroon removed"
 docker compose start lnd >/dev/null
+LND_START_EPOCH=$(date -u +%s)
 for i in $(seq 1 90); do
   lncli_recv getinfo >/dev/null 2>&1 && break
   sleep 1
 done
 lncli_recv getinfo >/dev/null 2>&1 || die "LND did not come back"
+# Section 3 reads this: past about a minute the server's retry gap has reached
+# its ceiling, and the guard can re-bake before the server meets the stale macaroon.
+note "LND answered $(( $(date -u +%s) - LND_START_EPOCH ))s after it was started"
 for i in $(seq 1 30); do [ -f "$LNDDIR/admin.macaroon" ] && break; sleep 1; done
 [ -f "$LNDDIR/admin.macaroon" ] || die "LND did not write a new admin.macaroon"
 ensure_peered
@@ -387,13 +391,20 @@ NODE_DURING=$(curl -s -b "$JAR" "$APP/node" | sed -n 's|.*<dt>Connection</dt><dd
 # recv.macaroon, a line not yet written never will be.
 RELINK_LINE=""
 for i in $(seq 1 10); do
-  RELINK_LINE=$(glog brollyzapper | grep 'lnd rejected our macaroon; re-link needed' | head -1 || true)
+  # The LATEST: a line from LND's shutdown may precede the one this asserts.
+  RELINK_LINE=$(glog brollyzapper | grep 'lnd rejected our macaroon; re-link needed' | tail -1 || true)
   [ -n "$RELINK_LINE" ] && break
   sleep 2
 done
-[ -n "$RELINK_LINE" ] || die "the server never logged \"lnd rejected our macaroon; re-link needed\" while LND refused its recv.macaroon; the operator was told connecting (2f0)"
+[ -n "$RELINK_LINE" ] || die "the server never logged \"lnd rejected our macaroon; re-link needed\" while LND refused its recv.macaroon; the operator was told connecting (2f0). If section 1 noted LND taking over a minute to answer, the guard may have re-baked first — that is timing, not this path"
 require_from_this_run "server re-link" "$RELINK_LINE"
-ok "the server logged \"re-link needed\" by THIS run — LND's Unknown, read by the node's stage (2f0)"
+# After LND was STARTED, not merely after the run began: section 1 stops LND
+# first, and a line written while it shut down would satisfy the run check
+# without the rotation path having done anything (2f0 go-review).
+RELINK_AT=$(log_epoch "$RELINK_LINE")
+[ "$RELINK_AT" -ge "$LND_START_EPOCH" ] \
+  || die "the server's re-link line was written $(( LND_START_EPOCH - RELINK_AT ))s before LND was started again — during its shutdown, not after the rotation"
+ok "the server logged \"re-link needed\" after the rotated LND started — LND's Unknown, read by the node's stage (2f0)"
 
 # ---------------------------------------------------------------------------
 say "4. the guard came back and re-baked"
