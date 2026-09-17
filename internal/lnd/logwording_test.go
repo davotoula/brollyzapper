@@ -492,6 +492,23 @@ func TestReLinkNeedsASecondRefusalFromANodeThatIsStillUp(t *testing.T) {
 		}
 	})
 
+	// A failure of OURS between two refusals is not an answer from the node, so
+	// it cannot be what makes them consecutive. It also must not leave the
+	// suspicion standing: the wait is shortened while one holds, and a resume
+	// point that keeps failing would then spin at minBackoff (2f0 go-review).
+	t.Run("a refusal, a failure of our own, and another refusal", func(t *testing.T) {
+		node := lndtest.Start(t)
+		node.ScriptRejects(lndtest.RejectedLikeLND(), lndtest.RejectedLikeLND())
+		node.SetLedger(lndtest.SettledInvoice("hash-1", 1, 1_000))
+		client, _, logged := runLoggedStream(t, node, &failOnceResume{failOn: 2})
+
+		lndtest.WaitFor(t, "the node accepting again", func() bool { return client.State() == lnd.StateReady })
+		if n := logged.count(t, relinkNeeded); n != 0 {
+			t.Errorf("two refusals with an unreadable resume point between them were logged as "+
+				"re-link %d times; the stream never asked the node in between", n)
+		}
+	})
+
 	t.Run("two refusals in a row", func(t *testing.T) {
 		node := lndtest.Start(t)
 		// A rotation answers the confirming attempt exactly as it answered the
@@ -584,6 +601,25 @@ func TestAFailureAfterTheStreamDeliveredIsNotReadAsReLink(t *testing.T) {
 		t.Errorf("State = %q after a handler failure on an accepted stream", got)
 	}
 }
+
+// failOnceResume fails the way a locked database would, on one attempt only.
+type failOnceResume struct {
+	mu     sync.Mutex
+	reads  int
+	failOn int
+}
+
+func (r *failOnceResume) LastSettleIndex(context.Context) (uint64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
+	if r.reads == r.failOn {
+		return 0, errors.New("database is locked")
+	}
+	return 0, nil
+}
+
+func (r *failOnceResume) SetLastSettleIndex(context.Context, uint64) error { return nil }
 
 // unreadableResume fails the way a locked or unreadable database would.
 type unreadableResume struct{}

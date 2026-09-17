@@ -272,14 +272,18 @@ rm -f "$LNDDIR"/macaroons.db "$LNDDIR"/*.macaroon
 ok "macaroons.db and every *.macaroon removed"
 docker compose start lnd >/dev/null
 LND_START_EPOCH=$(date -u +%s)
+LND_ANSWERED_AFTER=""
 for i in $(seq 1 90); do
   lncli_recv getinfo >/dev/null 2>&1 && break
   sleep 1
 done
 lncli_recv getinfo >/dev/null 2>&1 || die "LND did not come back"
 # Section 3 reads this: past about a minute the server's retry gap has reached
-# its ceiling, and the guard can re-bake before the server meets the stale macaroon.
-note "LND answered $(( $(date -u +%s) - LND_START_EPOCH ))s after it was started"
+# its ceiling, and the guard can re-bake before the server meets the stale
+# macaroon at all. That is timing, not a defect, so section 3 says so and does
+# not assert rather than failing a working system (2f0 go-review).
+LND_ANSWERED_AFTER=$(( $(date -u +%s) - LND_START_EPOCH ))
+note "LND answered ${LND_ANSWERED_AFTER}s after it was started"
 for i in $(seq 1 30); do [ -f "$LNDDIR/admin.macaroon" ] && break; sleep 1; done
 [ -f "$LNDDIR/admin.macaroon" ] || die "LND did not write a new admin.macaroon"
 ensure_peered
@@ -394,21 +398,30 @@ NODE_DURING=$(curl -s -b "$JAR" "$APP/node" | sed -n 's|.*<dt>Connection</dt><dd
 # guard's restart (already under way, restart: on-failure) re-bakes
 # recv.macaroon, a line not yet written never will be.
 RELINK_LINE=""
+RELINK_DEADLINE=40
 for i in $(seq 1 10); do
   # The LATEST: a line from LND's shutdown may precede the one this asserts.
   RELINK_LINE=$(glog brollyzapper | grep 'lnd rejected our macaroon; re-link needed' | tail -1 || true)
   [ -n "$RELINK_LINE" ] && break
   sleep 2
 done
-[ -n "$RELINK_LINE" ] || die "the server never logged \"lnd rejected our macaroon; re-link needed\" while LND refused its recv.macaroon; the operator was told connecting (2f0). If section 1 noted LND taking over a minute to answer, the guard may have re-baked first — that is timing, not this path"
-require_from_this_run "server re-link" "$RELINK_LINE"
-# After LND was STARTED, not merely after the run began: section 1 stops LND
-# first, and a line written while it shut down would satisfy the run check
-# without the rotation path having done anything (2f0 go-review).
-RELINK_AT=$(log_epoch "$RELINK_LINE")
-[ "$RELINK_AT" -ge "$LND_START_EPOCH" ] \
-  || die "the server's re-link line was written $(( LND_START_EPOCH - RELINK_AT ))s before LND was started again — during its shutdown, not after the rotation"
-ok "the server logged \"re-link needed\" after the rotated LND started — LND's Unknown, read by the node's stage (2f0)"
+if [ -z "$RELINK_LINE" ] && [ "$LND_ANSWERED_AFTER" -ge "$RELINK_DEADLINE" ]; then
+  # NOT ASSERTED, and said as plainly as an ok: LND took ${LND_ANSWERED_AFTER}s,
+  # by which point the server's retry gap is at or near its 60s ceiling and the
+  # guard (10s probe + 30s window + 10s exit + restart) can re-bake before the
+  # server ever meets the stale macaroon. Deliberately not an ok line.
+  printf '   \033[33m--\033[0m   NOT ASSERTED: the server re-link line, because LND took %ss to answer and the guard can re-bake before the server retries. Re-run on a warm machine to assert it.\n' "$LND_ANSWERED_AFTER"
+else
+  [ -n "$RELINK_LINE" ] || die "the server never logged \"lnd rejected our macaroon; re-link needed\" while LND refused its recv.macaroon, though LND answered in ${LND_ANSWERED_AFTER}s; the operator was told connecting (2f0)"
+  require_from_this_run "server re-link" "$RELINK_LINE"
+  # After LND was STARTED, not merely after the run began: section 1 stops LND
+  # first, and a line written while it shut down would satisfy the run check
+  # without the rotation path having done anything (2f0 go-review).
+  RELINK_AT=$(log_epoch "$RELINK_LINE")
+  [ "$RELINK_AT" -ge "$LND_START_EPOCH" ] \
+    || die "the server's re-link line was written $(( LND_START_EPOCH - RELINK_AT ))s before LND was started again — during its shutdown, not after the rotation"
+  ok "the server logged \"re-link needed\" after the rotated LND started — LND's Unknown, read by the node's stage, confirmed by a second refusal (2f0)"
+fi
 
 # ---------------------------------------------------------------------------
 say "4. the guard came back and re-baked"

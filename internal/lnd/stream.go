@@ -70,6 +70,16 @@ func (c *Client) RunInvoiceStream(ctx context.Context, resume SettleIndexStore, 
 			attempt = 0
 		}
 		if err != nil {
+			var local localFailure
+			if errors.As(err, &local) {
+				// OURS, not the node's: this attempt never asked it, so it can
+				// neither confirm a suspected rejection nor stand between two that
+				// would (relinkState). It must also not leave the suspicion
+				// standing, because the wait below is shortened while one holds —
+				// a resume point that keeps failing would spin at minBackoff, one
+				// reconnect and one WARN a second, for as long as sqlite is locked.
+				c.suspectedRelink.Store(false)
+			}
 			// The connection is dropped rather than reused so the next attempt
 			// re-reads tls.cert, which LND regenerates on expiry.
 			c.reconnect()
