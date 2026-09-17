@@ -1,7 +1,7 @@
 <h1>Node</h1>
 <dl>
   <dt>Connection</dt><dd>{{.Node.State}}</dd>
-  <dt>LND reachable from the guard</dt><dd>{{if .Node.LNDReachable}}yes{{else}}no{{if .Node.AdminMacaroonRejected}} — your node rejects the admin macaroon mounted into the guard, and restarting will not change that; the Security page says what to fix{{end}}{{end}}</dd>
+  <dt>LND reachable from the guard</dt><dd>{{if .Node.LNDReachable}}yes{{else}}no{{if eq .Node.NodeWalletState "LOCKED"}} — the node's wallet is locked; the guard reconnects once it is unlocked{{else if or (eq .Node.NodeWalletState "UNLOCKED") (eq .Node.NodeWalletState "WAITING_TO_START")}} — the node is still starting{{else if eq .Node.NodeWalletState "NON_EXISTING"}} — the node has no wallet yet{{else if .Node.AdminMacaroonRejected}} — your node rejects the admin macaroon mounted into the guard, and restarting will not change that; the Security page says what to fix{{end}}{{end}}</dd>
   <dt>LND reachable from the server</dt><dd>{{if .Node.ServerCheckedAt.IsZero}}not checked yet{{else}}{{if .Node.ServerReachable}}yes{{else}}no{{end}}, as of {{.Node.ServerCheckedAt.UTC.Format "15:04:05 UTC"}}{{end}}</dd>
   <dt>Receive macaroon</dt>
   <dd>

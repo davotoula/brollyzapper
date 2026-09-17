@@ -25,6 +25,7 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 			view.ReceiveMacaroonPresent = status.ReceiveMacaroonPresent
 			view.SpendMacaroonPresent = status.SpendMacaroonPresent
 			view.ReceiveExpiry = status.ReceiveExpiry
+			view.NodeWalletState = string(status.NodeWalletState)
 		}
 	}
 	// FROM THE REPORT, NOT COMPUTED HERE (`20i.11`). This page used to hold the

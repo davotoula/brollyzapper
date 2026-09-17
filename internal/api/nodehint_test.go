@@ -217,3 +217,55 @@ func TestTheNodePageSaysWhyTheGuardCannotReachTheNode(t *testing.T) {
 		})
 	}
 }
+
+// dqd: "LND reachable from the guard — no" says WHICH no when the node told the
+// guard its stage. A locked wallet and a rejected macaroon are one code on the
+// wire; the page must not leave an operator whose wallet is locked reading about
+// a mount, or one whose node is starting reading nothing.
+//
+// The stage WINS over as0.10's sentence when both are present: a held guard
+// whose node then restarts is still holding, and "your node rejects the admin
+// macaroon" about a node that cannot look at a macaroon is the accusation dqd
+// exists to stop.
+func TestTheNodePageSaysWhichStageTheNodeIsIn(t *testing.T) {
+	const (
+		locked   = "<dd>no — the node's wallet is locked"
+		starting = "<dd>no — the node is still starting"
+		noWallet = "<dd>no — the node has no wallet yet"
+		rejects  = "<dd>no — your node rejects the admin macaroon mounted into the guard"
+	)
+	all := []string{locked, starting, noWallet, rejects}
+	for _, tc := range []struct {
+		name   string
+		status lnd.BrokerStatus
+		want   string // "" is a bare "no"
+	}{
+		{"locked", lnd.BrokerStatus{NodeWalletState: lnd.WalletLocked}, locked},
+		{"unlocked, RPC not up", lnd.BrokerStatus{NodeWalletState: lnd.WalletUnlocked}, starting},
+		{"waiting to start", lnd.BrokerStatus{NodeWalletState: lnd.WalletWaitingToStart}, starting},
+		{"no wallet", lnd.BrokerStatus{NodeWalletState: lnd.WalletNonExisting}, noWallet},
+		{"locked while the guard holds its exit", lnd.BrokerStatus{NodeWalletState: lnd.WalletLocked,
+			RefusalKind: guard.KindAdminMacaroonStillRejected}, locked},
+		{"active and holding: the rejection is the reason", lnd.BrokerStatus{NodeWalletState: lnd.WalletServerActive,
+			RefusalKind: guard.KindAdminMacaroonStillRejected}, rejects},
+		{"active: nothing to add", lnd.BrokerStatus{NodeWalletState: lnd.WalletServerActive}, ""},
+		{"a stage this build does not know", lnd.BrokerStatus{NodeWalletState: "7"}, ""},
+		{"not asked", lnd.BrokerStatus{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, livePreflight(lnd.StateReady, nil))
+			tc.status.ReceiveMacaroonPresent = true
+			h.broker.Answer = tc.status
+			node := h.get(t, "/node", h.login(t)).Body.String()
+
+			if !strings.Contains(node, "<dt>LND reachable from the guard</dt><dd>no") {
+				t.Fatalf("the Node page no longer says the guard cannot reach LND:\n%s", node)
+			}
+			for _, line := range all {
+				if got, want := strings.Contains(node, line), line == tc.want; got != want {
+					t.Errorf("the page carries %q = %v, want %v:\n%s", line, got, want, node)
+				}
+			}
+		})
+	}
+}
