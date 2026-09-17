@@ -75,7 +75,18 @@ func (c *Client) RunInvoiceStream(ctx context.Context, resume SettleIndexStore, 
 			c.reconnect()
 			c.logRetry(ctx, err, attempt+1, worked)
 		}
-		if err := c.waitBeforeRetry(ctx, backoffDelay(attempt, c.minBackoff, c.maxBackoff)); err != nil {
+		delay := backoffDelay(attempt, c.minBackoff, c.maxBackoff)
+		// A refusal from a node that says it is up is one observation, and
+		// relinkState needs a second before it will say re-link. Waiting out a
+		// grown backoff for it would leave the Node page on "connecting" for up
+		// to a minute of a real rotation — and on the regtest stack the guard
+		// re-bakes inside that minute, so the operator would never be told at
+		// all. One shortened wait per suspicion: the outcome of that attempt
+		// either confirms it or clears it.
+		if c.suspectedRelink.Load() {
+			delay = c.minBackoff
+		}
+		if err := c.waitBeforeRetry(ctx, delay); err != nil {
 			return err
 		}
 	}

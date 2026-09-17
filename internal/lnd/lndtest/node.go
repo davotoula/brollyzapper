@@ -50,6 +50,8 @@ type Node struct {
 	macaroons []string
 	// rejectErr, when set, makes every RPC fail with it.
 	rejectErr error
+	// rejectScript answers the next calls one at a time, before rejectErr.
+	rejectScript []error
 	// walletState is what the State service reports, and what LND's state
 	// interceptor admits a call in: only RPC_ACTIVE and SERVER_ACTIVE reach the
 	// macaroon check. Start sets SERVER_ACTIVE.
@@ -487,6 +489,18 @@ func (n *Node) BakeRequests() []*lnrpc.BakeMacaroonRequest {
 	return append([]*lnrpc.BakeMacaroonRequest(nil), n.bakeRequests...)
 }
 
+// ScriptRejects sets what the next calls to authorise answer, one error (or
+// nil, meaning accept) per call; once used up, SetRejectWith's answer applies.
+//
+// Scripted rather than set, so a test can give one rejection and then a node
+// that has gone away, instead of racing the stream's reconnect to swap the
+// answer between two attempts.
+func (n *Node) ScriptRejects(errs ...error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.rejectScript = append([]error(nil), errs...)
+}
+
 // authorise records the macaroon the client sent and applies the reject switch.
 func (n *Node) authorise(ctx context.Context) error {
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -506,6 +520,10 @@ func (n *Node) authorise(ctx context.Context) error {
 		n.macaroons = append(n.macaroons, values[0])
 	}
 	rejectErr := n.rejectErr
+	if len(n.rejectScript) > 0 {
+		rejectErr = n.rejectScript[0]
+		n.rejectScript = n.rejectScript[1:]
+	}
 	n.mu.Unlock()
 
 	if len(values) != 1 || values[0] == "" {

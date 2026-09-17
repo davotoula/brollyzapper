@@ -75,6 +75,11 @@ type Client struct {
 
 	state         atomic.Value // State
 	streamRunning atomic.Bool
+	// suspectedRelink is set by one refusal from a node that reports a stage
+	// admitting calls, and read by the NEXT stream outcome, which either confirms
+	// it or clears it. See relinkState for why one refusal is not enough, and
+	// RunInvoiceStream, which shortens the wait before that second observation.
+	suspectedRelink atomic.Bool
 
 	mu   sync.Mutex
 	conn *grpc.ClientConn
@@ -293,6 +298,11 @@ func (c *Client) reconnect() {
 // later failure on it is the handler's (SubscribeInvoices answers an invoice it
 // cannot convert with code Unknown) and is not read by the stage.
 func (c *Client) recordState(ctx context.Context, err error, delivered bool) (State, bool) {
+	// Taken, not read: this outcome decides the suspicion afresh, and only
+	// relinkState below may set it again. Every other outcome — a delivery, a
+	// node that went away, an unreadable certificate — ends it, which is what
+	// makes "two in a row" mean two consecutive stream outcomes.
+	suspected := c.suspectedRelink.Swap(false)
 	var state State
 	rejected := false
 	switch {
@@ -313,7 +323,7 @@ func (c *Client) recordState(ctx context.Context, err error, delivered bool) (St
 	case IsCredentialRejected(err) && delivered:
 		state, rejected = StateConnecting, true
 	case IsCredentialRejected(err):
-		state, rejected = c.rejectionState(ctx), true
+		state, rejected = c.relinkState(ctx, suspected), true
 	default:
 		return "", false
 	}
@@ -330,15 +340,47 @@ func (c *Client) recordState(ctx context.Context, err error, delivered bool) (St
 // GetState slower than this while answering Lightning calls.
 const stageTimeout = 5 * time.Second
 
-// rejectionState is the state for a rejection whose code a node that is not
-// ready also answers with (see WalletState.AdmitsCalls): re-link only when the
-// node reports a stage that admits calls. A node whose stage cannot be read is
-// not known to be up, and says nothing about the credential.
+// relinkState is the state for a rejection whose code a node that is not ready
+// also answers with (see WalletState.AdmitsCalls): re-link needs the node to
+// report a stage that admits calls, TWICE IN A ROW.
+//
+// The stage alone is not enough, because LND has no stopping stage. Its
+// InterceptorChain goes no further than SetServerActive, and its cleanups run in
+// reverse order — rpcServer.Stop first, the macaroon service's Close well before
+// grpcServer.Stop (lnd.go 382, 494, 669; config_builder.go ~504, v0.21.2-beta).
+// A reconnect landing in that window is refused with a plain error, code
+// Unknown, "macaroon store is locked" (macaroons/store.go ~250), while GetState
+// still answers SERVER_ACTIVE. One refusal would therefore record re-link for
+// every Lightning update, and hold it for the whole restart, since the attempts
+// that follow fail with Unavailable and move nothing — which is 20i.22's bug and
+// exactly what §6's d46.20 amendment warns a broad state would do (David's
+// ruling, 17 Sep 2026, on 2f0's go-review).
+//
+// A node shutting down answers the confirming attempt with Unavailable, or not
+// at all. A node that rotated its macaroons answers it the same way it answered
+// the first, so a rotation costs one extra attempt — minBackoff, not a full
+// backoff, because RunInvoiceStream shortens the wait while the suspicion holds.
 //
 // Accepted with it, as for the guard: LND's middleware interceptor runs after
 // the macaroon check and refuses with the same code, so a stalled read-only
 // middleware on a running node reads as re-link. A click is cheap, and the
 // re-bake is asked for either way.
+func (c *Client) relinkState(ctx context.Context, suspected bool) State {
+	if c.rejectionState(ctx) != StateRelink {
+		return StateConnecting
+	}
+	// Already re-link: the state itself is the standing confirmation, so a
+	// refusal that arrives while it holds does not go back through connecting.
+	if suspected || c.State() == StateRelink {
+		return StateRelink
+	}
+	c.suspectedRelink.Store(true)
+	return StateConnecting
+}
+
+// rejectionState reads the node's stage: re-link only when it admits calls. A
+// node whose stage cannot be read is not known to be up, and says nothing about
+// the credential.
 func (c *Client) rejectionState(ctx context.Context) State {
 	ctx, cancel := context.WithTimeout(ctx, stageTimeout)
 	defer cancel()

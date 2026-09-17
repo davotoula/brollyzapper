@@ -339,29 +339,45 @@ func TestTheReBakeLineIsWordedByTheRecordedState(t *testing.T) {
 			node.SetStateError(tc.stateErr)
 			client, broker, logged := runLoggedStream(t, node, &memoryResume{})
 
-			// The line is written before the request, so a request means the line exists.
+			// The line is written before the request, so a request means a line
+			// exists. Every attempt meets the same refusal, so the row's verdict is
+			// what the stream settles on, not what the first attempt said: a
+			// stage-decided re-link takes a second refusal to confirm (relinkState).
 			lndtest.WaitFor(t, "a re-bake request", func() bool { return broker.Bakes() > 0 })
-			got, ok := logged.first(t, relinkNeeded, reBakeInCaseStale)
-			if !ok {
-				t.Fatal("the guard was asked to re-bake and nothing said so")
-			}
-			// Only a failure the state calls Relink may say re-link; anything else
-			// names the code the node answered with.
-			wantState, wantLevel, wantMsg, wantCode := lnd.StateConnecting, "INFO", reBakeInCaseStale, "Unknown"
-			if tc.cause != nil {
-				wantCode = status.Code(tc.cause).String()
-			}
 			if tc.relink {
-				wantState, wantLevel, wantMsg, wantCode = lnd.StateRelink, "WARN", relinkNeeded, ""
-			}
-			if got.Level != wantLevel || got.Msg != wantMsg || got.Code != wantCode {
-				t.Errorf("logged %s %q code=%q, want %s %q code=%q",
-					got.Level, got.Msg, got.Code, wantLevel, wantMsg, wantCode)
-			}
-			// The page and the log read one verdict. Every attempt meets the same
-			// refusal, so the state cannot have moved on since the line was written.
-			if got := client.State(); got != wantState {
-				t.Errorf("State = %q, want %q — the log and the Node page disagree", got, wantState)
+				lndtest.WaitFor(t, "the re-link line", func() bool { return logged.count(t, relinkNeeded) > 0 })
+				got, _ := logged.first(t, relinkNeeded)
+				if got.Level != "WARN" || got.Code != "" {
+					t.Errorf("re-link was logged %s code=%q, want WARN with no code", got.Level, got.Code)
+				}
+				lndtest.WaitFor(t, "the re-link state", func() bool { return client.State() == lnd.StateRelink })
+			} else {
+				// No re-link, ever: enough attempts that a confirmation would have
+				// landed, then the state and the sentence together. Counted by
+				// stage calls, not macaroons — a node that is not accepting calls
+				// never reaches the macaroon, in the fake as in LND.
+				calls, _ := node.StateCalls()
+				lndtest.WaitFor(t, "several refused attempts", func() bool {
+					later, _ := node.StateCalls()
+					return later > calls+10
+				})
+				if n := logged.count(t, relinkNeeded); n != 0 {
+					t.Errorf("a node that is not accepting calls was logged as re-link %d times", n)
+				}
+				got, ok := logged.first(t, reBakeInCaseStale)
+				if !ok {
+					t.Fatal("the guard was asked to re-bake and nothing said so")
+				}
+				wantCode := "Unknown"
+				if tc.cause != nil {
+					wantCode = status.Code(tc.cause).String()
+				}
+				if got.Level != "INFO" || got.Code != wantCode {
+					t.Errorf("logged %s code=%q, want INFO code=%q", got.Level, got.Code, wantCode)
+				}
+				if got := client.State(); got != lnd.StateConnecting {
+					t.Errorf("State = %q, want %q — the log and the Node page disagree", got, lnd.StateConnecting)
+				}
 			}
 			if calls, _ := node.StateCalls(); (calls == 0) != tc.settledByCode {
 				t.Errorf("the node's State service was asked %d times; the code settles it alone: %v",
@@ -410,6 +426,107 @@ func TestReLinkIsSaidWhenTheStateEntersItEvenBetweenReBakeRequests(t *testing.T)
 	}
 	if got := client.State(); got != lnd.StateRelink {
 		t.Errorf("State = %q, want %q", got, lnd.StateRelink)
+	}
+}
+
+// David's ruling, 17 Sep 2026, on 2f0's go-review: one refusal from a node
+// reporting a stage that admits calls is not re-link. LND has no stopping stage,
+// and it closes its macaroon service well before its gRPC server, so a reconnect
+// during a Lightning update is refused with code Unknown ("macaroon store is
+// locked") while GetState still says SERVER_ACTIVE. Every attempt after that
+// fails with Unavailable and moves nothing, so a single-refusal rule would leave
+// the page saying re-link for the whole restart — 20i.22 again, and what §6's
+// d46.20 amendment warns a broad state would do.
+//
+// So: two consecutive refusals from an admitting stage, and the shutdown shape
+// must produce none.
+func TestReLinkNeedsASecondRefusalFromANodeThatIsStillUp(t *testing.T) {
+	t.Run("a refusal and then the node goes away", func(t *testing.T) {
+		node := lndtest.Start(t)
+		// LND's shutdown, in order: the macaroon store is closed while the gRPC
+		// server still answers, then the process goes. Scripted rather than set,
+		// so nothing races the reconnect. The empty answer that follows is the
+		// node back up, which is what makes the end of the episode observable.
+		node.ScriptRejects(
+			status.Error(codes.Unknown, "macaroon store is locked"),
+			status.Error(codes.Unavailable, "connection refused"),
+			status.Error(codes.Unavailable, "connection refused"),
+		)
+		// A settlement waiting for the accepted attempt: the stream reports ready
+		// when it RECEIVES, so without one the end of the episode is unobservable.
+		node.SetLedger(lndtest.SettledInvoice("hash-1", 1, 1_000))
+		client, broker, logged := runLoggedStream(t, node, &memoryResume{})
+
+		lndtest.WaitFor(t, "the node accepting again", func() bool { return client.State() == lnd.StateReady })
+		if n := logged.count(t, relinkNeeded); n != 0 {
+			t.Errorf("one refusal during a shutdown was logged as re-link %d times; the "+
+				"operator would re-link for a Lightning update", n)
+		}
+		// The recovery is unchanged: the refusal still asked the guard.
+		if got := broker.Bakes(); got != 1 {
+			t.Errorf("the guard was asked %d times, want 1 — the re-bake is broad and stays broad", got)
+		}
+	})
+
+	t.Run("two refusals in a row", func(t *testing.T) {
+		node := lndtest.Start(t)
+		// A rotation answers the confirming attempt exactly as it answered the
+		// first; then the guard's re-bake lands, which ends the episode.
+		node.ScriptRejects(lndtest.RejectedLikeLND(), lndtest.RejectedLikeLND())
+		node.SetLedger(lndtest.SettledInvoice("hash-1", 1, 1_000))
+		client, _, logged := runLoggedStream(t, node, &memoryResume{})
+
+		lndtest.WaitFor(t, "the re-link line", func() bool { return logged.count(t, relinkNeeded) > 0 })
+		lndtest.WaitFor(t, "the node accepting again", func() bool { return client.State() == lnd.StateReady })
+		if n := logged.count(t, relinkNeeded); n != 1 {
+			t.Errorf("two refusals said re-link %d times, want once", n)
+		}
+		// The first refusal said the other sentence, at INFO: it is the one that
+		// cannot yet tell a rotation from a node on its way down.
+		if got, ok := logged.first(t, relinkNeeded, reBakeInCaseStale); !ok || got.Msg != reBakeInCaseStale {
+			t.Errorf("the first refusal logged %q; until it is confirmed it is not re-link", got.Msg)
+		}
+	})
+}
+
+// The confirming attempt does not wait out the grown backoff. A rotation is met
+// by a stream whose backoff has already climbed — LND was down while it rotated
+// — and at the ceiling the second observation would be a minute away, which is
+// longer than the guard takes to re-bake: the operator would never be told at
+// all, and regtest/rotation.sh could not assert the line.
+//
+// A POSITIVE BOUND, not a race: under the fix the confirmation waits minBackoff
+// (20ms here) and under the old rule it waits the grown delay (640ms), and
+// nothing lives between them.
+func TestTheConfirmingAttemptDoesNotWaitOutTheGrownBackoff(t *testing.T) {
+	node := lndtest.Start(t)
+	// Five failures the classifier ignores, to climb the backoff: 20, 40, 80,
+	// 160, 320ms. The refusal then lands with the next delay at 640ms.
+	node.ScriptRejects(
+		status.Error(codes.Unavailable, "connection refused"),
+		status.Error(codes.Unavailable, "connection refused"),
+		status.Error(codes.Unavailable, "connection refused"),
+		status.Error(codes.Unavailable, "connection refused"),
+		status.Error(codes.Unavailable, "connection refused"),
+		lndtest.RejectedLikeLND(),
+		lndtest.RejectedLikeLND(),
+	)
+	dir := t.TempDir()
+	node.WriteCredentialVolume(t, dir, lnd.ReceiveMacaroon, []byte{0x01})
+	logged := &syncBuffer{}
+	opts := lnd.Options{Broker: &lndtest.Broker{}, MinBackoff: 20 * time.Millisecond, MaxBackoff: time.Minute}
+	opts.Log = logging.New(logged, logging.NewLevelVar(slog.LevelDebug))
+	client := lnd.New(node.Address(), lnd.VolumeCredentials(dir, lnd.ReceiveMacaroon), opts)
+	t.Cleanup(func() { _ = client.Close() })
+	runStream(t, client, &memoryResume{}, func(context.Context, *lnrpc.Invoice) error { return nil })
+
+	// The first stage question IS the first refusal: nothing else asks it.
+	lndtest.WaitFor(t, "the first refusal", func() bool { calls, _ := node.StateCalls(); return calls > 0 })
+	refused := time.Now()
+	lndtest.WaitFor(t, "the re-link line", func() bool { return logged.count(t, relinkNeeded) > 0 })
+	if waited := time.Since(refused); waited > 300*time.Millisecond {
+		t.Errorf("the confirming attempt came %v after the first refusal; at that point the "+
+			"backoff was 640ms, so it waited it out instead of confirming at minBackoff", waited)
 	}
 }
 

@@ -369,9 +369,9 @@ func TestACredentialTheNodeCannotParseAsksTheGuardToReBake(t *testing.T) {
 	// restarting too, so the state took the narrow code test and this case read
 	// "connecting" — on the box, while the operator had to click Re-link and the
 	// page never said so. The node's stage is what tells the two apart now.
-	if got := client.State(); got != lnd.StateRelink {
-		t.Errorf("State = %q for a credential a running node could not parse, want %q", got, lnd.StateRelink)
-	}
+	// Not on the first refusal: that one cannot be told from a node shutting down,
+	// so it takes a second (relinkState).
+	lndtest.WaitFor(t, "the re-link state", func() bool { return client.State() == lnd.StateRelink })
 
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
