@@ -139,6 +139,7 @@ func (c *SocketClient) Status(ctx context.Context) (lnd.BrokerStatus, error) {
 		// (`0vk.53`).
 		RefusalKind:       knownKind(resp.Status.RefusalKind),
 		CredentialAddress: resp.Status.CredentialAddress,
+		NodeWalletState:   resp.Status.NodeWalletState,
 	}, nil
 }
 

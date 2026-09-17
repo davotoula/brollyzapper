@@ -36,6 +36,10 @@ func (s *Server) node(w http.ResponseWriter, r *http.Request) {
 	view.MismatchedAddress = report.MismatchedAddress
 	// The same rule for as0.10's finding: the verdict the Security panel renders.
 	view.AdminMacaroonRejected = report.AdminMacaroonRejected
+	// And the node's stage, from the same report the admin-macaroon row reads it
+	// from (dqd), so "the wallet is locked" here and "not checked" there are one
+	// value.
+	view.NodeStage = report.NodeWalletState.Stage()
 	// The server's own credential, from the same report the Security panel
 	// renders its check from (`20i.21`) — a cached answer with its time. A render
 	// may START a probe when one is due; it never waits on the node.

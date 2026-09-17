@@ -12,13 +12,32 @@
 #     -> the guard's admin.macaroon is stale, and a single-file bind mount
 #        follows the INODE, so no amount of retrying inside the process can
 #        ever see the replacement
-#     -> three auth failures inside 30s
+#     -> three consecutive rejections of the guard's own probes, each counted
+#        only when LND's State service says the node is ready (dqd)
 #     -> audit=macaroon.rotate, a 10s settling pause, exit non-zero
 #     -> restart: on-failure brings it back and Docker re-resolves the mount
 #     -> the guard re-copies tls.cert and re-bakes recv.macaroon on a new root key
 #     -> the server, which never exited, recovers with no operator action
 #
 #   ./rotation.sh
+#
+# WHAT THE REJECTION IS DEPENDS ON THE PLATFORM, and on macOS it is not LND's
+# (dqd, measured 16 Sep 2026):
+#
+#   macOS    Docker Desktop's file sharing makes the deleted host file read as
+#            ABSENT inside the container, so the guard's own gRPC client fails to
+#            read admin.macaroon and reports Unauthenticated before anything is
+#            sent. LND logged no GetInfo from the guard in either run that day.
+#            This script proves the exit-and-restart path; it does not prove the
+#            guard recognises LND's answer.
+#   Linux    the running container keeps the old file (§18: a file replaced by
+#            rename is stale to it), so the guard sends the stale macaroon, and
+#            LND answers a pre-rotation macaroon with code Unknown ("verification
+#            failed: signature mismatch after caveat verification" — measured
+#            with lncli, not yet through this script on Linux).
+#
+# ./wrongmount.sh is the proof of that shape on any platform: it plants readable
+# rejected bytes in place, so this script does not plant them too.
 #
 # Afterwards the stack is left working. Nothing here is destructive beyond the
 # regtest node's own macaroons, which it regenerates.
@@ -257,9 +276,8 @@ ok "LND back up, channel active again; root key ids now: $IDS_1"
 
 # ---------------------------------------------------------------------------
 say "2. the guard notices, logs, settles, and exits"
-# The server's own re-bake attempts drive most of the auth failures; the Node
-# page poll is here so the run does not depend on the stream's backoff schedule
-# landing three attempts inside the 30s window.
+# The guard's own probe loop produces the rejections that count (as0.8); the
+# Node page poll runs only under POLL_NODE=1, the variant from before the loop.
 TRIPPED=""
 START=$(date +%s)
 while [ $(( $(date +%s) - START )) -lt "$TRIP_TIMEOUT" ]; do

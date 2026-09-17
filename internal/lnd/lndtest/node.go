@@ -50,6 +50,25 @@ type Node struct {
 	macaroons []string
 	// rejectErr, when set, makes every RPC fail with it.
 	rejectErr error
+	// walletState is what the State service reports, and what LND's state
+	// interceptor admits a call in: only RPC_ACTIVE and SERVER_ACTIVE reach the
+	// macaroon check. Start sets SERVER_ACTIVE.
+	walletState lnrpc.WalletState
+	// stateCalls counts GetState, and stateCallsWithMacaroon the ones that
+	// carried macaroon metadata — which the node does not need and the guard has
+	// no reason to send.
+	stateCalls, stateCallsWithMacaroon int
+	// stateErr makes GetState fail, as a front that does not route lnrpc.State
+	// would.
+	stateErr error
+	// getInfoErr is GetInfo's HANDLER failing after the macaroon was accepted —
+	// LND's getChainSyncInfo with the chain backend down, say.
+	getInfoErr error
+	// listPermissions scripts ListPermissions: each call past the interceptors
+	// takes the next error, nil or not; an empty script answers. calls counts
+	// the ones that reached the handler.
+	listPermissionsScript []error
+	listPermissionsCalls  int
 	// ledger is every settled invoice the node remembers, settle_index ascending.
 	ledger []*lnrpc.Invoice
 	// breakAfter, when > 0, drops the invoice stream after that many sends.
@@ -117,6 +136,8 @@ func Start(t testing.TB) *Node {
 		// the caveats actually landed (§11), so a fake that returns arbitrary
 		// bytes would make that check untestable.
 		baked: Macaroon(t),
+		// The node a test almost always means: started, wallet unlocked.
+		walletState: lnrpc.WalletState_SERVER_ACTIVE,
 	}
 	n.payments = map[string]paymentScript{}
 	n.tracked = map[string]paymentScript{}
@@ -125,6 +146,7 @@ func Start(t testing.TB) *Node {
 	n.server = grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&cert)))
 	lnrpc.RegisterLightningServer(n.server, n)
 	routerrpc.RegisterRouterServer(n.server, &router{node: n})
+	lnrpc.RegisterStateServer(n.server, &stateService{node: n})
 	go func() { _ = n.server.Serve(listener) }()
 	t.Cleanup(n.server.Stop)
 	return n
@@ -169,16 +191,172 @@ func WriteFile(t testing.TB, path string, data []byte) {
 	}
 }
 
-// SetReject makes every RPC fail the way LND fails a macaroon it cannot verify
-// — which is what a rotated node looks like from the outside.
+// SetReject makes every RPC fail with codes.Unauthenticated — the narrow shape
+// lnd.IsAuthFailure matches, which the server's re-link state keys on.
+//
+// THIS IS NOT WHAT LND ANSWERS A MACAROON IT WILL NOT ACCEPT; that is
+// SetRejectLikeLND, code Unknown (dqd). The one real source of this shape
+// measured so far is OUR OWN per-RPC credential failing to read the macaroon
+// file: grpc-go reports that as Unauthenticated before anything is sent, so the
+// node is never asked. The guard saw exactly that on macOS regtest, where a
+// deleted bind-mount source reads as absent. The sentence is LND's and wrong for
+// that source; it is left as it was, because no test reads it and changing it
+// would suggest the fake knows something about the wire that it does not.
 func (n *Node) SetReject(reject bool) {
 	if !reject {
 		n.SetRejectWith(nil)
 		return
 	}
-	// The shape LND uses once a macaroon is invalidated by rotation.
 	n.SetRejectWith(status.Error(codes.Unauthenticated,
 		"verification failed: signature mismatch after caveat verification"))
+}
+
+// SetRejectLikeLND makes every RPC fail the way LND refuses a macaroon it will
+// not accept.
+//
+// MEASURED, 16 Sep 2026, LND 0.21 on the regtest stack, with lncli: another
+// node's admin.macaroon, and the node's own pre-rotation admin.macaroon after a
+// rotation, both answered
+//
+//	code = Unknown desc = verification failed: signature mismatch after caveat verification
+//
+// Unknown, not Unauthenticated: LND's macaroon interceptor returns a plain error
+// and gRPC surfaces that as Unknown. A fake that rejected with the code §6's
+// prose suggested is how the guard's rotation detector passed every unit test
+// while never firing on a real node (dqd).
+func (n *Node) SetRejectLikeLND(reject bool) {
+	if !reject {
+		n.SetRejectWith(nil)
+		return
+	}
+	n.SetRejectWith(RejectedLikeLND())
+}
+
+// RejectedLikeLND is LND's answer to a macaroon it will not accept. See
+// SetRejectLikeLND for the measurement.
+func RejectedLikeLND() error {
+	return status.Error(codes.Unknown, "verification failed: signature mismatch after caveat verification")
+}
+
+// SetWalletState sets what the State service reports and, as LND does, refuses
+// every other RPC with the state interceptor's error unless the state is
+// RPC_ACTIVE or SERVER_ACTIVE — BEFORE the macaroon is looked at.
+func (n *Node) SetWalletState(state lnrpc.WalletState) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.walletState = state
+}
+
+// SetGetInfoError makes GetInfo's handler fail AFTER the node accepted the
+// macaroon, while every other RPC works.
+//
+// LND does this in an active stage: GetInfo reads the channel database and asks
+// the chain backend (rpcserver.go, getChainSyncInfo, v0.21.2-beta), and returns
+// those failures as plain errors — code Unknown, the code a rejected macaroon
+// gets. Distinct from SetRejectWith, which fails at the interceptor.
+func (n *Node) SetGetInfoError(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.getInfoErr = err
+}
+
+// ScriptListPermissions sets the answers the next ListPermissions calls get, one
+// error (or nil) per call; once used up, it answers. An error here stands in for
+// an interceptor refusing that one call — the only way a real node fails it.
+// Scripted per call rather than set, so a test can reject exactly one probe
+// instead of racing the probe ticker to undo a rejection.
+func (n *Node) ScriptListPermissions(errs ...error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.listPermissionsScript = append([]error(nil), errs...)
+}
+
+// ListPermissionsCalls is how many ListPermissions calls reached the handler.
+func (n *Node) ListPermissionsCalls() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.listPermissionsCalls
+}
+
+// ListPermissions is LND's: its handler builds a map and has no error path, so
+// any failure a real node gives it comes from an interceptor.
+func (n *Node) ListPermissions(ctx context.Context, _ *lnrpc.ListPermissionsRequest) (*lnrpc.ListPermissionsResponse, error) {
+	if err := n.authorise(ctx); err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.listPermissionsCalls++
+	if len(n.listPermissionsScript) > 0 {
+		next := n.listPermissionsScript[0]
+		n.listPermissionsScript = n.listPermissionsScript[1:]
+		if next != nil {
+			return nil, next
+		}
+	}
+	return &lnrpc.ListPermissionsResponse{}, nil
+}
+
+// SetStateError makes GetState fail with err while every other RPC works.
+func (n *Node) SetStateError(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.stateErr = err
+}
+
+// StateCalls is how many GetState calls the node answered, and how many of them
+// carried a macaroon.
+func (n *Node) StateCalls() (calls, withMacaroon int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.stateCalls, n.stateCallsWithMacaroon
+}
+
+// stateService is LND's State service: exempt from both the macaroon check and
+// the state check (rpcperms/interceptor.go, macaroonWhitelist and
+// checkRPCState's StateServer branch), so it answers in every state, whatever
+// the caller sends.
+type stateService struct {
+	lnrpc.UnimplementedStateServer
+	node *Node
+}
+
+func (s *stateService) GetState(ctx context.Context, _ *lnrpc.GetStateRequest) (*lnrpc.GetStateResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	s.node.mu.Lock()
+	defer s.node.mu.Unlock()
+	s.node.stateCalls++
+	if len(md.Get("macaroon")) > 0 {
+		s.node.stateCallsWithMacaroon++
+	}
+	if s.node.stateErr != nil {
+		return nil, s.node.stateErr
+	}
+	return &lnrpc.GetStateResponse{State: s.node.walletState}, nil
+}
+
+// stateRefusal is LND's state interceptor (rpcperms/interceptor.go,
+// checkRPCState, v0.21.2-beta): the error a Lightning or Router RPC gets while
+// the node is not ready, whatever macaroon it carries. Plain errors in LND, so
+// code Unknown on the wire — the same code as a rejected macaroon, which is the
+// whole reason the guard asks the State service before it counts one.
+func stateRefusal(state lnrpc.WalletState) error {
+	var sentence string
+	switch state {
+	case lnrpc.WalletState_RPC_ACTIVE, lnrpc.WalletState_SERVER_ACTIVE:
+		return nil
+	case lnrpc.WalletState_WAITING_TO_START:
+		sentence = "waiting to start, RPC services not available"
+	case lnrpc.WalletState_NON_EXISTING:
+		sentence = "wallet not created, create one to enable full RPC access"
+	case lnrpc.WalletState_LOCKED:
+		sentence = "wallet locked, unlock it to enable full RPC access"
+	case lnrpc.WalletState_UNLOCKED:
+		sentence = "the RPC server is in the process of starting up, but not yet ready to accept calls"
+	default:
+		sentence = fmt.Sprintf("unknown RPC state: %v", state)
+	}
+	return status.Error(codes.Unknown, sentence)
 }
 
 // SetRejectWith makes every RPC fail with a specific status.
@@ -304,6 +482,13 @@ func (n *Node) authorise(ctx context.Context) error {
 	}
 	values := md.Get("macaroon")
 	n.mu.Lock()
+	// LND's order: the state interceptor runs before the macaroon interceptor,
+	// so a node that is not ready refuses a perfectly good macaroon — and never
+	// sees it, which is why it is not recorded either.
+	if err := stateRefusal(n.walletState); err != nil {
+		n.mu.Unlock()
+		return err
+	}
 	if len(values) == 1 {
 		n.macaroons = append(n.macaroons, values[0])
 	}
@@ -375,6 +560,12 @@ func (n *Node) middlewareLiveFor(name string) bool {
 func (n *Node) GetInfo(ctx context.Context, _ *lnrpc.GetInfoRequest) (*lnrpc.GetInfoResponse, error) {
 	if err := n.authorise(ctx); err != nil {
 		return nil, err
+	}
+	n.mu.Lock()
+	handlerErr := n.getInfoErr
+	n.mu.Unlock()
+	if handlerErr != nil {
+		return nil, handlerErr
 	}
 	return &lnrpc.GetInfoResponse{Alias: "fake-node", SyncedToChain: true, IdentityPubkey: "02aaaa"}, nil
 }

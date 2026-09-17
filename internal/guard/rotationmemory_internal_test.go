@@ -8,10 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/davotoula/brollyzapper/internal/lnd"
+	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
 	"github.com/davotoula/brollyzapper/internal/logging"
 )
 
@@ -39,7 +37,8 @@ func newMemoryTestGuard(t *testing.T) (*Guard, string) {
 	}, admin
 }
 
-var rejected = status.Error(codes.Unauthenticated, "verification failed: signature mismatch")
+// rejected is LND's answer to a macaroon it will not accept (dqd): code Unknown.
+var rejected = lndtest.RejectedLikeLND()
 
 func declared(g *Guard) bool {
 	select {

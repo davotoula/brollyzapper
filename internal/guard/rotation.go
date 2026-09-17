@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// Rotation-detection defaults (spec §6): three consecutive authentication
-// failures inside thirty seconds mean the node's macaroons were rotated.
+// Rotation-detection defaults (spec §6): three consecutive rejections of
+// admin.macaroon inside thirty seconds mean the node's macaroons were rotated.
 const (
 	DefaultRotationWindow    = 30 * time.Second
 	DefaultRotationThreshold = 3
@@ -27,7 +27,7 @@ const (
 	ProbeInterval = 10 * time.Second
 )
 
-// RotationDetector decides when repeated authentication failures stop looking
+// RotationDetector decides when repeated rejections of admin.macaroon stop looking
 // like a flaky node and start looking like rotation.
 //
 // It counts ONLY the guard's own probes (§6, as0.8). Anything else that sees
@@ -99,6 +99,13 @@ func (d *RotationDetector) Armed() bool {
 // a loaded node, a TLS handshake that stalled — from being counted as adjacent
 // to one from before the trouble started.
 func (d *RotationDetector) ProbeFailed() bool {
+	_, tripped := d.probeFailed()
+	return tripped
+}
+
+// probeFailed is ProbeFailed with the run's length, so the guard can say so once
+// at the start of a run — including one the gap check restarted.
+func (d *RotationDetector) probeFailed() (run int, tripped bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
@@ -107,7 +114,14 @@ func (d *RotationDetector) ProbeFailed() bool {
 	}
 	d.lastProbe = now
 	d.consecutive++
-	return d.consecutive >= d.threshold
+	return d.consecutive, d.consecutive >= d.threshold
+}
+
+// counting reports whether the current run holds at least one rejected probe.
+func (d *RotationDetector) counting() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.consecutive > 0
 }
 
 // Success clears the run: §6 says three CONSECUTIVE failures, and a call that

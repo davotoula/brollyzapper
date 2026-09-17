@@ -559,6 +559,10 @@ type NodeView struct {
 	// the one a restart did not repair: the admin macaroon mounted into it
 	// (as0.10). The report's verdict, carried; the copy is the template's.
 	AdminMacaroonRejected bool
+	// NodeStage is why the guard cannot reach the node when the node said so
+	// itself (dqd): "locked", "starting", "no_wallet", or empty. A token mapped
+	// from LND's stage by the handler; the copy is the template's.
+	NodeStage string
 	// ServerCheckedAt is when the SERVER's own credential last got an answer
 	// from the node, and ServerReachable what that answer was (`20i.21`). Zero
 	// means not asked yet, and the page says so rather than "no". The guard's

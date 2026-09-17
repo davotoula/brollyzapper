@@ -207,6 +207,11 @@ type Report struct {
 	// so the Node page's "LND reachable from the guard — no" can say why from the
 	// same answer the Security panel renders, and never computes it itself.
 	AdminMacaroonRejected bool
+	// NodeWalletState is the stage the node reported to the guard when the guard
+	// could not reach it (dqd), carried as a value. The Node page's "no — the
+	// wallet is locked" and the guard-admin-macaroon row's not-checked both read
+	// THIS, so the two pages cannot disagree about whether the node is up (§11).
+	NodeWalletState lnd.WalletState
 	// ServerCredential is the last answer the server's own credential got from
 	// the node, with its time (`20i.21`). Nil when no probe is wired; a zero At
 	// means not asked yet. A MEASUREMENT beside its check, like Spend: the Node
@@ -448,6 +453,9 @@ func Run(ctx context.Context, in Inputs) Report {
 	report.MismatchedAddress = mismatchedAddress
 	serverCredential, probed := serverCredentialCheck(in)
 	report.ServerCredential = probed
+	if broker.answered() {
+		report.NodeWalletState = broker.status.NodeWalletState
+	}
 	adminMacaroon := guardAdminMacaroonCheck(state, broker)
 	report.AdminMacaroonRejected = adminMacaroon.State == Fail
 	report.Checks = append(report.Checks,
@@ -730,6 +738,17 @@ func guardAdminMacaroonCheck(state lnd.State, broker brokerState) Check {
 		c.State = Pass
 		return c
 	}
+	// THE NODE IS NOT ACCEPTING CALLS, so "rejects" is not a claim about now
+	// (dqd, ruled 17 Sep 2026). The guard still holds and still says so on
+	// Status; the row returns to Fail once the node reports a stage that admits
+	// calls. No stage at all is the same: the guard could not reach even the
+	// State service, which is the node down — as0.10's go-review L3 accepted a
+	// stale Fail here only because the guard could not then tell.
+	if !status.NodeWalletState.AdmitsCalls() {
+		notChecked(&c, "The guard is holding its rotation exit, but "+nodeNotAccepting(status.NodeWalletState)+
+			", so whether it accepts the admin macaroon mounted into the guard cannot be asked until it is up.")
+		return c
+	}
 	c.State = Fail
 	c.Detail = "Your node rejects the admin macaroon mounted into the guard, and it is the same file " +
 		"the node rejected before the guard last restarted — so this is not a macaroon rotation, " +
@@ -742,6 +761,22 @@ func guardAdminMacaroonCheck(state lnd.State, broker brokerState) Check {
 			status.ReceiveExpiry.UTC().Format("2006-01-02 15:04 UTC") + ", and cannot renew it after that."
 	}
 	return c
+}
+
+// nodeNotAccepting names why the node is not accepting calls, in words.
+func nodeNotAccepting(state lnd.WalletState) string {
+	switch state.Stage() {
+	case "locked":
+		return "the node's wallet is locked"
+	case "starting":
+		return "the node is still starting"
+	case "no_wallet":
+		return "the node has no wallet yet"
+	}
+	if state == "" {
+		return "the node is not answering the guard"
+	}
+	return "the node reports its state as " + string(state)
 }
 
 // credentialKind is what differs between §11's rows for the two credentials

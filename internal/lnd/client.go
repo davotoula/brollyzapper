@@ -78,6 +78,10 @@ type Client struct {
 
 	mu   sync.Mutex
 	conn *grpc.ClientConn
+	// stateConn is the second connection GetState uses: TLS verified exactly as
+	// conn is, and no per-RPC credential at all. Dialled on first use, so a
+	// client that never asks — the server's — never holds one.
+	stateConn *grpc.ClientConn
 	// certErr is the last certificate-name verdict, remembered so a REFUSED
 	// connection costs no more than a successful one.
 	//
@@ -153,15 +157,18 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) closeLocked() error {
-	conn := c.conn
-	c.conn = nil
+	conn, stateConn := c.conn, c.stateConn
+	c.conn, c.stateConn = nil, nil
 	// The certificate is re-read on the next connection, so its verdict goes
 	// with the connection it was made for.
 	c.certErr = nil
-	if conn == nil {
-		return nil
+	var errs []error
+	for _, open := range []*grpc.ClientConn{conn, stateConn} {
+		if open != nil {
+			errs = append(errs, open.Close())
+		}
 	}
-	return conn.Close()
+	return errors.Join(errs...)
 }
 
 // lightning returns the RPC client, dialling on first use.
@@ -177,12 +184,13 @@ func (c *Client) lightning() (lnrpc.LightningClient, error) {
 	return lnrpc.NewLightningClient(conn), nil
 }
 
-// connection is the dial, and there is exactly one of it.
+// connection is the macaroon-carrying dial, and there is exactly one of it.
 //
-// Both services this client speaks — Lightning and, from d24.2, Router — are
-// built over the same *grpc.ClientConn, so the TLS verification and the per-RPC
-// macaroon have one implementation rather than two that can drift. That is the
-// same reason CredentialSource exists, applied a level down.
+// Both services this client speaks with a credential — Lightning and, from
+// d24.2, Router — are built over the same *grpc.ClientConn, so the TLS
+// verification and the per-RPC macaroon have one implementation rather than two
+// that can drift. That is the same reason CredentialSource exists, applied a
+// level down. The State service's connection shares the TLS half through dial.
 func (c *Client) connection() (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -193,25 +201,7 @@ func (c *Client) connection() (*grpc.ClientConn, error) {
 		c.setState(StateNotLinked)
 		return nil, ErrNotLinked
 	}
-	transport, err := credentials.NewClientTLSFromFile(c.creds.CertPath(), "")
-	if err != nil {
-		return nil, fmt.Errorf("loading %s: %w", c.creds.CertPath(), err)
-	}
-	// BEFORE grpc.NewClient, because after it the answer is no longer typed.
-	// See CertificateNameError: the constructor verifies nothing, so a name
-	// mismatch would otherwise arrive at the first RPC as a flattened status
-	// string. Once per CONNECTION rather than once per process — closeLocked
-	// drops both c.conn and this verdict, so a regenerated certificate is
-	// re-read on the same schedule and fixing lnd.conf takes effect at the next
-	// reconnect instead of needing a restart of this process.
-	if c.certErr == nil {
-		c.certErr = verifyCertificateNames(c.creds.CertPath(), c.address)
-	}
-	if c.certErr != nil {
-		return nil, c.certErr
-	}
-	conn, err := grpc.NewClient(c.address,
-		grpc.WithTransportCredentials(transport),
+	conn, err := c.dialLocked(
 		// Connection-level, not per-call. grpc-go applies BOTH sets when a call
 		// also carries credentials ("if these credentials are provided both via
 		// dial options and call options, then both sets of credentials will be
@@ -223,11 +213,55 @@ func (c *Client) connection() (*grpc.ClientConn, error) {
 		grpc.WithPerRPCCredentials(macaroonCredential{source: c.creds}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("dialling %s: %w", c.address, err)
+		return nil, err
 	}
 	c.conn = conn
 	if c.State() == StateNotLinked {
 		c.setState(StateConnecting)
+	}
+	return conn, nil
+}
+
+// stateConnection is GetState's dial: the same TLS verification, and no
+// credential, so nothing about the macaroon file can fail a call on it (dqd).
+// A separate connection rather than a credential that sends nothing for one
+// service, because then no macaroon can travel on it by construction.
+func (c *Client) stateConnection() (*grpc.ClientConn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stateConn != nil {
+		return c.stateConn, nil
+	}
+	conn, err := c.dialLocked()
+	if err != nil {
+		return nil, err
+	}
+	c.stateConn = conn
+	return conn, nil
+}
+
+// dialLocked is the TLS half both connections share, with c.mu held.
+func (c *Client) dialLocked(opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	transport, err := credentials.NewClientTLSFromFile(c.creds.CertPath(), "")
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", c.creds.CertPath(), err)
+	}
+	// BEFORE grpc.NewClient, because after it the answer is no longer typed.
+	// See CertificateNameError: the constructor verifies nothing, so a name
+	// mismatch would otherwise arrive at the first RPC as a flattened status
+	// string. Once per CONNECTION rather than once per process — closeLocked
+	// drops both connections and this verdict, so a regenerated certificate is
+	// re-read on the same schedule and fixing lnd.conf takes effect at the next
+	// reconnect instead of needing a restart of this process.
+	if c.certErr == nil {
+		c.certErr = verifyCertificateNames(c.creds.CertPath(), c.address)
+	}
+	if c.certErr != nil {
+		return nil, c.certErr
+	}
+	conn, err := grpc.NewClient(c.address, append([]grpc.DialOption{grpc.WithTransportCredentials(transport)}, opts...)...)
+	if err != nil {
+		return nil, fmt.Errorf("dialling %s: %w", c.address, err)
 	}
 	return conn, nil
 }
