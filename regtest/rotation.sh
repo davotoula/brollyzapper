@@ -17,6 +17,8 @@
 #     -> audit=macaroon.rotate, a 10s settling pause, exit non-zero
 #     -> restart: on-failure brings it back and Docker re-resolves the mount
 #     -> the guard re-copies tls.cert and re-bakes recv.macaroon on a new root key
+#     -> the server, whose recv.macaroon LND no longer has a root key for, says
+#        re-link while it waits (2f0)
 #     -> the server, which never exited, recovers with no operator action
 #
 #   ./rotation.sh
@@ -38,6 +40,12 @@
 #
 # ./wrongmount.sh is the proof of that shape on any platform: it plants readable
 # rejected bytes in place, so this script does not plant them too.
+#
+# THE SERVER'S REJECTION IS LND'S ON EVERY PLATFORM. recv.macaroon lives in the
+# credentials named volume, not a host bind mount, so the stale bytes reach the
+# node, which answers code Unknown, "root key with id N doesn't exist" (measured
+# 17 Sep 2026 with lncli). That is what makes section 3's re-link line provable
+# on macOS.
 #
 # Afterwards the stack is left working. Nothing here is destructive beyond the
 # regtest node's own macaroons, which it regenerates.
@@ -365,6 +373,27 @@ NODE_DURING=$(curl -s -b "$JAR" "$APP/node" | sed -n 's|.*<dt>Connection</dt><dd
 [ "$NODE_DURING" != "ready" ] \
   && ok "the Node page shows the connection as \"$NODE_DURING\" while the credential is dead — a state, not a crash (§11)" \
   || die "the Node page says the connection is ready while the node is rejecting our macaroon"
+# 2f0: the operator is TOLD. LND refuses the stale recv.macaroon with the code it
+# also gives a starting node, so until 2f0 the server logged "re-bake in case the
+# credential is stale" at INFO and the page said connecting, on every real
+# rotation. The log line, not the page's relink state: the line is durable, and
+# the page is racy against the guard's re-bake, which is already under way.
+#
+# Expected to be there already: the server's stream meets the stale macaroon
+# within one backoff of LND coming up, and the guard spent at least its 30s
+# rotation window and 10s settling delay before section 2 let us through. The
+# short wait is for the log reaching docker, not for the server — once the
+# guard's restart (already under way, restart: on-failure) re-bakes
+# recv.macaroon, a line not yet written never will be.
+RELINK_LINE=""
+for i in $(seq 1 10); do
+  RELINK_LINE=$(glog brollyzapper | grep 'lnd rejected our macaroon; re-link needed' | head -1 || true)
+  [ -n "$RELINK_LINE" ] && break
+  sleep 2
+done
+[ -n "$RELINK_LINE" ] || die "the server never logged \"lnd rejected our macaroon; re-link needed\" while LND refused its recv.macaroon; the operator was told connecting (2f0)"
+require_from_this_run "server re-link" "$RELINK_LINE"
+ok "the server logged \"re-link needed\" by THIS run — LND's Unknown, read by the node's stage (2f0)"
 
 # ---------------------------------------------------------------------------
 say "4. the guard came back and re-baked"
