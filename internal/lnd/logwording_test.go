@@ -468,6 +468,30 @@ func TestReLinkNeedsASecondRefusalFromANodeThatIsStillUp(t *testing.T) {
 		}
 	})
 
+	// The whole restart, which is the shape the ruling is really about: LND is
+	// refused on the way down, is away for a while, and refuses once more on the
+	// way up before its wallet is unlocked. Neither refusal has a partner, so
+	// nothing here is re-link — which only holds if an outcome BETWEEN two
+	// refusals ends the suspicion rather than banking it.
+	t.Run("a refusal on the way down and another on the way up", func(t *testing.T) {
+		node := lndtest.Start(t)
+		node.ScriptRejects(
+			status.Error(codes.Unknown, "macaroon store is locked"),
+			status.Error(codes.Unavailable, "connection refused"),
+			status.Error(codes.Unavailable, "connection refused"),
+			status.Error(codes.Unknown, "macaroon store is locked"),
+			status.Error(codes.Unavailable, "connection refused"),
+		)
+		node.SetLedger(lndtest.SettledInvoice("hash-1", 1, 1_000))
+		client, _, logged := runLoggedStream(t, node, &memoryResume{})
+
+		lndtest.WaitFor(t, "the node accepting again", func() bool { return client.State() == lnd.StateReady })
+		if n := logged.count(t, relinkNeeded); n != 0 {
+			t.Errorf("two refusals with the node away between them were logged as re-link %d "+
+				"times; a suspicion must not survive the outcome after it", n)
+		}
+	})
+
 	t.Run("two refusals in a row", func(t *testing.T) {
 		node := lndtest.Start(t)
 		// A rotation answers the confirming attempt exactly as it answered the
