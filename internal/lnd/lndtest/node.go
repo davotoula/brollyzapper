@@ -58,6 +58,14 @@ type Node struct {
 	// carried macaroon metadata — which the node does not need and the guard has
 	// no reason to send.
 	stateCalls, stateCallsWithMacaroon int
+	// getInfoErr is GetInfo's HANDLER failing after the macaroon was accepted —
+	// LND's getChainSyncInfo with the chain backend down, say.
+	getInfoErr error
+	// listPermissions scripts ListPermissions: each call past the interceptors
+	// takes the next error, nil or not; an empty script answers. calls counts
+	// the ones that reached the handler.
+	listPermissionsScript []error
+	listPermissionsCalls  int
 	// ledger is every settled invoice the node remembers, settle_index ascending.
 	ledger []*lnrpc.Invoice
 	// breakAfter, when > 0, drops the invoice stream after that many sends.
@@ -234,6 +242,56 @@ func (n *Node) SetWalletState(state lnrpc.WalletState) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.walletState = state
+}
+
+// SetGetInfoError makes GetInfo's handler fail AFTER the node accepted the
+// macaroon, while every other RPC works.
+//
+// LND does this in an active stage: GetInfo reads the channel database and asks
+// the chain backend (rpcserver.go, getChainSyncInfo, v0.21.2-beta), and returns
+// those failures as plain errors — code Unknown, the code a rejected macaroon
+// gets. Distinct from SetRejectWith, which fails at the interceptor.
+func (n *Node) SetGetInfoError(err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.getInfoErr = err
+}
+
+// ScriptListPermissions sets the answers the next ListPermissions calls get, one
+// error (or nil) per call; once used up, it answers. An error here stands in for
+// an interceptor refusing that one call — the only way a real node fails it.
+// Scripted per call rather than set, so a test can reject exactly one probe
+// instead of racing the probe ticker to undo a rejection.
+func (n *Node) ScriptListPermissions(errs ...error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.listPermissionsScript = append([]error(nil), errs...)
+}
+
+// ListPermissionsCalls is how many ListPermissions calls reached the handler.
+func (n *Node) ListPermissionsCalls() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.listPermissionsCalls
+}
+
+// ListPermissions is LND's: its handler builds a map and has no error path, so
+// any failure a real node gives it comes from an interceptor.
+func (n *Node) ListPermissions(ctx context.Context, _ *lnrpc.ListPermissionsRequest) (*lnrpc.ListPermissionsResponse, error) {
+	if err := n.authorise(ctx); err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.listPermissionsCalls++
+	if len(n.listPermissionsScript) > 0 {
+		next := n.listPermissionsScript[0]
+		n.listPermissionsScript = n.listPermissionsScript[1:]
+		if next != nil {
+			return nil, next
+		}
+	}
+	return &lnrpc.ListPermissionsResponse{}, nil
 }
 
 // StateCalls is how many GetState calls the node answered, and how many of them
@@ -489,6 +547,12 @@ func (n *Node) middlewareLiveFor(name string) bool {
 func (n *Node) GetInfo(ctx context.Context, _ *lnrpc.GetInfoRequest) (*lnrpc.GetInfoResponse, error) {
 	if err := n.authorise(ctx); err != nil {
 		return nil, err
+	}
+	n.mu.Lock()
+	handlerErr := n.getInfoErr
+	n.mu.Unlock()
+	if handlerErr != nil {
+		return nil, handlerErr
 	}
 	return &lnrpc.GetInfoResponse{Alias: "fake-node", SyncedToChain: true, IdentityPubkey: "02aaaa"}, nil
 }

@@ -34,8 +34,8 @@ const (
 // locked wallet and a rotated macaroon are the same answer on the wire, and only
 // the node's stage tells them apart. The two admitted states are the ones
 // checkRPCState passes (rpcperms/interceptor.go, v0.21.2-beta); RPC_ACTIVE
-// counts as well as SERVER_ACTIVE because a node in it answers GetInfo and
-// rejects a bad macaroon like any other.
+// counts as well as SERVER_ACTIVE because a node in it answers Lightning calls
+// and rejects a bad macaroon like any other.
 //
 // Would change if LND adds a stage that admits calls; until this build knows its
 // name, such a node reads as not ready and a rotation during it is not counted.
@@ -59,6 +59,26 @@ func (s WalletState) Stage() string {
 	default:
 		return ""
 	}
+}
+
+// ListPermissions asks the node for its method permission map, and the guard's
+// rotation probe asks it for exactly one reason: its HANDLER CANNOT FAIL.
+//
+// LND builds the answer from a static map (rpcserver.go, ListPermissions,
+// v0.21.2-beta), so in a stage that admits calls any error it returns came from
+// an interceptor — for a macaroon without custom caveats, the macaroon check.
+// GetInfo is not that: it reads the channel database and asks the chain backend,
+// and returns those failures as plain errors, code Unknown, the code a rejected
+// macaroon gets. A probe on GetInfo took a rotation exit whenever bitcoind
+// restarted for longer than three probes (code-review, 17 Sep 2026). It needs
+// info:read, which admin.macaroon has.
+func (c *Client) ListPermissions(ctx context.Context) error {
+	client, err := c.lightning()
+	if err != nil {
+		return c.observe(err)
+	}
+	_, err = client.ListPermissions(ctx, &lnrpc.ListPermissionsRequest{})
+	return c.observe(err)
 }
 
 // GetState asks the node which stage it is in.

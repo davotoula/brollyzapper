@@ -983,8 +983,9 @@ func (g *Guard) observe(ctx context.Context, err error) error {
 // observeProbe is observe for the guard's OWN samples: the only observations
 // that advance the run toward §6's threshold.
 //
-// Called only for a node whose stage admits calls (probeRotation asks first), so
-// a refusal here reached the macaroon check and is about the credential.
+// Called only for a node whose stage admits calls (probeRotation asks first), with
+// the answer to a call whose handler cannot fail — so a refusal here came from
+// the macaroon check and is about the credential.
 //
 // sent is g.acceptances as it stood when the probe went out.
 func (g *Guard) observeProbe(ctx context.Context, err error, sent uint64) {
@@ -1022,8 +1023,10 @@ func (g *Guard) observeProbe(ctx context.Context, err error, sent uint64) {
 // probeRotation samples LND on the guard's OWN clock, so the rotation decision
 // stops depending on how often something else happens to call in (as0.8, §6).
 //
-// It wakes every ProbeInterval and asks GetInfo only while a rejection is
-// outstanding. Three consecutive rejected probes trip the detector; any success
+// It wakes every ProbeInterval and asks the node only while a rejection is
+// outstanding: its stage, then ListPermissions with admin.macaroon — not GetInfo,
+// whose handler answers code Unknown for reasons that are not the credential
+// (see lnd.Client.ListPermissions). Three consecutive rejected probes trip the detector; any success
 // clears the run, which is the CONTINUITY that replaced the old window's
 // density requirement as the false-positive protection.
 //
@@ -1057,7 +1060,7 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		// macaroon with — its state check runs before its macaroon check — so
 		// its refusal says nothing about the credential and is not counted. Nor
 		// is a State service that cannot be asked: unreachable means unknown.
-		// First rather than after a failed GetInfo, because within one LND
+		// First rather than after a refused call, because within one LND
 		// process the stage only moves forward: "active" before the call is
 		// still active during it, where "not ready" after a failure may already
 		// be stale.
@@ -1067,7 +1070,7 @@ func (g *Guard) probeRotation(ctx context.Context) {
 		sent := g.acceptances.Load()
 		// Read before the probe, whose success clears it.
 		suspected := g.rotation.counting()
-		_, err := g.node.GetInfo(ctx)
+		err := g.node.ListPermissions(ctx)
 		g.observeProbe(ctx, err, sent)
 		if err == nil {
 			// Only after a rejection was COUNTED. Arming is broad (dqd): every

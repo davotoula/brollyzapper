@@ -92,7 +92,7 @@ func TestANodeThatIsNotReadyIsNeverCountedAsARotation(t *testing.T) {
 }
 
 // The other half: both stages checkRPCState admits let a rejection count. A node
-// in RPC_ACTIVE answers GetInfo and refuses a bad macaroon like any other, so
+// in RPC_ACTIVE answers Lightning calls and refuses a bad macaroon like any other, so
 // counting only SERVER_ACTIVE would miss a rotation for as long as that lasts.
 func TestARejectionCountsInBothStagesThatAdmitCalls(t *testing.T) {
 	for _, state := range []lnrpc.WalletState{lnrpc.WalletState_RPC_ACTIVE, lnrpc.WalletState_SERVER_ACTIVE} {
@@ -211,18 +211,60 @@ func TestTheNotRotatedAfterAllLineFollowsOnlyACountedRejection(t *testing.T) {
 		node := lndtest.Start(t)
 		d := guardDirs(t, node)
 		log, sink := capturedLog()
-		g := openGuard(t, node, d, fastProbes(guard.Options{Log: log, ProbeInterval: interval}))
+		g := openGuard(t, node, d, fastProbes(guard.Options{Log: log}))
 		s := startServing(t, g)
 
-		node.SetRejectLikeLND(true)
-		_ = g.Handle(t.Context(), guard.Request{Op: guard.OpBakeReceive})
-		lndtest.WaitFor(t, "a probe to count a rejection", func() bool {
-			return rejectedLines(t, sink.String()) == 1
-		})
-		node.SetRejectLikeLND(false)
+		// EXACTLY ONE probe is refused, scripted on the node rather than undone
+		// by the test after the first count: undoing it raced the probe ticker,
+		// with two intervals between the first counted rejection and the third
+		// (code-review, 17 Sep). The GetInfo failure is only what arms the loop.
+		node.ScriptListPermissions(lndtest.RejectedLikeLND())
+		node.SetGetInfoError(lndtest.RejectedLikeLND())
+		if _, err := s.client.Status(t.Context()); err != nil {
+			t.Fatalf("Status: %v", err)
+		}
 		lndtest.WaitFor(t, "the recovery line", func() bool {
 			s.assertStillServing(t)
 			return strings.Contains(sink.String(), recovered)
 		})
+		if n := rejectedLines(t, sink.String()); n != 1 {
+			t.Errorf("%q logged %d times, want the one counted rejection:\n%s", rejectedLine, n, sink.String())
+		}
 	})
+}
+
+// The probe's macaroon call is ListPermissions, not GetInfo (code-review, 17 Sep
+// 2026). A node in SERVER_ACTIVE still answers GetInfo with code Unknown when
+// the HANDLER fails — getChainSyncInfo with bitcoind down, a channel database
+// read (rpcserver.go, v0.21.2-beta) — and a probe that counted that would take a
+// rotation exit, then hold with a row blaming the mount, every time the chain
+// backend restarts. ListPermissions' handler has no error path, so a refusal of
+// it in an active stage is an interceptor's: the credential.
+func TestAGetInfoThatFailsUnknownWhileTheNodeIsActiveIsNeverCounted(t *testing.T) {
+	node := lndtest.Start(t)
+	d := guardDirs(t, node)
+	log, sink := capturedLog()
+	g := openGuard(t, node, d, fastProbes(guard.Options{Log: log}))
+	s := startServing(t, g)
+	node.SetGetInfoError(lndtest.RejectedLikeLND())
+
+	// Every Status re-arms the loop — GetInfo fails with a rejection code — so
+	// the probe gets a run of chances to count, not one.
+	for range 5 * guard.DefaultRotationThreshold {
+		before := node.ListPermissionsCalls()
+		if _, err := s.client.Status(t.Context()); err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		lndtest.WaitFor(t, "a probe to ask the node about the credential", func() bool {
+			s.assertStillServing(t)
+			return node.ListPermissionsCalls() > before
+		})
+	}
+	s.assertStillServing(t)
+	if st := readGuardState(t, d.data); st.RotationExit != nil {
+		t.Errorf("a GetInfo handler failure was recorded as a rotation exit: %+v", st.RotationExit)
+	}
+	if n := rejectedLines(t, sink.String()); n != 0 {
+		t.Errorf("%q logged %d times for a node that accepted the credential every time", rejectedLine, n)
+	}
 }
