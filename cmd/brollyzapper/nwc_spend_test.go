@@ -151,6 +151,8 @@ func (seamPurse) Shortfall(context.Context) (wallet.Deficit, bool, error) {
 
 func (seamPurse) UnresolvedPayments(context.Context) (int, error) { return 0, nil }
 
+func (seamPurse) NamedUnresolvedPayments(context.Context) (int, error) { return 0, nil }
+
 // The seam d24.6 is about: the ladder's step 2 and §11's Tier-2 report are the
 // SAME policy, and this is where the two meet.
 //

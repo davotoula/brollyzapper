@@ -493,20 +493,33 @@ func resolveOne(ctx context.Context, row store.PendingPayment, purse spender,
 		// MUST LOOK AT — and the case the Wave 21 ruling did not have in front
 		// of it.
 		//
-		// We handed this payment over; the node's record of it is gone. On
-		// Umbrel that is a shared node another app can run deletepayments on, or
-		// a restore from an older backup. The payment may have settled. §6
-		// forbids reversing an unresolved reservation precisely here, because if
-		// it settled the ceiling would be spent twice — so nothing moves.
+		// We handed this payment over; the node has no record of it. TWO CAUSES,
+		// and this arm cannot tell them apart (`v7u`): the record was LOST — on
+		// Umbrel a shared node another app can run deletepayments on, or a
+		// restore from an older backup — or it was NEVER CREATED, because the
+		// node refused the request before initiating anything. The second is what
+		// the reference box hit, and asserting the first sent its operator
+		// hunting a pruning fault that did not exist while the node's payment
+		// history sat intact back to 2024.
+		//
+		// Rows from BEFORE `v7u` fix A can still arrive here by the second route.
+		// Rows from after it cannot: a refusal the node never initiated now has
+		// its marker cleared at dispatch time and takes the arm above. The
+		// sentence keeps both because the rows on disk keep both.
+		//
+		// The payment may have settled. §6 forbids reversing an unresolved
+		// reservation precisely here, because if it settled the ceiling would be
+		// spent twice — so nothing moves.
 		//
 		// No new surface is needed: u0u's freeze already holds spending while an
 		// unresolved row exists and 1xp already renders it. What this adds is the
 		// NAME, so an operator is not left waiting out a state that will never
 		// clear itself.
 		log.Error("a payment this app DISPATCHED has no record at the node; leaving it "+
-			"pending and touching nothing. This does not clear itself: the node's payment "+
-			"record has been deleted or restored from an older backup, and only its operator "+
-			"can say whether this payment settled",
+			"pending and touching nothing. This does not clear itself. Either the node's "+
+			"payment record was lost — deleted, or restored from an older backup — or the "+
+			"node refused the request and never created one; only its operator can say "+
+			"whether this payment settled",
 			"reservation", row.ID, "payment_hash", row.PaymentHash,
 			// The MOMENT, not just the fact. It is what an operator takes to
 			// their node's own logs, and it is the question they ask next.
@@ -515,7 +528,8 @@ func resolveOne(ctx context.Context, row store.PendingPayment, purse spender,
 		// pass can learn more, and §6 forbids guessing — so the only remaining
 		// path to a terminal state is the operator's (`669`).
 		name(ctx, id, purse, "this payment was handed to the node and the node has no record "+
-			"of it; only you can say whether it settled", log)
+			"of it — either the record was lost, or the node refused the request and never "+
+			"created one; only you can say whether it settled", log)
 		return fmt.Errorf("payments: reservation %d was dispatched but the node has no record "+
 			"of it", row.ID)
 	case err != nil:

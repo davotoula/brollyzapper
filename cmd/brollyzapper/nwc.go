@@ -137,6 +137,9 @@ type nwcPurse interface {
 	MaxFee(ctx context.Context, amountMsat int64) (int64, error)
 	Shortfall(ctx context.Context) (wallet.Deficit, bool, error)
 	UnresolvedPayments(ctx context.Context) (int, error)
+	// NamedUnresolvedPayments is the subset the resolver has given up on, which
+	// is what tells the two holds apart in the refusal a client reads (`v7u`).
+	NamedUnresolvedPayments(ctx context.Context) (int, error)
 }
 
 // nwcSpend is the outbound half of §8's ladder: the two facts it refuses on, the
@@ -247,15 +250,39 @@ func (n nwcSpend) Held(ctx context.Context) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if unresolved > 0 {
-		// The COUNT goes too. It is smaller than the shortfall but it is the
-		// same kind of fact — how many payments this node has in flight — and
-		// the client can do nothing with it either way.
-		return "sending is held while payments from a previous run are resolved against the " +
-				"node; this clears itself, and its owner can see the detail on the Security page",
-			true, nil
+	if unresolved == 0 {
+		return "", false, nil
 	}
-	return "", false, nil
+	// WHICH HOLD IT IS, because "this clears itself" was being said about one
+	// that does not (`v7u`). On the reference box Amethyst showed the payer that
+	// sentence for 22 hours about a row the resolver had already given up on,
+	// while the server's own log for the identical condition said the opposite.
+	// A payer told to wait, waits.
+	//
+	// A NAMED row (`669`: unresolvable_reason set) is waiting for a human and
+	// nothing else will ever move it, so it wins whenever both kinds are present
+	// — it is the one with an action behind it.
+	named, err := n.purse.NamedUnresolvedPayments(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if named > 0 {
+		// THE WALLET PAGE, not the Security page. The Security page is where the
+		// operator READS about this; the Wallet page's "Payments only you can
+		// settle" table is where they ACT on it, and naming the wrong one is how
+		// the box's operator came to need a written diagnosis to find the button.
+		//
+		// Still no count, for `0vk.14`'s reason: how many payments this node has
+		// unresolved is a fact about the operator's node, and the client can do
+		// nothing with it.
+		return "sending is held until this wallet's owner settles a payment the node could " +
+			"not resolve; they can do that on the Wallet page", true, nil
+	}
+	// The self-clearing one, unchanged: the resolver has not given up on these
+	// and the next pass may well close them.
+	return "sending is held while payments from a previous run are resolved against the " +
+			"node; this clears itself, and its owner can see the detail on the Security page",
+		true, nil
 }
 
 // Decode reads a bolt11 through the node that will pay it, in the shape §8's

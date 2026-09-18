@@ -191,6 +191,18 @@ func (w *localSpender) UnresolvedPayments(ctx context.Context) (int, error) {
 	return w.store.CountUnresolvedPaymentsBefore(ctx, w.UnresolvedCutoff())
 }
 
+// NamedUnresolvedPayments is how many of those the resolver has given up on —
+// the rows only the operator can close (`v7u`).
+//
+// A SUBSET of UnresolvedPayments, same cutoff, same reason it lives here rather
+// than being read from the store: the freeze is a wallet state. The ladder asks
+// it to tell a paired client the truth about WHY sending is held — a hold that
+// clears itself when the resolver next runs, or one that is waiting for a human
+// on the Wallet page, which is a different sentence and a different action.
+func (w *localSpender) NamedUnresolvedPayments(ctx context.Context) (int, error) {
+	return w.store.CountNamedUnresolvedPaymentsBefore(ctx, w.UnresolvedCutoff())
+}
+
 // Balance is the sum of every balance entry (spec §5).
 func (w *localSpender) Balance(ctx context.Context) (int64, error) {
 	return w.store.BalanceMsat(ctx)

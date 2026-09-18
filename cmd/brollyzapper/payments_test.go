@@ -696,3 +696,54 @@ func TestATerminallyUnresolvableRowIsNamedAtOnce(t *testing.T) {
 		})
 	}
 }
+
+// `v7u`: the resolver states what it KNOWS about a dispatched row with no
+// record, and offers both causes rather than asserting one.
+//
+// It used to assert that the node's record "has been deleted or restored from an
+// older backup". On the reference box the record had never been created — LND
+// refused the request without initiating anything — and the operator was sent
+// hunting a pruning or backup fault that did not exist, on a node whose payment
+// history was intact back to 2024. A message that names a cause it cannot have
+// established is worse than one that names none: it is followed.
+//
+// BOTH the log line and the durable reason, because the operator reads them in
+// different places — the ERROR in the container's logs, the reason on the Wallet
+// page beside the button they have to press.
+func TestTheResolverOffersBothCausesForARecordThatIsNotThere(t *testing.T) {
+	seq := &recorder{}
+	purse := &fakeSpender{recorder: seq}
+	node := &fakePayer{recorder: seq, err: lnd.ErrPaymentNotFound}
+	pending := &fakePending{rows: []store.PendingPayment{
+		{ID: 7, PaymentHash: "abcd", Dispatched: true, DispatchedAt: aCutoff},
+	}}
+	log, buf := capturingLog()
+
+	_ = resolvePendingPayments(t.Context(), pending, purse, node, nil, aCutoff, log)
+
+	if len(purse.named) != 1 {
+		t.Fatalf("%d rows named, want 1", len(purse.named))
+	}
+	for _, where := range []struct{ what, text string }{
+		{"the log line", buf.String()},
+		{"the reason on the Wallet page", purse.named[0].reason},
+	} {
+		// The cause that was being asserted is still offered — it is a real
+		// cause, and on a shared node the likelier one.
+		if !strings.Contains(where.text, "lost") {
+			t.Errorf("%s does not offer a lost record as a cause: %q", where.what, where.text)
+		}
+		// And the one that actually happened.
+		if !strings.Contains(where.text, "refused") {
+			t.Errorf("%s does not offer that the node refused the request and never created a "+
+				"record: %q\n\nThat is what happened on the box, and asserting the other "+
+				"cause sent its operator after a fault that did not exist (`v7u`)",
+				where.what, where.text)
+		}
+		// Neither may assert one cause as settled fact.
+		if strings.Contains(where.text, "has been deleted or restored") {
+			t.Errorf("%s still asserts a cause it cannot have established: %q",
+				where.what, where.text)
+		}
+	}
+}

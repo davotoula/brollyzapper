@@ -45,6 +45,11 @@
   records — <code>lncli listpayments</code>, or your node's interface — and see whether it
   settled. This app is asking you to state a fact it could not establish, and what you say
   here becomes the ledger.</p>
+  <p><strong>No record at all is an answer.</strong> If your node has never heard of the
+  payment hash, nothing was paid: either your node refused the request without starting the
+  payment, or its record of it has been lost. Nothing left your wallet in the first case, and
+  in the second your node would still show the payment if it had been made. <em>It failed</em>
+  is the right answer to a hash with no record.</p>
 </div>
 <table>
   <thead><tr><th>When</th><th>Amount</th><th>Payment hash</th><th>Why</th><th></th></tr></thead>
