@@ -1,10 +1,15 @@
 package lnd_test
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
@@ -348,5 +353,46 @@ func TestHasPaymentDoesNotTurnAnUnreachableNodeIntoAnAbsentRecord(t *testing.T) 
 		t.Errorf("an unreachable node was reported as a provable absence: %v\n\nThat answer "+
 			"clears the dispatch marker, and the resolver then reverses a reservation whose "+
 			"payment may have settled (§6)", err)
+	}
+}
+
+// IsCallerGaveUp, in the package that owns it.
+//
+// Raised by the `ecc:go-reviewer` pass as informational rather than a defect:
+// the function was only exercised indirectly, through cmd/brollyzapper's
+// TestOurOwnDeadlineIsNotTreatedAsTheNodeHavingNoRecord. That coverage is real
+// and it is thorough, but it lives in another package and it reaches this
+// function through payInvoice — so a change here that broke the classification
+// would fail a test whose name is about dispatch markers, in a package whose
+// subject is the payment path. Local, because the rule is local.
+//
+// BOTH DIRECTIONS, and the false half is the one that matters: this predicate
+// SUPPRESSES the dispatch-time record check, so anything it wrongly calls "we
+// gave up" is a payment whose marker is never cleared — back to `v7u`'s stranded
+// row. Widening it is the failure, not narrowing it.
+func TestIsCallerGaveUpRecognisesOurSideAndNothingElse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nothing went wrong", nil, false},
+		{"the caller's context was cancelled", context.Canceled, true},
+		{"the caller's deadline expired", context.DeadlineExceeded, true},
+		{"a cancel wrapped by the payment path", fmt.Errorf("sending: %w", context.Canceled), true},
+		{"grpc reported the call cancelled", status.Error(codes.Canceled, "context canceled"), true},
+		{"grpc reported the deadline exceeded", status.Error(codes.DeadlineExceeded, "too slow"), true},
+		// The node ANSWERING. Each of these must stay false, or the dispatch-time
+		// check is skipped for exactly the refusals `v7u` exists to classify.
+		{"the node refused a self-payment", status.Error(codes.Unknown, "self-payments not allowed"), false},
+		{"the node has no record", status.Error(codes.NotFound, "payment isn't initiated"), false},
+		{"the node is unavailable", status.Error(codes.Unavailable, "transport is closing"), false},
+		{"a plain error from anywhere", errors.New("the stream broke"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lnd.IsCallerGaveUp(tc.err); got != tc.want {
+				t.Errorf("IsCallerGaveUp(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
