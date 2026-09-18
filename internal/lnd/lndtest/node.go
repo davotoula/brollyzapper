@@ -43,6 +43,11 @@ type Node struct {
 	address string
 	certPEM []byte
 	server  *grpc.Server
+	// stopped is closed when the test that started this node ends. Anything
+	// inside the fake that waits on a deadline waits on this too, so that it
+	// cannot outlive the test by the length of that deadline — see
+	// InterceptAsync.
+	stopped chan struct{}
 
 	mu sync.Mutex
 	// macaroons seen, in order, so a test can assert what was sent and that a
@@ -142,17 +147,21 @@ func Start(t testing.TB) *Node {
 		baked: Macaroon(t),
 		// The node a test almost always means: started, wallet unlocked.
 		walletState: lnrpc.WalletState_SERVER_ACTIVE,
+		stopped:     make(chan struct{}),
 	}
 	n.payments = map[string]paymentScript{}
 	n.tracked = map[string]paymentScript{}
 	n.middleware.intercepts = make(chan *lnrpc.RPCMiddlewareRequest)
-	n.middleware.waiting = map[uint64]chan *lnrpc.InterceptFeedback{}
+	n.middleware.waiting = map[uint64]chan InterceptOutcome{}
 	n.server = grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&cert)))
 	lnrpc.RegisterLightningServer(n.server, n)
 	routerrpc.RegisterRouterServer(n.server, &router{node: n})
 	lnrpc.RegisterStateServer(n.server, &stateService{node: n})
 	go func() { _ = n.server.Serve(listener) }()
-	t.Cleanup(n.server.Stop)
+	t.Cleanup(func() {
+		close(n.stopped)
+		n.server.Stop()
+	})
 	return n
 }
 
@@ -963,6 +972,14 @@ func SettledInvoice(paymentHash string, settleIndex uint64, amountMsat int64) *l
 // WaitFor polls cond until it holds, or fails the test. Shared because both
 // the lnd and guard suites drive asynchronous loops — a stream reconnecting, a
 // socket coming up — and neither should invent its own deadline.
+//
+// Like every helper here that takes a testing.TB, it may only be used ON the
+// test goroutine: it blocks for up to ten seconds and then calls t.Fatalf, and
+// a Fatalf from a goroutine whose test has returned panics the whole package
+// run (zu5.9, which was that shape in Node.Intercept). All sixty-odd callers
+// are on the test goroutine today; `go vet` would not tell you if one were
+// not, because its testinggoroutine analyser does not follow a call into
+// another package.
 func WaitFor(t testing.TB, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

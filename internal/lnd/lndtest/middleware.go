@@ -1,6 +1,7 @@
 package lndtest
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -26,12 +27,15 @@ type middleware struct {
 	registrations []*lnrpc.MiddlewareRegistration
 	// intercepts carries a message to whichever stream is live.
 	intercepts chan *lnrpc.RPCMiddlewareRequest
-	// waiting maps a message id to the caller waiting for its feedback.
-	waiting map[uint64]chan *lnrpc.InterceptFeedback
+	// waiting maps a message id to the caller waiting for its outcome.
+	waiting map[uint64]chan InterceptOutcome
 	nextMsg uint64
 	// registerErr makes registration fail, which is the state §14 requires be
 	// surfaced: an install whose rpcmiddleware support is off.
 	registerErr error
+	// failNextSend fails one forwarded interception on its way to the
+	// middleware; see FailNextMiddlewareSend.
+	failNextSend bool
 	// attempts counts every registration that has SETTLED — accepted or refused.
 	// A test waiting for the middleware to settle needs both outcomes, and
 	// waiting only for success hangs on the refusal case.
@@ -88,10 +92,38 @@ func (n *Node) RegisterRPCMiddleware(stream lnrpc.Lightning_RegisterRPCMiddlewar
 	n.middleware.live++
 	n.middleware.attempts++
 	n.middleware.mu.Unlock()
+	// forwarded is every message id this stream took off `intercepts` — all of
+	// them, not the pending ones; the lookup in the sweep below is what filters
+	// those out. Taking a message is taking ownership of DELIVERING it: the
+	// channel is unbuffered, so no other stream can be handed the same message,
+	// and if this handler returns with it unanswered, nothing will answer it.
+	// (The answer can still come back down another stream, because the reader
+	// below routes on a client-supplied ref_msg_id; whoever claims the waiter
+	// first wins, and there is exactly one claim.)
+	//
+	// Sweeping all of `waiting` instead would be wrong rather than merely
+	// broader. An interception is registered there BEFORE its caller blocks
+	// handing the message to a stream, so `waiting` legitimately holds
+	// interceptions no stream has taken yet — and, with more than one stream
+	// live, interceptions that are another stream's to answer.
+	//
+	// Written and read only on this goroutine — the loop below and the defer
+	// that follows — which is why it needs no lock of its own.
+	forwarded := map[uint64]struct{}{}
 	defer func() {
 		n.middleware.mu.Lock()
 		n.middleware.live--
 		n.middleware.mu.Unlock()
+		// End every interception this stream still owes an answer for. LND
+		// fails an RPC whose middleware disconnects rather than holding it, so
+		// the caller is told the stream ended instead of waiting out
+		// WaitTimeout — which, from a goroutine whose test had returned, used
+		// to be a t.Fatal that panicked the package run (zu5.9).
+		for id := range forwarded {
+			if reply := n.claimWaiter(id); reply != nil {
+				reply <- failedIntercept(ErrMiddlewareStreamEnded)
+			}
+		}
 	}()
 
 	if err := stream.Send(&lnrpc.RPCMiddlewareRequest{
@@ -102,25 +134,19 @@ func (n *Node) RegisterRPCMiddleware(stream lnrpc.Lightning_RegisterRPCMiddlewar
 
 	// The reader half. Feedback arrives asynchronously and is routed back to
 	// whichever Intercept call is waiting on that message id.
-	done := make(chan struct{})
-	defer close(done)
+	// No stop channel: gRPC cancels the stream context when this handler
+	// returns, so the blocked Recv fails and the goroutine leaves by its error
+	// path. A `done` channel used to be closed here and polled after the Recv,
+	// which could only ever have been reached by a message arriving after the
+	// handler had gone — it read as a lifetime guard and was not one.
 	go func() {
 		for {
 			msg, err := stream.Recv()
 			if err != nil {
 				return
 			}
-			n.middleware.mu.Lock()
-			reply := n.middleware.waiting[msg.GetRefMsgId()]
-			delete(n.middleware.waiting, msg.GetRefMsgId())
-			n.middleware.mu.Unlock()
-			if reply != nil {
-				reply <- msg.GetFeedback()
-			}
-			select {
-			case <-done:
-				return
-			default:
+			if reply := n.claimWaiter(msg.GetRefMsgId()); reply != nil {
+				reply <- InterceptOutcome{Feedback: msg.GetFeedback()}
 			}
 		}
 	}()
@@ -130,11 +156,40 @@ func (n *Node) RegisterRPCMiddleware(stream lnrpc.Lightning_RegisterRPCMiddlewar
 		case <-stream.Context().Done():
 			return stream.Context().Err()
 		case msg := <-n.middleware.intercepts:
+			// Recorded BEFORE the send, not after: a send that fails has still
+			// consumed the message — `intercepts` is unbuffered, so no other
+			// stream will ever see it — and the caller waiting on it is exactly
+			// the one the sweep above exists for. FailNextMiddlewareSend is how
+			// that ordering is tested rather than merely asserted here.
+			forwarded[msg.GetMsgId()] = struct{}{}
+			if n.takeMiddlewareSendFailure() {
+				return status.Error(codes.Unavailable,
+					"the middleware stream broke before the message went out")
+			}
 			if err := stream.Send(msg); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// FailNextMiddlewareSend makes the next interception die in the window between
+// a stream taking it off the queue and getting it onto the wire — which a
+// stream cancelled at the wrong moment really does. It exists so the ordering
+// rule in the send loop is exercised: with the two lines swapped, the message
+// is consumed and recorded nowhere, and its caller waits out WaitTimeout.
+func (n *Node) FailNextMiddlewareSend() {
+	n.middleware.mu.Lock()
+	defer n.middleware.mu.Unlock()
+	n.middleware.failNextSend = true
+}
+
+func (n *Node) takeMiddlewareSendFailure() bool {
+	n.middleware.mu.Lock()
+	defer n.middleware.mu.Unlock()
+	failing := n.middleware.failNextSend
+	n.middleware.failNextSend = false
+	return failing
 }
 
 // MiddlewareRegistrations is what has registered so far — the assertion that
@@ -178,30 +233,131 @@ func (n *Node) SetMiddlewareRegistrationError(err error) {
 	n.middleware.registerErr = err
 }
 
+// InterceptOutcome is how one interception ended: the feedback the middleware
+// gave, or the reason there will never be one.
+//
+// Read Err FIRST. A failed outcome always carries a Feedback that REFUSES,
+// never a nil one — see failedIntercept — so a caller that looks only at the
+// feedback cannot read the fake's own failure as "the middleware allowed it".
+// The price of that is that the fake's refusal and a real one from the guard
+// look alike in Feedback alone; Err is what tells them apart.
+type InterceptOutcome struct {
+	Feedback *lnrpc.InterceptFeedback
+	Err      error
+}
+
+// ErrNodeStopped is the outcome of an interception that was still queued, taken
+// by no stream, when the test that started the node ended.
+var ErrNodeStopped = errors.New(
+	"the node was stopped while the interception was waiting for a stream")
+
+// ErrMiddlewareStreamEnded is the outcome of an interception whose stream ended
+// before the middleware answered it. A real LND fails such an RPC rather than
+// holding it, and so does this fake.
+var ErrMiddlewareStreamEnded = errors.New(
+	"the middleware stream ended before it answered the interception")
+
+var (
+	errNoMiddlewareStream = errors.New(
+		"no middleware stream took the interception; the guard has not registered")
+	errMiddlewareSilent = errors.New(
+		"the middleware never answered the interception; LND would block the RPC " +
+			"until its interceptor timeout and then reject it")
+)
+
+// failedIntercept is the only way to build a failed outcome, so that every one
+// of them refuses. The alternative — a nil feedback beside the error — reads as
+// an allow to anything that looks at the feedback alone, which is the one
+// answer a fake must never give by accident.
+func failedIntercept(err error) InterceptOutcome {
+	return InterceptOutcome{
+		Feedback: &lnrpc.InterceptFeedback{Error: err.Error()},
+		Err:      err,
+	}
+}
+
 // Intercept pushes one message through the live middleware stream and returns
 // the feedback the middleware gave. An empty Error means it allowed the call.
+//
+// It calls t.Fatal, so it may only be used ON the test goroutine. Off it — a
+// message deliberately left unanswered, say — use InterceptAsync: a t.Fatal
+// from a goroutine whose test has returned panics the whole package run, which
+// is what zu5.9 was. `go vet` will not catch that here; its testinggoroutine
+// analyser does not follow a call into another package, and this fake is always
+// another package from the test using it (measured, zu5.9).
 func (n *Node) Intercept(t testing.TB, msg *lnrpc.RPCMiddlewareRequest) *lnrpc.InterceptFeedback {
 	t.Helper()
-	reply := make(chan *lnrpc.InterceptFeedback, 1)
+	out := <-n.InterceptAsync(msg)
+	if out.Err != nil {
+		t.Fatal(out.Err)
+	}
+	return out.Feedback
+}
+
+// InterceptAsync is Intercept for a caller that is not the test goroutine: it
+// pushes the message and hands the outcome back over a channel instead of
+// calling any testing.TB method. The channel is buffered, so the interception
+// always ends whether or not anyone reads it — but a test that starts one is
+// expected to read it before returning, which is what proves the interception
+// did not outlive it.
+func (n *Node) InterceptAsync(msg *lnrpc.RPCMiddlewareRequest) <-chan InterceptOutcome {
+	// Registered here rather than in the goroutine below, so that when this
+	// returns the interception is already in `waiting`. A caller that cancels
+	// the stream on the very next line is then answered by the stream's sweep,
+	// instead of racing it and waiting out WaitTimeout for a stream that has
+	// gone.
+	reply := make(chan InterceptOutcome, 1)
 	n.middleware.mu.Lock()
 	n.middleware.nextMsg++
 	msg.MsgId = n.middleware.nextMsg
 	n.middleware.waiting[msg.MsgId] = reply
 	n.middleware.mu.Unlock()
 
-	select {
-	case n.middleware.intercepts <- msg:
-	case <-time.After(WaitTimeout):
-		t.Fatal("no middleware stream took the interception; the guard has not registered")
-	}
-	select {
-	case feedback := <-reply:
-		return feedback
-	case <-time.After(WaitTimeout):
-		t.Fatal("the middleware never answered the interception; LND would block the RPC " +
-			"until its interceptor timeout and then reject it")
-		return nil
-	}
+	out := make(chan InterceptOutcome, 1)
+	go func() {
+		select {
+		case n.middleware.intercepts <- msg:
+		case <-n.stopped:
+			// The node is going away, so no stream will ever take this. Without
+			// this case the goroutine would sit here for ten seconds, outliving
+			// the test that started it — the shape zu5.9 is about, reached by
+			// the one route the stream sweep cannot cover, because a message
+			// still queued here has not been forwarded to any stream.
+			n.claimWaiter(msg.GetMsgId())
+			out <- failedIntercept(ErrNodeStopped)
+			return
+		case <-time.After(WaitTimeout):
+			// Claimed so the waiting set does not keep a channel per
+			// interception nobody is listening to any more.
+			n.claimWaiter(msg.GetMsgId())
+			out <- failedIntercept(errNoMiddlewareStream)
+			return
+		}
+		select {
+		case answered := <-reply:
+			out <- answered
+		case <-time.After(WaitTimeout):
+			n.claimWaiter(msg.GetMsgId())
+			out <- failedIntercept(errMiddlewareSilent)
+		}
+	}()
+	return out
+}
+
+// claimWaiter takes the caller waiting on msgID out of the waiting set, or
+// returns nil if someone else got there first. Claiming is what earns the right
+// to answer: the reader goroutine does it when the middleware replies, a
+// stream's sweep when the stream ends, and the caller itself when it gives up —
+// so every reply channel is sent to at most once, and its buffer of one means
+// no sender ever blocks. (An answer and a stream ending together is therefore
+// first-come: the caller may be told the stream ended although a real feedback
+// was on the wire. Both are true; only one can be delivered.)
+func (n *Node) claimWaiter(msgID uint64) chan InterceptOutcome {
+	n.middleware.mu.Lock()
+	defer n.middleware.mu.Unlock()
+	reply := n.middleware.waiting[msgID]
+	delete(n.middleware.waiting, msgID)
+	return reply
 }
 
 // SendPaymentIntercept is the request message LND forwards when something asks
