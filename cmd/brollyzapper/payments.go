@@ -250,15 +250,19 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 		// "did not take it on" rather than "never reached the node", because
 		// since `v7u` both are in here and only one of them never arrived.
 		//
-		// not_initiated is WHICH, as an attribute rather than a second line: the
-		// Auditor's contract in this repo is one event, one report, and a
+		// refused_by_node is WHICH, as an attribute rather than a second line:
+		// the Auditor's contract in this repo is one event, one report, and a
 		// separate Info narrating what this Warn is about to say would be the
-		// same refusal logged twice. True means the request reached the node and
-		// the node refused it without initiating anything; false means it never
-		// got there at all.
+		// same refusal logged twice.
+		//
+		// NAMED FOR WHAT DIFFERS, which "not_initiated" would not be — nothing
+		// was initiated either way, and an attribute that is true of both arms
+		// tells an operator nothing. True means the request REACHED the node and
+		// the node refused it, having created no record; false means it never got
+		// there at all — no connection, or no stream.
 		log.Warn("the node did not take this payment on; the reservation stays pending and "+
 			"the resolver will reverse it", "reservation", int64(id),
-			"payment_hash", p.paymentHash, "not_initiated", notInitiated,
+			"payment_hash", p.paymentHash, "refused_by_node", notInitiated,
 			"error", err.Error())
 		return lnd.PaymentResult{}, err
 	case err != nil:
