@@ -353,11 +353,22 @@ type nodeIdentity struct {
 }
 
 func (n *nodeIdentity) get(ctx context.Context, log *slog.Logger) string {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.pubkey != "" {
-		return n.pubkey
+	if pubkey := n.cached(); pubkey != "" {
+		return pubkey
 	}
+
+	// THE RPC RUNS UNLOCKED, and that is the point of splitting this in three.
+	// Nothing is memoised on failure, so on a sick node EVERY pay_invoice comes
+	// back here — and holding the mutex across the call would make N concurrent
+	// payments into N sequential GetInfo calls, each waiting out the ones before
+	// it, at a rung that does not refuse anyway. Two callers racing to the same
+	// answer costs one duplicate RPC; serialising them costs the payment path.
+	//
+	// Bounded, for the same reason and with the same figure as
+	// trackAtDispatchTimeout: the ladder must not wait on a node that has stopped
+	// answering, and an unreachable one has already failed the Tier-2 gate above.
+	ctx, cancel := context.WithTimeout(ctx, trackAtDispatchTimeout)
+	defer cancel()
 	info, err := n.info(ctx)
 	if err != nil {
 		// DEBUG, and it does not refuse. The Tier-2 gate several rungs above has
@@ -368,7 +379,19 @@ func (n *nodeIdentity) get(ctx context.Context, log *slog.Logger) string {
 			"on this request", "error", err.Error())
 		return ""
 	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	// Last writer wins, and it cannot matter: every racing call asked the same
+	// node the same question, and a node's identity is the node.
 	n.pubkey = info.Pubkey
+	return n.pubkey
+}
+
+// cached is the memo read, on its own so the lock is never held across the RPC.
+func (n *nodeIdentity) cached() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	return n.pubkey
 }
 
@@ -474,11 +497,15 @@ func newNWCService(db *store.Store, relays nwc.Relays, purse nwcPurse,
 	node *lnd.Client, spendNode *lnd.Client, spendCredentials lnd.CredentialSource,
 	checks func(ctx context.Context) preflight.Report,
 	auditor *logging.Auditor, demand chan<- struct{}, log *slog.Logger) *nwc.Service {
+	// One adapter, used twice: get_info's answer and the identity the ladder
+	// compares an invoice's destination against are the same fact from the same
+	// read-only client.
+	readOnlyNode := nwcNode{node: node}
 	return nwc.New(db, relays, purse,
 		nwcInvoices{node: node, db: db, now: time.Now},
-		nwcNode{node: node},
+		readOnlyNode,
 		nwcSpend{purse: purse, node: spendNode, credentials: spendCredentials,
-			checks: checks, identity: &nodeIdentity{info: nwcNode{node: node}.Info}, log: log},
+			checks: checks, identity: &nodeIdentity{info: readOnlyNode.Info}, log: log},
 		// The auditor, so a capability refusal reaches §12's trail rather than
 		// only the log (d24.14). Its contract is the line and the row together,
 		// which is why the service holds this and not an AuditSink.

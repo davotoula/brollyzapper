@@ -1,16 +1,21 @@
 package api
 
 import (
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 )
+
+// redirectAtTheCall reads the target out of an http.Redirect call, when it is a
+// literal there. Compiled once: the whole file turns on this pattern, and two
+// copies is one of them being narrowed while the other is not.
+var redirectAtTheCall = regexp.MustCompile(`http\.Redirect\(w, r, "([^"]*)"`)
 
 // EVERY REDIRECT TARGET IN THIS PACKAGE MUST BE A PATH SOMETHING SERVES (`v7u`
 // fix D).
@@ -33,13 +38,13 @@ import (
 // writes. Asking `pages()` itself is what makes this a rule rather than a second
 // hand-kept list of routes that can go stale the same way.
 func TestEveryRedirectTargetIsAServedPath(t *testing.T) {
-	targets, literal, files := redirectTargets(t)
+	targets, literal := redirectTargets(t)
 	// Bounded on the CALLS, not the distinct paths: the package redirects from
 	// about fifty sites to six pages, so a pattern that silently stopped matching
 	// most of them would still leave a plausible-looking handful of targets.
 	if literal < 40 {
 		t.Fatalf("only %d literal redirect calls were found across %d files; this rule can "+
-			"no longer see its subject", literal, len(files))
+			"no longer see its subject", literal, len(sourceFiles(t)))
 	}
 	// Anti-vacuity with teeth: the two paths the scan MUST see. "/" is the one
 	// the bug was about, and "/connections" is only reachable through the
@@ -48,7 +53,7 @@ func TestEveryRedirectTargetIsAServedPath(t *testing.T) {
 	for _, required := range []string{"/", "/connections"} {
 		if !slices.Contains(targets, required) {
 			t.Fatalf("the scan found no redirect to %q; it is reading %d files and its "+
-				"patterns have drifted off the code", required, len(files))
+				"patterns have drifted off the code", required, len(sourceFiles(t)))
 		}
 	}
 
@@ -71,11 +76,7 @@ func TestEveryRedirectTargetIsAServedPath(t *testing.T) {
 // same reason — a hand-kept list is what goes stale.
 func servedPaths(t *testing.T) *http.ServeMux {
 	t.Helper()
-	mux, ok := (&Server{}).pages().(*http.ServeMux)
-	if !ok {
-		t.Fatal("pages() no longer returns a *http.ServeMux, so this rule cannot ask it " +
-			"what it serves")
-	}
+	mux := pagesMux(t)
 	beside := regexp.MustCompile(`admin\.Handle\("([^"]+)"`).
 		FindAllStringSubmatch(readSource(t, "server.go"), -1)
 	if len(beside) < 2 {
@@ -92,8 +93,19 @@ func servedPaths(t *testing.T) *http.ServeMux {
 	return mux
 }
 
-// redirectTargets is every path this package redirects a browser to, with the
-// files it read.
+// pagesMux is the authenticated route table as the process registers it.
+func pagesMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+	mux, ok := (&Server{}).pages().(*http.ServeMux)
+	if !ok {
+		t.Fatal("pages() no longer returns a *http.ServeMux, so this rule cannot ask it " +
+			"what it serves")
+	}
+	return mux
+}
+
+// redirectTargets is every path this package redirects a browser to, and how
+// many literal call sites it read them from.
 //
 // TWO PATTERNS, because there are two shapes and one of them has no literal at
 // the call:
@@ -107,26 +119,24 @@ func servedPaths(t *testing.T) *http.ServeMux {
 //
 // A target that is neither — built from a variable with no literal anywhere —
 // would be invisible here, which is what the guard below is for.
-func redirectTargets(t *testing.T) ([]string, int, []string) {
+func redirectTargets(t *testing.T) ([]string, int) {
 	t.Helper()
-	atTheCall := regexp.MustCompile(`http\.Redirect\(w, r, "([^"]*)"`)
 	looksLikeOne := regexp.MustCompile(`"(/[^"\s]*\?flash=[^"\s]*)"`)
-	// Every call, literal or not, so the two above can be checked for coverage.
-	everyCall := regexp.MustCompile(`http\.Redirect\(w, r, ([^,]+),`)
 
 	seen := map[string]bool{}
-	var files []string
 	var calls, literal int
 	for _, name := range sourceFiles(t) {
 		src := readSource(t, name)
-		files = append(files, name)
-		calls += len(everyCall.FindAllString(src, -1))
-		for _, match := range atTheCall.FindAllStringSubmatch(src, -1) {
+		// Every call, literal target or not, so the patterns below can be checked
+		// for coverage. A plain Count because every call site starts with the same
+		// fixed prefix — a third regex here would be a third thing to keep in step.
+		calls += strings.Count(src, "http.Redirect(w, r, ")
+		for _, match := range redirectAtTheCall.FindAllStringSubmatch(src, -1) {
 			literal++
-			seen[path(match[1])] = true
+			seen[routePath(match[1])] = true
 		}
 		for _, match := range looksLikeOne.FindAllStringSubmatch(src, -1) {
-			seen[path(match[1])] = true
+			seen[routePath(match[1])] = true
 		}
 	}
 
@@ -142,20 +152,13 @@ func redirectTargets(t *testing.T) ([]string, int, []string) {
 			indirect)
 	}
 
-	out := make([]string, 0, len(seen))
-	for target := range seen {
-		out = append(out, target)
-	}
-	sort.Strings(out)
-	return out, literal, files
+	return slices.Sorted(maps.Keys(seen)), literal
 }
 
-// path is the part a mux routes on: everything before the query.
-func path(target string) string {
-	if i := strings.IndexByte(target, '?'); i >= 0 {
-		return target[:i]
-	}
-	return target
+// routePath is the part a mux routes on: everything before the query.
+func routePath(target string) string {
+	p, _, _ := strings.Cut(target, "?")
+	return p
 }
 
 // getRequest is the browser's follow-up to a 303: a GET at that path.
@@ -202,10 +205,7 @@ func readSource(t *testing.T, name string) string {
 // wallet, a session and a CSRF token, and what went wrong here was the target,
 // not the write, which had already landed when the operator saw the 404.
 func TestTheAssertionRedirectLandsOnAPage(t *testing.T) {
-	pages, ok := (&Server{}).pages().(*http.ServeMux)
-	if !ok {
-		t.Fatal("pages() no longer returns a *http.ServeMux")
-	}
+	pages := pagesMux(t)
 
 	// THE HANDLER'S OWN BODY, bounded at both ends. pages_wallet.go holds the
 	// allocate and deallocate handlers too, and they redirect with the same two
@@ -225,13 +225,13 @@ func TestTheAssertionRedirectLandsOnAPage(t *testing.T) {
 	}
 	body = body[start : start+end]
 
-	targets := regexp.MustCompile(`http\.Redirect\(w, r, "([^"]*)"`).FindAllStringSubmatch(body, -1)
+	targets := redirectAtTheCall.FindAllStringSubmatch(body, -1)
 	if len(targets) != 2 {
 		t.Fatalf("assertPaymentOutcome has %d redirects, want the 2 it answers with — a "+
 			"refused assertion and a saved one", len(targets))
 	}
 	for _, target := range targets {
-		if _, pattern := pages.Handler(getRequest(path(target[1]))); pattern == "" {
+		if _, pattern := pages.Handler(getRequest(routePath(target[1]))); pattern == "" {
 			t.Errorf("the assertion redirects to %q, which no route serves — the assertion "+
 				"APPLIES and the operator is shown a 404 (`v7u`, found on the box)", target[1])
 		}

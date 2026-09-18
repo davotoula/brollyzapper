@@ -1163,6 +1163,10 @@ func TestAnAbsurdlyLargeMetadataBlobIsRefusedOnItsLength(t *testing.T) {
 	}
 }
 
+// ourNode is this node's own identity pubkey in the self-payment tests — the one
+// value the ladder's new rung compares an invoice's destination against.
+const ourNode = "02aaaabbbbccccdddd"
+
 // `v7u`: an invoice payable to THIS node is refused before anything is reserved.
 //
 // The field incident, from the ladder's side. David zapped his own note from a
@@ -1176,7 +1180,6 @@ func TestAnAbsurdlyLargeMetadataBlobIsRefusedOnItsLength(t *testing.T) {
 // every payment, and it would do so with a message about self-payment that would
 // send the operator somewhere there is nothing to find.
 func TestAnInvoiceToThisNodeIsRefusedBeforeAnyReservation(t *testing.T) {
-	const ourNode = "02aaaabbbbccccdddd"
 
 	for _, tc := range []struct {
 		name        string
@@ -1256,7 +1259,6 @@ func TestAnInvoiceToThisNodeIsRefusedBeforeAnyReservation(t *testing.T) {
 // so the assertion that matters is the ordinary payment AFTERWARDS. Asserting
 // only the refusal would pass on a branch that still stranded the reservation.
 func TestASelfPaymentDoesNotStopTheNextPayment(t *testing.T) {
-	const ourNode = "02aaaabbbbccccdddd"
 	h := newHarness(t)
 	h.grantPay()
 	h.sendEnabled(true)

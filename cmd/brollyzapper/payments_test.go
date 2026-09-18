@@ -447,6 +447,27 @@ func (f *fakePayer) TrackPayment(_ context.Context, paymentHash []byte) (lnd.Pay
 	return f.result, f.err
 }
 
+// HasPayment is the EXISTENCE question (`v7u`), answered from the same script
+// TrackPayment reads — so a test that says "the node has no record" says it once
+// and both callers agree. Only the ErrPaymentNotFound case is a definite "no";
+// every other error is "could not tell", which is what the production contract
+// says and what the caller must treat conservatively.
+func (f *fakePayer) HasPayment(_ context.Context, paymentHash []byte) (bool, error) {
+	f.record("track")
+	f.trackedHashes = append(f.trackedHashes, string(paymentHash))
+	err := f.err
+	if f.trackScripted {
+		err = f.trackErr
+	}
+	if errors.Is(err, lnd.ErrPaymentNotFound) {
+		return false, err
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // fakePending records the cutoff it was asked for, because "older than this
 // process's start" is a criterion of u0u and a resolver that ignored it would
 // grab a payment still being made. Asserted in the resolver table below.

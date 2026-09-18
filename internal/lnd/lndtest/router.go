@@ -32,13 +32,14 @@ type router struct {
 // paymentScript is what a payment will report, in order.
 type paymentScript struct {
 	updates []*lnrpc.Payment
-	// dieAfterDispatch makes SendPaymentV2 break the stream instead of reporting
-	// the terminal update, while still recording the payment so TrackPaymentV2
-	// can answer for it later. See SetPaymentDispatchedThenLost.
-	dieAfterDispatch bool
-	// refusal is the node refusing the REQUEST from inside the handler, having
-	// initiated nothing. See SetPaymentRefused.
-	refusal error
+	// abort ends the stream with an error instead of reporting the updates.
+	//
+	// ONE FIELD for both shapes, because the handler does the same thing in
+	// both: what tells a refusal from a dispatch-then-lost is whether the setter
+	// wrote a `tracked` record, which is the only thing the node afterwards
+	// behaves differently about. See SetPaymentRefused and
+	// SetPaymentDispatchedThenLost.
+	abort error
 }
 
 // InFlight is an intermediate update: real, and not an answer.
@@ -105,7 +106,7 @@ func (n *Node) SetTrackedPayment(paymentHash []byte, updates ...*lnrpc.Payment) 
 func (n *Node) SetPaymentDispatchedThenLost(bolt11, paymentHash string, outcome *lnrpc.Payment) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.payments[bolt11] = paymentScript{dieAfterDispatch: true}
+	n.payments[bolt11] = paymentScript{abort: status.Error(codes.Unavailable, "transport is closing")}
 	n.tracked[paymentHash] = paymentScript{updates: []*lnrpc.Payment{outcome}}
 }
 
@@ -129,7 +130,7 @@ func (n *Node) SetPaymentDispatchedThenLost(bolt11, paymentHash string, outcome 
 func (n *Node) SetPaymentRefused(bolt11, message string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.payments[bolt11] = paymentScript{refusal: status.Error(codes.Unknown, message)}
+	n.payments[bolt11] = paymentScript{abort: status.Error(codes.Unknown, message)}
 }
 
 // SendPaymentRequests is every SendPaymentV2 call the node received, so a test
@@ -163,14 +164,11 @@ func (r *router) SendPaymentV2(in *routerrpc.SendPaymentRequest,
 		// bare Unknown, which is the code the o34.10 story is about.
 		return status.Error(codes.Unknown, "invalid bolt11: checksum failed")
 	}
-	if script.refusal != nil {
-		// The handler refusing the request. The stream is already open, so this
-		// reaches the caller on its first Recv — and nothing was initiated.
-		return script.refusal
-	}
-	if script.dieAfterDispatch {
-		// The node has it; the caller will never hear how it went.
-		return status.Error(codes.Unavailable, "transport is closing")
+	if script.abort != nil {
+		// The stream is already open, so this reaches the caller on its first
+		// Recv. Whether the node kept a record is scripted separately, and it is
+		// what the caller can tell the two shapes apart by.
+		return script.abort
 	}
 	return script.send(stream)
 }

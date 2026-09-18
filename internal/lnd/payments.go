@@ -190,6 +190,53 @@ func (c *Client) TrackPayment(ctx context.Context, paymentHash []byte) (PaymentR
 	return c.consume(stream)
 }
 
+// HasPayment reports whether the node has ANY record of a payment, without
+// waiting to find out how it went.
+//
+// THE FIRST MESSAGE ONLY, and that is the whole difference from TrackPayment
+// above (`v7u`). consume reads to a TERMINAL update, which is right when the
+// question is "what happened" and wrong when it is "does this exist": for a
+// payment genuinely in flight, consume blocks — streaming IN_FLIGHT updates —
+// until it settles or the caller's deadline expires. The dispatch-time check
+// asks the existence question on the failure path of every payment, and paying
+// a multi-second wait for the answer "yes, still going" would delay every
+// ambiguous failure's report to its client by that much.
+//
+// Existence is decided on the first Recv and cannot need more: LND answers
+// NotFound there for a hash it never initiated, and anything else it can send —
+// an IN_FLIGHT update, a terminal one — is already the node saying it has a
+// record.
+//
+// THE CONTRACT: (true, nil) means the node has a record. ErrPaymentNotFound
+// means it provably does not. Any other error means the question could not be
+// answered, which is NOT the same as "no" and must never be read as one — the
+// action that follows a "no" is clearing a dispatch marker, and clearing it for
+// a payment that is in flight is the double-spend §6 exists to prevent.
+func (c *Client) HasPayment(ctx context.Context, paymentHash []byte) (bool, error) {
+	client, err := c.router()
+	if err != nil {
+		return false, c.observe(err)
+	}
+	// Cancelled on the way out, for the reason SendPayment gives above — and
+	// here it is load-bearing rather than hygienic: this function deliberately
+	// leaves the stream unfinished on its FIRST message, so without the cancel
+	// every existence check would leak a stream for the life of the process.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := client.TrackPaymentV2(ctx, &routerrpc.TrackPaymentRequest{
+		PaymentHash: paymentHash,
+	})
+	if err != nil {
+		return false, c.observe(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		// notFound() here for the reason TrackPayment's comment gives: the
+		// server's status arrives on the Recv, never on the stub call.
+		return false, c.observe(notFound(err))
+	}
+	return true, nil
+}
+
 // consume reads a payment stream to its TERMINAL update.
 //
 // Not the first message: LND streams IN_FLIGHT updates as htlcs are attempted,

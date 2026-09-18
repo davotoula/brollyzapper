@@ -259,3 +259,94 @@ func spendClient(t *testing.T, node *lndtest.Node) *lnd.Client {
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
+
+// `v7u`: HasPayment answers from the node's FIRST word and does not wait for a
+// terminal state.
+//
+// The discriminating fixture is one script read by both methods. A payment the
+// node reports as IN_FLIGHT and never resolves is:
+//
+//   - an ERROR to TrackPayment, which reads to a terminal update and reaches the
+//     end of the stream without one — correct, because its caller asked what
+//     happened.
+//   - (true, nil) to HasPayment, whose caller asked only whether a record
+//     exists, and the first update already answers that.
+//
+// Asserting the pair rather than HasPayment alone is what makes this a test of
+// the DIFFERENCE. HasPayment returning true here is uninteresting on its own;
+// that TrackPayment cannot answer the same script is what shows the new method
+// is not just the old one renamed — and on a real node that difference is the
+// caller waiting out a payment in flight on the failure path of every payment.
+func TestHasPaymentAnswersWithoutWaitingForATerminalState(t *testing.T) {
+	node := lndtest.Start(t)
+	client := spendClient(t, node)
+
+	hash := []byte{0x0f, 0xf1}
+	node.SetTrackedPayment(hash, lndtest.InFlight())
+
+	has, err := client.HasPayment(t.Context(), hash)
+	if err != nil {
+		t.Fatalf("HasPayment: %v — the node reported a record, in flight", err)
+	}
+	if !has {
+		t.Error("HasPayment says the node has no record of a payment it just reported as " +
+			"IN_FLIGHT; clearing a dispatch marker on that answer reverses a reservation " +
+			"whose payment may settle (§6)")
+	}
+
+	if _, err := client.TrackPayment(t.Context(), hash); err == nil {
+		t.Error("TrackPayment answered a stream with no terminal update; the fixture no " +
+			"longer distinguishes the two methods and this test proves nothing")
+	}
+}
+
+// And the answer the whole mechanism turns on: a hash the node never initiated.
+//
+// ErrPaymentNotFound specifically, not merely an error — the caller clears a
+// dispatch marker on this and on nothing else, so a widened match here is a
+// reservation reversed for a payment that may be in flight.
+func TestHasPaymentReportsNotFoundForAHashTheNodeNeverInitiated(t *testing.T) {
+	node := lndtest.Start(t)
+	client := spendClient(t, node)
+
+	has, err := client.HasPayment(t.Context(), []byte{0xab, 0xcd})
+
+	if has {
+		t.Error("HasPayment claims a record for a hash the node has never heard of")
+	}
+	if !errors.Is(err, lnd.ErrPaymentNotFound) {
+		t.Errorf("err = %v, want ErrPaymentNotFound — it is the ONLY answer that licenses "+
+			"clearing a dispatch marker (`v7u`, `t4t`)", err)
+	}
+}
+
+// A node that cannot be reached is "could not tell", never "no record".
+//
+// The direction that matters: false with a non-NotFound error leaves the caller
+// in the conservative arm. If a transport failure came back as a provable
+// absence, every payment made while the node was unreachable would have its
+// marker cleared and be reversed — including the ones that settled.
+func TestHasPaymentDoesNotTurnAnUnreachableNodeIntoAnAbsentRecord(t *testing.T) {
+	// The node's real credentials, pointed at a port nothing listens on — the
+	// package's existing way of spelling "unreachable" (certname_test.go). The
+	// dial fails rather than the RPC, which is the honest shape: a node that is
+	// down is not a node answering "no such payment".
+	node := lndtest.Start(t)
+	client := lnd.New("127.0.0.1:1", spendCredentials(t, node),
+		lnd.Options{MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+	t.Cleanup(func() { _ = client.Close() })
+
+	has, err := client.HasPayment(t.Context(), []byte{0xab, 0xcd})
+
+	if has {
+		t.Error("HasPayment claims a record from a node that is not answering")
+	}
+	if err == nil {
+		t.Fatal("HasPayment reported success against a stopped node")
+	}
+	if errors.Is(err, lnd.ErrPaymentNotFound) {
+		t.Errorf("an unreachable node was reported as a provable absence: %v\n\nThat answer "+
+			"clears the dispatch marker, and the resolver then reverses a reservation whose "+
+			"payment may have settled (§6)", err)
+	}
+}

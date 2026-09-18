@@ -11,6 +11,11 @@ import (
 	"github.com/davotoula/brollyzapper/internal/nwc"
 )
 
+// fakeNodePubkey is the identity_pubkey lndtest's node reports. Named rather
+// than repeated, so the seam test below and the memo tests above cannot drift
+// apart from the fake.
+const fakeNodePubkey = "02aaaa"
+
 // `v7u`: the node's identity is read ONCE, however many payments ask for it.
 //
 // The rung that recognises a self-payment runs on every pay_invoice, and the
@@ -23,12 +28,12 @@ func TestTheNodesIdentityIsReadOnceAndRemembered(t *testing.T) {
 	spend := nwcSpend{log: quietLog(), identity: &nodeIdentity{
 		info: func(context.Context) (nwc.NodeInfo, error) {
 			reads++
-			return nwc.NodeInfo{Pubkey: "02aaaa"}, nil
+			return nwc.NodeInfo{Pubkey: fakeNodePubkey}, nil
 		},
 	}}
 
 	for range 5 {
-		if got := spend.NodeIdentity(t.Context()); got != "02aaaa" {
+		if got := spend.NodeIdentity(t.Context()); got != fakeNodePubkey {
 			t.Fatalf("NodeIdentity = %q, want the node's pubkey", got)
 		}
 	}
@@ -54,7 +59,7 @@ func TestAFailedIdentityReadIsNotCachedAndDoesNotRefuse(t *testing.T) {
 			if failing {
 				return nwc.NodeInfo{}, errors.New("the node is not answering")
 			}
-			return nwc.NodeInfo{Pubkey: "02aaaa"}, nil
+			return nwc.NodeInfo{Pubkey: fakeNodePubkey}, nil
 		},
 	}}
 
@@ -65,7 +70,7 @@ func TestAFailedIdentityReadIsNotCachedAndDoesNotRefuse(t *testing.T) {
 	}
 
 	failing = false
-	if got := spend.NodeIdentity(t.Context()); got != "02aaaa" {
+	if got := spend.NodeIdentity(t.Context()); got != fakeNodePubkey {
 		t.Errorf("NodeIdentity = %q once the node answered, want the pubkey — a failure that "+
 			"stuck would disable the self-payment rung for the life of the process", got)
 	}
@@ -92,7 +97,7 @@ func TestTheIdentityMemoReadsThroughTheReceiveClient(t *testing.T) {
 
 	spend := nwcSpend{log: quietLog(), identity: &nodeIdentity{info: nwcNode{node: client}.Info}}
 
-	if got := spend.NodeIdentity(t.Context()); got != "02aaaa" {
+	if got := spend.NodeIdentity(t.Context()); got != fakeNodePubkey {
 		t.Errorf("NodeIdentity = %q, want the identity_pubkey the node reported", got)
 	}
 }

@@ -50,6 +50,12 @@ type spender interface {
 type payer interface {
 	SendPayment(ctx context.Context, bolt11 string, feeLimitMsat int64) (lnd.PaymentResult, error)
 	TrackPayment(ctx context.Context, paymentHash []byte) (lnd.PaymentResult, error)
+	// HasPayment is the EXISTENCE question, and it is a different one from
+	// TrackPayment despite reaching the same RPC (`v7u`). TrackPayment waits for
+	// a terminal state because its caller wants the outcome; this one returns on
+	// the node's first word, because its caller only needs to know whether there
+	// is a record at all and a payment in flight would otherwise make it wait.
+	HasPayment(ctx context.Context, paymentHash []byte) (bool, error)
 }
 
 // pendingPayments is the store's slice: the rows the resolver works through.
@@ -219,7 +225,9 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 	// leaves a record, gets anything-but-NotFound, and stays in the unknown arm
 	// below for the resolver. Bounded to this one moment on purpose: the
 	// resolver's arms are unchanged.
-	if err != nil && !errors.Is(err, lnd.ErrNotSent) && neverInitiated(ctx, p.paymentHash, node, log) {
+	notInitiated := err != nil && !errors.Is(err, lnd.ErrNotSent) &&
+		neverInitiated(ctx, p.paymentHash, node)
+	if notInitiated {
 		err = fmt.Errorf("%w: %w", lnd.ErrNotSent, err)
 	}
 	switch {
@@ -240,11 +248,18 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 				"reservation", int64(id), "error", clearErr.Error())
 		}
 		// "did not take it on" rather than "never reached the node", because
-		// since `v7u` both are in here and only one of them never arrived. The
-		// error says which.
+		// since `v7u` both are in here and only one of them never arrived.
+		//
+		// not_initiated is WHICH, as an attribute rather than a second line: the
+		// Auditor's contract in this repo is one event, one report, and a
+		// separate Info narrating what this Warn is about to say would be the
+		// same refusal logged twice. True means the request reached the node and
+		// the node refused it without initiating anything; false means it never
+		// got there at all.
 		log.Warn("the node did not take this payment on; the reservation stays pending and "+
 			"the resolver will reverse it", "reservation", int64(id),
-			"payment_hash", p.paymentHash, "error", err.Error())
+			"payment_hash", p.paymentHash, "not_initiated", notInitiated,
+			"error", err.Error())
 		return lnd.PaymentResult{}, err
 	case err != nil:
 		// Left pending, on purpose. See the doc above.
@@ -280,8 +295,10 @@ const trackAtDispatchTimeout = 5 * time.Second
 // The DISCRIMINATOR for `v7u`, and the reason it is a question rather than a
 // string match: LND's "self-payments not allowed" is one pre-flight refusal of
 // several, and matching the sentence would classify that one and keep stranding
-// the rest (`d46.20`'s rejected mechanism). The node's own record answers for
-// all of them at once.
+// the rest. `d46.20` is the case that cost this lesson in the other direction —
+// a classifier narrow enough to name only the refusals someone had anticipated
+// met a real one it had never heard of and said no. The node's own record
+// answers for every member of the class at once.
 //
 // TRUE ONLY ON A PROVABLE ABSENCE. A transport failure, a timeout, a record in
 // any state — anything that is not the node saying "no such payment" — is false,
@@ -292,7 +309,7 @@ const trackAtDispatchTimeout = 5 * time.Second
 // by a shutdown is the permanent state this whole bead is about. Same reasoning
 // as the ladder's budget release — a correction to durable state outlives the
 // request that provoked it. The timeout above is what keeps that bounded.
-func neverInitiated(ctx context.Context, paymentHash string, node payer, log *slog.Logger) bool {
+func neverInitiated(ctx context.Context, paymentHash string, node payer) bool {
 	hash, err := hex.DecodeString(paymentHash)
 	if err != nil || len(hash) == 0 {
 		// No hash, nothing to ask. A reservation always carries one in practice;
@@ -301,13 +318,11 @@ func neverInitiated(ctx context.Context, paymentHash string, node payer, log *sl
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trackAtDispatchTimeout)
 	defer cancel()
-	if _, err := node.TrackPayment(ctx, hash); !errors.Is(err, lnd.ErrPaymentNotFound) {
-		return false
-	}
-	log.Info("the node refused this payment without initiating it — it has no record of the "+
-		"hash — so the dispatch marker is being taken back off and the reservation reversed",
-		"payment_hash", paymentHash)
-	return true
+	// BOTH RETURNS ARE CONSERVATIVE. A record, or any error that is not the node
+	// saying "no such payment" — a timeout, a transport failure — leaves the
+	// caller exactly where it was, in the unknown arm.
+	has, err := node.HasPayment(ctx, hash)
+	return !has && errors.Is(err, lnd.ErrPaymentNotFound)
 }
 
 // closeReservation applies a terminal payment result to the wallet, reporting
@@ -502,10 +517,13 @@ func resolveOne(ctx context.Context, row store.PendingPayment, purse spender,
 		// hunting a pruning fault that did not exist while the node's payment
 		// history sat intact back to 2024.
 		//
-		// Rows from BEFORE `v7u` fix A can still arrive here by the second route.
-		// Rows from after it cannot: a refusal the node never initiated now has
-		// its marker cleared at dispatch time and takes the arm above. The
-		// sentence keeps both because the rows on disk keep both.
+		// `v7u` fix A makes the second route RARE rather than closed, and the
+		// difference matters to whoever reads this next: a refusal the node never
+		// initiated now has its marker cleared at dispatch time and takes the arm
+		// above — but only if this process lives long enough to ask. A crash
+		// between the marker write and that answer still lands a post-`v7u` row
+		// here, as do all the rows written before it. The sentence keeps both
+		// causes because the rows on disk keep both.
 		//
 		// The payment may have settled. §6 forbids reversing an unresolved
 		// reservation precisely here, because if it settled the ceiling would be
