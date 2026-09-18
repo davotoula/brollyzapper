@@ -34,12 +34,23 @@ const PaymentTimeout = 60 * time.Second
 // would double-spend the ceiling if the payment later settled.
 var ErrPaymentNotFound = errors.New("lnd: the node has no record of this payment")
 
-// ErrNotSent means the payment request never reached the node.
+// ErrNotSent means the node has nothing to act on: no payment was initiated.
 //
-// The two ways that happens are both BEFORE the stream carries anything: the
-// client cannot get a connection at all, or the stream cannot be established.
-// Neither leaves LND with a payment request to act on, so — unlike every other
-// send failure — the fate is KNOWN.
+// Two of the three ways that happens are visible HERE, and both are BEFORE the
+// stream carries anything: the client cannot get a connection at all, or the
+// stream cannot be established.
+//
+// THE THIRD IS NOT VISIBLE HERE AND IS RAISED BY THE CALLER (`v7u`). LND
+// validates a SendPaymentV2 request inside the handler, after grpc-go has
+// already opened the stream, so a self-payment or any other pre-flight refusal
+// comes back from consume() below looking exactly like a payment in flight. Only
+// something holding the payment hash can tell the two apart, by asking the node
+// whether it has a record — which is cmd/brollyzapper's neverInitiated, at
+// dispatch time only. This package deliberately does not do it: SendPayment is
+// given a bolt11 and would have to decode it for a hash it does not have.
+//
+// Whichever way it arises, the invariant is the one below: unlike every other
+// send failure, the fate is KNOWN.
 //
 // Typed because t4t's dispatch marker turns on exactly this distinction. The
 // marker is written before the send so that its absence is safe; a send that
@@ -135,8 +146,18 @@ func (c *Client) SendPayment(ctx context.Context, bolt11 string, feeLimitMsat in
 	})
 	if err != nil {
 		// The stream could not be established, so the request message was never
-		// sent and LND has nothing to act on. Errors from consume() below are a
-		// different animal entirely: by then the payment is in flight.
+		// sent and LND has nothing to act on.
+		//
+		// WHAT THIS CANNOT SEE, stated where the old comment claimed the
+		// opposite (`v7u`): an error from consume() below is NOT necessarily a
+		// payment in flight. grpc-go opens a server stream without waiting for
+		// the handler, and LND validates the request inside it
+		// (routerrpc/router_server.go:357), so every pre-flight refusal — a
+		// self-payment, an unparseable or expired invoice, an amount below the
+		// minimum — opens the stream fine and then fails on the first Recv with
+		// nothing initiated. Believing otherwise held sending off on the
+		// reference box for 22 hours. The caller settles it by asking the node
+		// for a record of the hash; see ErrNotSent.
 		return PaymentResult{}, fmt.Errorf("%w: %w", ErrNotSent, c.observe(err))
 	}
 	return c.consume(stream)

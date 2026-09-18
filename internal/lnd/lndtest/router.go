@@ -36,6 +36,9 @@ type paymentScript struct {
 	// the terminal update, while still recording the payment so TrackPaymentV2
 	// can answer for it later. See SetPaymentDispatchedThenLost.
 	dieAfterDispatch bool
+	// refusal is the node refusing the REQUEST from inside the handler, having
+	// initiated nothing. See SetPaymentRefused.
+	refusal error
 }
 
 // InFlight is an intermediate update: real, and not an answer.
@@ -106,6 +109,29 @@ func (n *Node) SetPaymentDispatchedThenLost(bolt11, paymentHash string, outcome 
 	n.tracked[paymentHash] = paymentScript{updates: []*lnrpc.Payment{outcome}}
 }
 
+// SetPaymentRefused scripts a payment LND refuses from INSIDE the handler,
+// having initiated nothing — the shape `v7u` was filed for.
+//
+// Not the same animal as a failed payment, and not the same as a broken stream.
+// SendPaymentV2 is server-streaming, so grpc-go opens the stream before the
+// handler runs and LND validates the request afterwards
+// (routerrpc/router_server.go:357, extractIntentFromSendRequest): a self-payment,
+// an unparseable or expired invoice, a zero or sub-minimum amount all surface on
+// the caller's first Recv with NOTHING in flight. codes.Unknown, because that is
+// what the reference box measured — "self-payments not allowed" is
+// router_backend.go:1303 and carries no better code.
+//
+// It deliberately records nothing in tracked, so TrackPaymentV2 answers NotFound
+// for the hash exactly as the real node did. That pairing is the whole test: the
+// refusal and the absence of a record arrive milliseconds apart, which is what
+// makes "nothing was initiated" provable at dispatch time rather than inferred
+// five minutes later (`t4t`).
+func (n *Node) SetPaymentRefused(bolt11, message string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.payments[bolt11] = paymentScript{refusal: status.Error(codes.Unknown, message)}
+}
+
 // SendPaymentRequests is every SendPaymentV2 call the node received, so a test
 // can assert the fee limit and timeout it was ASKED for rather than inferring
 // them from the outcome.
@@ -136,6 +162,11 @@ func (r *router) SendPaymentV2(in *routerrpc.SendPaymentRequest,
 		// An unscripted bolt11 fails the way LND fails an undecodable one: a
 		// bare Unknown, which is the code the o34.10 story is about.
 		return status.Error(codes.Unknown, "invalid bolt11: checksum failed")
+	}
+	if script.refusal != nil {
+		// The handler refusing the request. The stream is already open, so this
+		// reaches the caller on its first Recv — and nothing was initiated.
+		return script.refusal
 	}
 	if script.dieAfterDispatch {
 		// The node has it; the caller will never hear how it went.

@@ -194,24 +194,56 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 	}
 
 	result, err := node.SendPayment(ctx, p.bolt11, p.maxFeeMsat)
+	// A REFUSAL THE NODE MADE BEFORE IT INITIATED ANYTHING is a not-sent payment
+	// wearing an unknown one's clothes, and `v7u` is what that cost: a self-zap
+	// held sending off for 22 hours.
+	//
+	// SendPaymentV2 is server-streaming, so grpc-go opens the stream before
+	// LND's handler runs and LND validates the request inside it. Every
+	// pre-flight rejection — a self-payment, an unparseable or expired invoice,
+	// an amount below the minimum — therefore arrives through the stream rather
+	// than at the open, which is the one case internal/lnd cannot tell apart:
+	// there, ErrNotSent means "the stream never opened", and by the time an
+	// error comes back from consume the comment beside it assumed a payment in
+	// flight. For validation errors that assumption is simply false.
+	//
+	// So ask the node, once, right now: does it have a record for this hash?
+	// This is NOT the inference `t4t` forbade. `t4t`'s objection is that a
+	// shared node's payment record can be deleted LATER, and the resolver runs
+	// minutes afterwards, by which time NotFound cannot tell "refused" from
+	// "pruned". Inside the dispatch call the question is a different one: LND
+	// has just answered this very request with an error and, milliseconds later,
+	// has no record of the hash — and TrackPaymentV2 maps ErrPaymentNotInitiated
+	// to NotFound, so "not initiated" is the fact rather than a deduction from
+	// it. An error raised AFTER initiation (ErrPaymentInFlight, ErrAlreadyPaid)
+	// leaves a record, gets anything-but-NotFound, and stays in the unknown arm
+	// below for the resolver. Bounded to this one moment on purpose: the
+	// resolver's arms are unchanged.
+	if err != nil && !errors.Is(err, lnd.ErrNotSent) && neverInitiated(ctx, p.paymentHash, node, log) {
+		err = fmt.Errorf("%w: %w", lnd.ErrNotSent, err)
+	}
 	switch {
 	case errors.Is(err, lnd.ErrNotSent):
-		// NOTHING reached the node — no connection, or no stream — so the marker
-		// written a moment ago is a lie, and a lie in that direction is
-		// permanent: the resolver's dispatched arm refuses to touch such a row,
-		// and the freeze it feeds then refuses every later payment for ever.
-		// Found by review; before t4t this case self-healed.
+		// THE NODE HAS NOTHING TO ACT ON — no connection, no stream, or a request
+		// it refused before initiating anything — so the marker written a moment
+		// ago is a lie, and a lie in that direction is permanent: the resolver's
+		// dispatched arm refuses to touch such a row, and the freeze it feeds
+		// then refuses every later payment for ever. Found by review; before t4t
+		// this case self-healed. The third way in is `v7u`'s, promoted above.
 		//
 		// The reservation still stays pending and is still not reversed here —
 		// §6's rule is unchanged. What changes is that the next resolver pass
 		// meets an UNMARKED row, asks the node, and takes the provably-safe arm.
 		if clearErr := purse.ClearDispatched(ctx, id); clearErr != nil {
-			log.Error("a payment never reached the node and its dispatch marker could not be "+
-				"cleared; the reservation will need an operator",
+			log.Error("a payment the node did not take on left a dispatch marker that could "+
+				"not be cleared; the reservation will need an operator",
 				"reservation", int64(id), "error", clearErr.Error())
 		}
-		log.Warn("a payment never reached the node; the reservation stays pending and the "+
-			"resolver will reverse it", "reservation", int64(id),
+		// "did not take it on" rather than "never reached the node", because
+		// since `v7u` both are in here and only one of them never arrived. The
+		// error says which.
+		log.Warn("the node did not take this payment on; the reservation stays pending and "+
+			"the resolver will reverse it", "reservation", int64(id),
 			"payment_hash", p.paymentHash, "error", err.Error())
 		return lnd.PaymentResult{}, err
 	case err != nil:
@@ -226,6 +258,56 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 	// its own reservation, and the ladder corrects its own connection budget.
 	_, err = closeReservation(ctx, id, result, purse)
 	return result, err
+}
+
+// trackAtDispatchTimeout bounds the one question payInvoice asks the node about
+// a send that has just failed (`v7u`).
+//
+// Five seconds, the same figure reBakeTimeout takes and for the same reason: a
+// node that will not answer promptly must not hold the payment path open. It is
+// a LOCAL question — the node either has a record or it does not — so the budget
+// is for a stalled connection rather than for routing.
+//
+// WHAT WOULD CHANGE IT: a real node measured taking longer than this to answer
+// TrackPaymentV2 for a hash it has never heard of. Too short costs nothing but
+// the conservative arm, which is where the code was before this existed; too
+// long delays every failed payment's answer to its client by that much.
+const trackAtDispatchTimeout = 5 * time.Second
+
+// neverInitiated asks the node, once, whether it has any record of a payment
+// whose send just failed.
+//
+// The DISCRIMINATOR for `v7u`, and the reason it is a question rather than a
+// string match: LND's "self-payments not allowed" is one pre-flight refusal of
+// several, and matching the sentence would classify that one and keep stranding
+// the rest (`d46.20`'s rejected mechanism). The node's own record answers for
+// all of them at once.
+//
+// TRUE ONLY ON A PROVABLE ABSENCE. A transport failure, a timeout, a record in
+// any state — anything that is not the node saying "no such payment" — is false,
+// which leaves the caller in the conservative arm exactly where it was.
+//
+// On a context that CANNOT be cancelled, and that is deliberate: the answer
+// decides whether a dispatch marker we wrote is a lie, and a marker left behind
+// by a shutdown is the permanent state this whole bead is about. Same reasoning
+// as the ladder's budget release — a correction to durable state outlives the
+// request that provoked it. The timeout above is what keeps that bounded.
+func neverInitiated(ctx context.Context, paymentHash string, node payer, log *slog.Logger) bool {
+	hash, err := hex.DecodeString(paymentHash)
+	if err != nil || len(hash) == 0 {
+		// No hash, nothing to ask. A reservation always carries one in practice;
+		// this is the conservative answer rather than an assertion that it does.
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trackAtDispatchTimeout)
+	defer cancel()
+	if _, err := node.TrackPayment(ctx, hash); !errors.Is(err, lnd.ErrPaymentNotFound) {
+		return false
+	}
+	log.Info("the node refused this payment without initiating it — it has no record of the "+
+		"hash — so the dispatch marker is being taken back off and the reservation reversed",
+		"payment_hash", paymentHash)
+	return true
 }
 
 // closeReservation applies a terminal payment result to the wallet, reporting
