@@ -133,6 +133,24 @@ func (n *Node) SetPaymentRefused(bolt11, message string) {
 	n.payments[bolt11] = paymentScript{abort: status.Error(codes.Unknown, message)}
 }
 
+// SetPaymentDroppedBeforeRecorded scripts the race `v7u`'s review found: the
+// stream breaks mid-request, and the node has NOT YET written its record.
+//
+// The other half of SetPaymentRefused, and the fixtures differ in exactly the
+// way the code must tell apart. Both end the stream with an error and both leave
+// TrackPaymentV2 answering NotFound — but a refusal is the node's handler
+// answering, and this is the connection dropping while LND, which persists
+// before it attempts and does not stop when the client leaves, may be about to
+// write the record and pay. A NotFound in this window is a race, not a proof.
+//
+// code is the gRPC code the broken stream surfaces as — Unavailable for a
+// closing transport, Internal for a reset stream — so a test can pin each.
+func (n *Node) SetPaymentDroppedBeforeRecorded(bolt11 string, code codes.Code, message string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.payments[bolt11] = paymentScript{abort: status.Error(code, message)}
+}
+
 // SendPaymentRequests is every SendPaymentV2 call the node received, so a test
 // can assert the fee limit and timeout it was ASKED for rather than inferring
 // them from the outcome.

@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
@@ -285,5 +288,68 @@ func TestARefusedPaymentIsReversedRatherThanStrandedForEver(t *testing.T) {
 	if after != before {
 		t.Errorf("the ceiling is %d msat short; a payment the node never made consumes no "+
 			"budget (§5)", before-after)
+	}
+}
+
+// `v7u` review: a stream that breaks mid-request, through the REAL client, keeps
+// its marker — the node is not asked, and nothing is concluded.
+//
+// The unit test above proves the rule against a fake payer. This proves the code
+// survives the wire: the fake node ends the stream with a real gRPC status, the
+// real lnd client carries it through consume and observe, and payInvoice still
+// sees a broken connection rather than a refusal. A layer that rewrapped the
+// error as a plain one would turn it into Unknown — the refusal's code — and
+// promote it; this is the test that would notice.
+//
+// The node has NO record here, and that is the point of the fixture: it is the
+// window the review found, where LND has the request but has not yet written it.
+// A check made now gets NotFound for a payment that is about to exist.
+func TestAStreamThatBreaksMidRequestIsNotTakenForARefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		code    codes.Code
+		message string
+	}{
+		{"the transport closed", codes.Unavailable, "error reading from server: EOF"},
+		{"the stream was reset", codes.Internal,
+			"stream terminated by RST_STREAM with error code: INTERNAL_ERROR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := lndtest.Start(t)
+			db, dir := openSeamStore(t)
+			purse := wallet.New(db, wallet.Options{})
+			if err := purse.Allocate(t.Context(), 1_000_000, "float"); err != nil {
+				t.Fatal(err)
+			}
+
+			const bolt11 = "lnbcrt310n1pdropped"
+			hashHex := hex.EncodeToString([]byte{0xd0, 0x0d})
+			node.SetPaymentDroppedBeforeRecorded(bolt11, tc.code, tc.message)
+
+			_, err := payInvoice(t.Context(), payment{
+				bolt11: bolt11, amountMsat: 31_000, maxFeeMsat: 10_000,
+				paymentHash: hashHex, ref: "dropped",
+			}, purse, seamClient(t, node, dir), quietLog())
+			if err == nil {
+				t.Fatal("a payment whose stream broke was reported as success")
+			}
+			if errors.Is(err, lnd.ErrNotSent) {
+				t.Errorf("err carries lnd.ErrNotSent: %v — the payer is told the payment did "+
+					"not happen and the budget comes back, for one LND may be paying now", err)
+			}
+			if asked := node.TrackedHashes(); len(asked) != 0 {
+				t.Errorf("the node was asked about %v after the stream broke; its NotFound here "+
+					"is a race with its own write, not a proof", asked)
+			}
+
+			pending, err := db.PendingPaymentsBefore(t.Context(), laterThanNow())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pending) != 1 || !pending[0].Dispatched {
+				t.Errorf("pending = %+v, want the one reservation, still marked dispatched — "+
+					"its fate is unknown and §6 forbids concluding anything", pending)
+			}
+		})
 	}
 }

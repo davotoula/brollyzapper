@@ -226,15 +226,22 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 	// below for the resolver. Bounded to this one moment on purpose: the
 	// resolver's arms are unchanged.
 	//
-	// NOT ON OUR OWN GIVING UP, which is the one shape that would break the
-	// proof. A cancelled or timed-out send says nothing about what LND did with
-	// the request: it validates, then PERSISTS the payment before the attempt
-	// runs, so a check that wins the race against that write gets NotFound for a
-	// payment the node goes on to make — and the marker would be cleared for a
-	// payment that settles. lnd.IsCallerGaveUp is that exclusion, named where the
-	// gRPC codes are already in scope.
+	// ONLY ON THE HANDLER'S OWN ANSWER. The proof above needs LND to have
+	// answered this request; a stream that ended from underneath — our side
+	// giving up, or the connection dropping — says nothing about how far LND
+	// got. It validates, then PERSISTS the payment before attempting it, and it
+	// neither checks that we are still there nor stops paying when we leave. A
+	// check that wins the race against that write gets NotFound for a payment the
+	// node goes on to make, and what follows is the budget returned and the payer
+	// told "this payment did not happen" for one that settles.
+	//
+	// The first cut of this excluded only our own cancel and deadline, on the
+	// reasoning that every other failure "carries the server's own status". A
+	// dropped connection does not, and the PM found it on review (18 Sep 2026).
+	// lnd.IsTransportOrCallerFailure is the exclusion, read off grpc-go's own
+	// transport tables, and its doc says what it still cannot see.
 	notInitiated := err != nil && !errors.Is(err, lnd.ErrNotSent) &&
-		!lnd.IsCallerGaveUp(err) && neverInitiated(ctx, p.paymentHash, node)
+		!lnd.IsTransportOrCallerFailure(err) && neverInitiated(ctx, p.paymentHash, node)
 	if notInitiated {
 		err = fmt.Errorf("%w: %w", lnd.ErrNotSent, err)
 	}

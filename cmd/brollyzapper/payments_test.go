@@ -818,18 +818,27 @@ func TestTheMarkerComesOffEvenWhenTheRequestIsAlreadyOver(t *testing.T) {
 	}
 }
 
-// And the promotion does NOT fire when the error is OUR side giving up.
+// And the promotion does NOT fire when the stream ended from underneath —
+// our side giving up, or the connection dropping.
 //
-// The narrow race the go-review found, and it is the one shape that would break
-// the proof. LND validates a SendPaymentV2 request and then PERSISTS the payment
-// before the attempt runs. A cancelled or timed-out send says nothing about how
-// far that got — so a record check that wins the race against LND's own write
-// gets NotFound for a payment the node goes on to make, clears the marker, and
-// the resolver reverses a reservation that settles.
+// LND validates a SendPaymentV2 request and then PERSISTS the payment before the
+// attempt runs; it does not check that the client is still there, and without
+// Cancelable it keeps paying after the client leaves. So a failure that breaks
+// the stream says nothing about how far LND got, and a record check that wins
+// the race against LND's own write gets NotFound for a payment the node goes on
+// to make.
 //
-// The node is not asked AT ALL here, which is the stronger assertion: the answer
-// could not be trusted, so the question is not put.
-func TestOurOwnDeadlineIsNotTreatedAsTheNodeHavingNoRecord(t *testing.T) {
+// THE CONSEQUENCE IS THE ASSERTION. A promoted error carries lnd.ErrNotSent, and
+// the adapter turns that into the connection's budget returned and the payer
+// told "this payment did not happen" — for a payment that settles. So the error
+// must NOT carry ErrNotSent, the marker must stay, and the node is not asked at
+// all: the answer could not be trusted, so the question is not put.
+//
+// The connection-drop rows are the PM's review finding (18 Sep 2026). The first
+// cut of this test covered only the caller's own cancel and deadline, and so did
+// the code — both written from the belief that every other failure "carries the
+// server's own status". A dropped connection does not.
+func TestAStreamThatEndedFromUnderneathIsNotTreatedAsTheNodeHavingNoRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -838,6 +847,10 @@ func TestOurOwnDeadlineIsNotTreatedAsTheNodeHavingNoRecord(t *testing.T) {
 		{"the caller's deadline expired", context.DeadlineExceeded},
 		{"grpc reported the call cancelled", status.Error(codes.Canceled, "context canceled")},
 		{"grpc reported the deadline exceeded", status.Error(codes.DeadlineExceeded, "too slow")},
+		{"the connection dropped mid-request",
+			status.Error(codes.Unavailable, "error reading from server: EOF")},
+		{"the stream was reset mid-request",
+			status.Error(codes.Internal, "stream terminated by RST_STREAM with error code: INTERNAL_ERROR")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seq := &recorder{}
@@ -851,14 +864,20 @@ func TestOurOwnDeadlineIsNotTreatedAsTheNodeHavingNoRecord(t *testing.T) {
 				trackErr:      fmt.Errorf("%w: payment isn't initiated", lnd.ErrPaymentNotFound),
 			}
 
-			if _, err := payInvoice(t.Context(), payment{bolt11: "lnbcrt1", amountMsat: 1_000,
-				maxFeeMsat: 100, paymentHash: "abcd"}, purse, node, quietLog()); err == nil {
-				t.Fatal("a send that gave up was reported as success")
+			_, err := payInvoice(t.Context(), payment{bolt11: "lnbcrt1", amountMsat: 1_000,
+				maxFeeMsat: 100, paymentHash: "abcd"}, purse, node, quietLog())
+			if err == nil {
+				t.Fatal("a send whose stream broke was reported as success")
 			}
 
+			if errors.Is(err, lnd.ErrNotSent) {
+				t.Errorf("err carries lnd.ErrNotSent: %v — the adapter returns the connection's "+
+					"budget and tells the payer the payment did not happen, for one LND may be "+
+					"paying right now", err)
+			}
 			if slices.Contains(seq.seen(), "track") {
-				t.Error("the node was asked for a record after WE gave up; its answer cannot " +
-					"tell 'never initiated' from 'not persisted yet' (`v7u` go-review)")
+				t.Error("the node was asked for a record after the stream broke; its answer " +
+					"cannot tell 'never initiated' from 'not persisted yet'")
 			}
 			if slices.Contains(seq.seen(), "undispatch") {
 				t.Error("the marker was cleared for a payment that may be in flight; the " +

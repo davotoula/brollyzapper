@@ -356,42 +356,65 @@ func TestHasPaymentDoesNotTurnAnUnreachableNodeIntoAnAbsentRecord(t *testing.T) 
 	}
 }
 
-// IsCallerGaveUp, in the package that owns it.
+// IsTransportOrCallerFailure, in the package that owns it.
 //
-// Raised by the `ecc:go-reviewer` pass as informational rather than a defect:
-// the function was only exercised indirectly, through cmd/brollyzapper's
-// TestOurOwnDeadlineIsNotTreatedAsTheNodeHavingNoRecord. That coverage is real
-// and it is thorough, but it lives in another package and it reaches this
-// function through payInvoice — so a change here that broke the classification
-// would fail a test whose name is about dispatch markers, in a package whose
-// subject is the payment path. Local, because the rule is local.
+// First raised by the `ecc:go-reviewer` pass as informational — the function
+// was then exercised only sideways, from cmd/brollyzapper through payInvoice.
+// Then THIS TABLE WAS WRONG, and it is worth keeping the record of how: it
+// pinned codes.Unavailable to false under the label "the node is unavailable",
+// reading a dropped connection as the node answering. The PM found it on review
+// (18 Sep 2026): LND persists a payment before attempting it and keeps paying
+// after the client leaves, so a stream that breaks mid-request proves nothing
+// about what LND did. A test written from the same assumption as the code it
+// tests agrees with the code; it does not check it.
 //
-// BOTH DIRECTIONS, and the false half is the one that matters: this predicate
-// SUPPRESSES the dispatch-time record check, so anything it wrongly calls "we
-// gave up" is a payment whose marker is never cleared — back to `v7u`'s stranded
-// row. Widening it is the failure, not narrowing it.
-func TestIsCallerGaveUpRecognisesOurSideAndNothingElse(t *testing.T) {
+// BOTH DIRECTIONS, and they cost different things. TRUE suppresses the
+// dispatch-time record check, so a wrong true is the old behaviour for that one
+// refusal — the row waits for the resolver. A wrong FALSE is a record check that
+// can race LND's own write and hand the payer's budget back for a payment that
+// settles. The transport codes are read off grpc-go v1.83.2's own tables; see the
+// function's doc for where each comes from.
+func TestIsTransportOrCallerFailureSeparatesTheWireFromTheNode(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
 		want bool
 	}{
 		{"nothing went wrong", nil, false},
+
+		// Our side giving up.
 		{"the caller's context was cancelled", context.Canceled, true},
 		{"the caller's deadline expired", context.DeadlineExceeded, true},
 		{"a cancel wrapped by the payment path", fmt.Errorf("sending: %w", context.Canceled), true},
 		{"grpc reported the call cancelled", status.Error(codes.Canceled, "context canceled"), true},
 		{"grpc reported the deadline exceeded", status.Error(codes.DeadlineExceeded, "too slow"), true},
+
+		// The connection dropping. Each spelled the way grpc-go spells it.
+		{"the transport closed mid-request",
+			status.Error(codes.Unavailable, "error reading from server: EOF"), true},
+		{"the transport is closing", status.Error(codes.Unavailable, "transport is closing"), true},
+		{"the stream was reset",
+			status.Error(codes.Internal, "stream terminated by RST_STREAM with error code: INTERNAL_ERROR"), true},
+		{"an unexpected EOF on the stream", status.Error(codes.Internal, "unexpected EOF"), true},
+		{"a flow-control reset",
+			status.Error(codes.ResourceExhausted, "stream terminated by RST_STREAM with error code: FLOW_CONTROL_ERROR"), true},
+		{"a security reset",
+			status.Error(codes.PermissionDenied, "stream terminated by RST_STREAM with error code: INADEQUATE_SECURITY"), true},
+
 		// The node ANSWERING. Each of these must stay false, or the dispatch-time
 		// check is skipped for exactly the refusals `v7u` exists to classify.
 		{"the node refused a self-payment", status.Error(codes.Unknown, "self-payments not allowed"), false},
+		{"the node refused an invalid request", status.Error(codes.InvalidArgument, "invalid payment request"), false},
 		{"the node has no record", status.Error(codes.NotFound, "payment isn't initiated"), false},
-		{"the node is unavailable", status.Error(codes.Unavailable, "transport is closing"), false},
-		{"a plain error from anywhere", errors.New("the stream broke"), false},
+		// THE RESIDUAL, pinned so it is a decision rather than an accident: an
+		// error with no gRPC status reads as Unknown, the same code LND's handler
+		// uses for its pre-flight refusals, so no rule over codes can exclude it
+		// without excluding the self-payment too. The doc says so.
+		{"an unclassified error", errors.New("the stream broke"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := lnd.IsCallerGaveUp(tc.err); got != tc.want {
-				t.Errorf("IsCallerGaveUp(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := lnd.IsTransportOrCallerFailure(tc.err); got != tc.want {
+				t.Errorf("IsTransportOrCallerFailure(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
