@@ -963,6 +963,14 @@ func SettledInvoice(paymentHash string, settleIndex uint64, amountMsat int64) *l
 // WaitFor polls cond until it holds, or fails the test. Shared because both
 // the lnd and guard suites drive asynchronous loops — a stream reconnecting, a
 // socket coming up — and neither should invent its own deadline.
+//
+// Like every helper here that takes a testing.TB, it may only be used ON the
+// test goroutine: it blocks for up to ten seconds and then calls t.Fatalf, and
+// a Fatalf from a goroutine whose test has returned panics the whole package
+// run (zu5.9, which was that shape in Node.Intercept). All sixty-odd callers
+// are on the test goroutine today; `go vet` would not tell you if one were
+// not, because its testinggoroutine analyser does not follow a call into
+// another package.
 func WaitFor(t testing.TB, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
