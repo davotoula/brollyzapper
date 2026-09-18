@@ -578,7 +578,9 @@ type fakeSpend struct {
 	bookingFailed bool
 	decoded       map[string]*Bolt11
 	decodeErr     error
-	blocked       []string
+	// identity is what NodeIdentity answers — this node's own pubkey (`v7u`).
+	identity string
+	blocked  []string
 	// beforePay blocks inside Pay, so a test can hold a payment in flight.
 	beforePay  func()
 	onePerHash bool
@@ -590,6 +592,15 @@ type fakeSpend struct {
 }
 
 func (f *fakeSpend) CredentialReady() bool { return f.ready }
+
+// NodeIdentity is the node's own pubkey (`v7u`). Empty by default and empty on
+// purpose: that is "could not tell", which the ladder must not refuse on, so
+// every test written before this rung existed keeps exercising the rungs below.
+func (f *fakeSpend) NodeIdentity(context.Context) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.identity
+}
 
 // SendingBlocked stands in for §11's Tier-2 report (d24.6).
 func (f *fakeSpend) SendingBlocked(context.Context) []string {
@@ -1149,5 +1160,127 @@ func TestAnAbsurdlyLargeMetadataBlobIsRefusedOnItsLength(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "byte ceiling") {
 		t.Errorf("the log blames the character bound for a blob that broke the byte "+
 			"ceiling; they are different limits with different reasons:\n%s", h.logs.String())
+	}
+}
+
+// `v7u`: an invoice payable to THIS node is refused before anything is reserved.
+//
+// The field incident, from the ladder's side. David zapped his own note from a
+// client paired to his own wallet, so the app minted the invoice AND was asked
+// over NWC to pay it. Every rung passed, 41,000 msat of a 1000-sat ceiling was
+// reserved, the dispatch marker was written, and LND answered "self-payments not
+// allowed" — a refusal it had already decided on before initiating anything.
+//
+// The control matters as much as the case: the rung must recognise the node's
+// OWN key and nothing else. A comparison that matched too widely would refuse
+// every payment, and it would do so with a message about self-payment that would
+// send the operator somewhere there is nothing to find.
+func TestAnInvoiceToThisNodeIsRefusedBeforeAnyReservation(t *testing.T) {
+	const ourNode = "02aaaabbbbccccdddd"
+
+	for _, tc := range []struct {
+		name        string
+		destination string
+		// wantRefused is whether the rung must fire.
+		wantRefused bool
+	}{{
+		name:        "our own node",
+		destination: ourNode,
+		wantRefused: true,
+	}, {
+		name:        "somebody else's node",
+		destination: "03ffffeeeeddddcccc",
+	}, {
+		// The fail-open case, stated as a test so it cannot drift into a refusal
+		// by accident: an invoice with no destination at all must not match a
+		// node whose identity we also failed to read. Both empty, and "" == ""
+		// is the one comparison that would refuse every payment on a node that
+		// had never answered GetInfo.
+		name:        "no destination on the invoice",
+		destination: "",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.grantPay()
+			h.sendEnabled(true)
+			h.setBudget(1_000_000)
+			h.spend.identity = ourNode
+			h.decodesTo("lnbcrt1selfzap", 31_000, "zap to myself")
+			h.decoded["lnbcrt1selfzap"].Destination = tc.destination
+
+			resp := h.handle(t, MethodPayInvoice, payParams("lnbcrt1selfzap", 0))
+
+			if !tc.wantRefused {
+				if resp.Error != nil {
+					t.Fatalf("a payment to %s was refused %+v; only this node's own invoices "+
+						"may take this rung", tc.name, resp.Error)
+				}
+				return
+			}
+
+			if resp.Error == nil {
+				t.Fatal("a self-payment was accepted; it reserves, marks dispatched and is " +
+					"then refused by LND in a way the app cannot classify (`v7u`)")
+			}
+			if resp.Error.Code != CodePaymentFailed {
+				t.Errorf("code = %s, want %s — RESTRICTED would say \"this wallet may not\", "+
+					"and it may; the invoice is the problem", resp.Error.Code, CodePaymentFailed)
+			}
+			// The MESSAGE is what the payer reads: Amethyst's nwcFailureDetail
+			// renders errorMessage() and never looks at the code (`d24.22`).
+			if !strings.Contains(resp.Error.Message, "own node") {
+				t.Errorf("message = %q, want it to say the invoice is to their own node — this "+
+					"is the whole value of refusing early rather than late", resp.Error.Message)
+			}
+			// NOTHING was spent on it. Each of these is one of the costs the
+			// incident paid, and each would still be paid if the rung sat lower.
+			if h.spend.reserves != 0 {
+				t.Errorf("%d reservations were made for a payment that cannot happen; the "+
+					"ceiling would be held until an operator intervened", h.spend.reserves)
+			}
+			if h.spend.paid != 0 {
+				t.Errorf("%d payments were dispatched to the node for its own invoice", h.spend.paid)
+			}
+			if used := h.budgetUsed(); used != 0 {
+				t.Errorf("budget_used_msat = %d for a payment nothing attempted", used)
+			}
+		})
+	}
+}
+
+// And the whole incident, end to end on the fake: a self-zap does not stop the
+// NEXT payment working.
+//
+// This is the test that would have failed on main. Sending being held is the
+// damage — the self-payment itself is a misclick and nobody minds it failing —
+// so the assertion that matters is the ordinary payment AFTERWARDS. Asserting
+// only the refusal would pass on a branch that still stranded the reservation.
+func TestASelfPaymentDoesNotStopTheNextPayment(t *testing.T) {
+	const ourNode = "02aaaabbbbccccdddd"
+	h := newHarness(t)
+	h.grantPay()
+	h.sendEnabled(true)
+	h.setBudget(1_000_000)
+	h.spend.identity = ourNode
+
+	// 1. The app mints an invoice for a zap to its own address...
+	h.decodesTo("lnbcrt1ours", 31_000, "zap to myself")
+	h.decoded["lnbcrt1ours"].Destination = ourNode
+	if resp := h.handle(t, MethodPayInvoice, payParams("lnbcrt1ours", 0)); resp.Error == nil {
+		t.Fatal("the self-payment was accepted")
+	}
+
+	// 2. ...and an ordinary payment right afterwards still works.
+	h.decodesTo("lnbcrt1theirs", 21_000, "a real zap")
+	h.decoded["lnbcrt1theirs"].Destination = "03ffffeeeeddddcccc"
+	resp := h.handle(t, MethodPayInvoice, payParams("lnbcrt1theirs", 0))
+
+	if resp.Error != nil {
+		t.Fatalf("the payment after a self-zap was refused %+v — on main this is where "+
+			"sending was held off for 22 hours and every later payment answered RESTRICTED",
+			resp.Error)
+	}
+	if h.spend.paid != 1 {
+		t.Errorf("%d payments reached the node, want the one that was payable", h.spend.paid)
 	}
 }

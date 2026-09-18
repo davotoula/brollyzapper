@@ -46,6 +46,10 @@ type Bolt11 struct {
 	// against the payment (y09). Lowercase hex, empty when the invoice has none.
 	DescriptionHash string
 	ExpiresAt       time.Time
+	// Destination is the node the invoice is payable to, hex — the SIXTH, and
+	// the ladder does decide with it: an invoice payable to the node that would
+	// pay it is refused before anything is reserved (`v7u`).
+	Destination string
 }
 
 // Expired reports whether the invoice can still be paid at now.
@@ -100,6 +104,22 @@ type Spend interface {
 	// which is the point: a second parser would be a second opinion about where
 	// the money goes.
 	Decode(ctx context.Context, bolt11 string) (Bolt11, error)
+	// NodeIdentity is the paying node's own public key, hex — the one fact that
+	// lets the ladder recognise an invoice payable only by the node being asked
+	// to pay it (`v7u`).
+	//
+	// NO ERROR, and EMPTY MEANS "could not tell", the same shape SendingBlocked
+	// takes. It must not cost a round trip per payment — the identity of a
+	// running node cannot change under it — so the adapter reads it once and
+	// remembers, and a read that failed is a state rather than a refusal.
+	//
+	// AN EMPTY ANSWER NEVER REFUSES. Fail-open here is deliberate and narrow: an
+	// unreachable node already fails step 2's Tier-2 gate several rungs above,
+	// so this is near-unreachable in practice, and turning "we could not ask" into
+	// "no payments at all" would take sending away for a transient. `v7u` fix A
+	// is the net underneath — a self-payment that slips through is now reversed
+	// rather than stranded.
+	NodeIdentity(ctx context.Context) string
 	// Pay reserves, sends, and closes the reservation (step 8).
 	Pay(ctx context.Context, req PayRequest) (PayResult, error)
 }
@@ -325,6 +345,38 @@ func (s *Service) payInvoice(ctx context.Context, conn *connection, req Request)
 	}
 	if invoice.Expired(s.now()) {
 		return errorResponse(req.Method, CodeOther, "the invoice has expired")
+	}
+
+	// THE ONE INVOICE THIS NODE CANNOT PAY: its own (`v7u`).
+	//
+	// A rung of its own, and it sits HERE — above the per-payment cap, the
+	// budget, the balance read and the reservation — because every one of those
+	// costs something for a payment that cannot happen. The field incident is
+	// what that costs: 41,000 msat of a 1000-sat ceiling held, a dispatch marker
+	// written, an LND round trip, and sending held off for 22 hours.
+	//
+	// A fact about the INVOICE, like expiry, which is why it reads beside it
+	// rather than among the limits. Below expiry rather than above it because
+	// both sentences are true of an expired self-invoice and the earlier rung
+	// wins by §8's rule; neither answer sends the operator anywhere wrong.
+	//
+	// NOT AllowSelfPayment: true, which is the other way to make this stop
+	// failing. A self-zap is nearly always a misclick, and LND would route a
+	// circular payment at real cost to move sats from the node to itself.
+	if identity := s.spend.NodeIdentity(ctx); identity != "" && invoice.Destination == identity {
+		// INFO and not WARN: the client did nothing wrong, and neither did the
+		// node. It is an ordinary thing to do by accident from a client paired to
+		// your own wallet, which is exactly why it must be cheap.
+		s.log.Info("an NWC pay_invoice named an invoice payable only by this node itself",
+			"connection", conn.row().ID, "payment_hash", invoice.PaymentHash)
+		// PAYMENT_FAILED, not RESTRICTED: RESTRICTED says "this wallet may not",
+		// and it may — the invoice is the problem. Amethyst renders the MESSAGE
+		// and never the code on this path (`d24.22`; read at
+		// ui/nwc/NwcResponseMessages.kt:60, which matches IErrorResponseLike and
+		// returns errorMessage()), so the sentence is what the payer actually
+		// sees and it is the part worth getting right.
+		return errorResponse(req.Method, CodePaymentFailed,
+			"this invoice is to your own node, and a node cannot pay itself")
 	}
 	amount, resp := payableAmount(req.Method, invoice, params.Amount)
 	if resp != nil {

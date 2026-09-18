@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
@@ -164,7 +165,11 @@ type nwcSpend struct {
 	// shape. One statement of the policy; two freshness policies, each chosen by
 	// the caller that lives with it.
 	checks func(ctx context.Context) preflight.Report
-	log    *slog.Logger
+	// identity is the node's own pubkey, read once through the RECEIVE client
+	// (GetInfo is not in SpendPermissions). A pointer, so every copy of this
+	// value type shares the one memo. See NodeIdentity.
+	identity *nodeIdentity
+	log      *slog.Logger
 }
 
 // spendNode is what §8's ladder needs from the node it pays through: payInvoice's
@@ -276,7 +281,68 @@ func (n nwcSpend) Decode(ctx context.Context, bolt11 string) (nwc.Bolt11, error)
 		// regtest on its first run that could reach section 14.
 		DescriptionHash: decoded.DescriptionHash,
 		ExpiresAt:       decoded.ExpiresAt,
+		// Who gets paid, which the ladder needs in order to recognise the one
+		// invoice this node cannot pay — its own (`v7u`). Carried across the same
+		// seam and in the same breath as the line above it, whose absence (y09)
+		// is the reason this file's tests go through the real client.
+		Destination: decoded.Destination,
 	}, nil
+}
+
+// NodeIdentity is this node's own public key, read ONCE and remembered.
+//
+// Once, because a running node's identity cannot change under it — the key is
+// the node — and a GetInfo per payment would put a round trip on the path of
+// every pay_invoice to answer a question with a constant answer.
+//
+// THROUGH THE RECEIVE CLIENT, and that is a hard constraint rather than a
+// preference: GetInfo is in ReceivePermissions and NOT in SpendPermissions
+// (§6), so the spend client this adapter otherwise uses cannot ask. Widening the
+// spend macaroon to ask a question the receive one already answers would be the
+// wrong direction entirely.
+//
+// A FAILURE IS NOT CACHED. Empty means "could not tell", the ladder's rung
+// treats that as "do not refuse", and the next payment asks again — so a node
+// that was down at the first pay_invoice is not permanently unable to recognise
+// its own invoices.
+func (n nwcSpend) NodeIdentity(ctx context.Context) string {
+	if n.identity == nil {
+		return ""
+	}
+	return n.identity.get(ctx, n.log)
+}
+
+// nodeIdentity remembers the answer to NodeIdentity.
+//
+// A pointer on nwcSpend, which is otherwise a value: the memo has to be shared
+// by every copy of the adapter or it is not a memo at all.
+type nodeIdentity struct {
+	info func(ctx context.Context) (nwc.NodeInfo, error)
+	mu   sync.Mutex
+	// pubkey is empty until a GetInfo has succeeded. Empty is also the answer
+	// this hands back on failure, which is why there is no separate "asked" flag:
+	// nothing is remembered except a success.
+	pubkey string
+}
+
+func (n *nodeIdentity) get(ctx context.Context, log *slog.Logger) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.pubkey != "" {
+		return n.pubkey
+	}
+	info, err := n.info(ctx)
+	if err != nil {
+		// DEBUG, and it does not refuse. The Tier-2 gate several rungs above has
+		// already turned "the node is unreachable" into a RESTRICTED the operator
+		// can read; a second sentence about it here would be one condition
+		// reported twice, which this package's Auditor doc forbids.
+		log.Debug("could not read the node's identity, so a self-payment cannot be recognised "+
+			"on this request", "error", err.Error())
+		return ""
+	}
+	n.pubkey = info.Pubkey
+	return n.pubkey
 }
 
 // MaxFee is §5's single fee reserve, from the one place that computes it.
@@ -385,7 +451,7 @@ func newNWCService(db *store.Store, relays nwc.Relays, purse nwcPurse,
 		nwcInvoices{node: node, db: db, now: time.Now},
 		nwcNode{node: node},
 		nwcSpend{purse: purse, node: spendNode, credentials: spendCredentials,
-			checks: checks, log: log},
+			checks: checks, identity: &nodeIdentity{info: nwcNode{node: node}.Info}, log: log},
 		// The auditor, so a capability refusal reaches §12's trail rather than
 		// only the log (d24.14). Its contract is the line and the row together,
 		// which is why the service holds this and not an AuditSink.

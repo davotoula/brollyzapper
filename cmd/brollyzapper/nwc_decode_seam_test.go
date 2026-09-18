@@ -39,6 +39,7 @@ func TestTheDecodeSeamCarriesEverythingTheLadderAndTheBindingNeed(t *testing.T) 
 		NumMsat:         21_000,
 		Description:     "a coffee",
 		DescriptionHash: hash,
+		Destination:     "03deadbeefcafe",
 		Timestamp:       1_700_000_000,
 		Expiry:          3600,
 	})
@@ -68,5 +69,15 @@ func TestTheDecodeSeamCarriesEverythingTheLadderAndTheBindingNeed(t *testing.T) 
 	}
 	if got.ExpiresAt.IsZero() {
 		t.Error("ExpiresAt is zero; the ladder refuses an expired invoice before it reserves")
+	}
+	// And the field `v7u` added, on the same seam and for the same reason: the
+	// ladder compares it with the node's own identity, so a copy that dropped it
+	// would silently answer "not our invoice" for every invoice — including ours
+	// — and the self-payment rung would never fire in the field while both
+	// packages' own tests stayed green. That is y09 exactly.
+	if got.Destination != "03deadbeefcafe" {
+		t.Errorf("Destination = %q, want the payee the node reported — without it the ladder "+
+			"cannot recognise this node's own invoice and a self-zap strands a reservation "+
+			"(`v7u`)", got.Destination)
 	}
 }
