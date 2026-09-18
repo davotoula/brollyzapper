@@ -59,7 +59,7 @@ func (s *Server) assertPaymentOutcome(w http.ResponseWriter, r *http.Request) {
 	if err := s.Wallet.AssertOutcome(r.Context(), wallet.ReservationID(id), settled); err != nil {
 		s.Log.Warn("a payment outcome could not be asserted",
 			"reservation", id, "outcome", outcome, "error", err.Error())
-		http.Redirect(w, r, "/wallet?flash=refused", http.StatusSeeOther)
+		http.Redirect(w, r, "/?flash=refused", http.StatusSeeOther)
 		return
 	}
 	// §12, and the WORDING is the requirement rather than the fact of a row:
@@ -74,7 +74,13 @@ func (s *Server) assertPaymentOutcome(w http.ResponseWriter, r *http.Request) {
 	// The freeze this row was holding may have just lifted, so recon's verdict
 	// is stale the moment this returns (§11).
 	nudge(s.ReconDemand)
-	http.Redirect(w, r, "/wallet?flash=saved", http.StatusSeeOther)
+	// "/" and not "/wallet": the wallet page is GET /{$} — there is no /wallet
+	// route and never was (`v7u` fix D, found on the box). The write above had
+	// already landed, so an operator pressing "It failed" applied the assertion
+	// and was shown a 404 for it; the sibling handlers on this very page have
+	// always redirected to "/". A structural rule below now follows every
+	// Redirect target in this package to the route table.
+	http.Redirect(w, r, "/?flash=saved", http.StatusSeeOther)
 }
 
 // fillHistory adds §9 item 2's transaction history.
