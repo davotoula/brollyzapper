@@ -88,6 +88,78 @@ func TestAnInterceptionEndsWithItsStream(t *testing.T) {
 	}
 }
 
+// A message lost between the queue and the wire is still that stream's to end.
+//
+// The send loop records an interception as forwarded BEFORE it sends it, so a
+// send that fails still leaves the sweep something to answer. That ordering was
+// a comment with nothing exercising it: swapping the two lines kept the whole
+// suite green, because no test had ever made a Send fail after the rendezvous.
+func TestAnInterceptionLostBeforeTheWireStillEnds(t *testing.T) {
+	node := lndtest.Start(t)
+	client := middlewareClient(t, node.Address(), node)
+
+	in := newBlockingInterceptor()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.RunMiddleware(ctx, in) }()
+	t.Cleanup(func() { <-done })
+	lndtest.WaitFor(t, "the registration", func() bool { return in.registered.Load() })
+
+	node.FailNextMiddlewareSend()
+	outcome := node.InterceptAsync(&lnrpc.RPCMiddlewareRequest{
+		RequestId: 1,
+		InterceptType: &lnrpc.RPCMiddlewareRequest_Request{Request: &lnrpc.RPCMessage{
+			MethodFullUri: lndtest.SendPaymentMethod,
+		}},
+	})
+
+	select {
+	case out := <-outcome:
+		if !errors.Is(out.Err, lndtest.ErrMiddlewareStreamEnded) {
+			t.Errorf("an interception whose send failed ended with %v; the stream that took it "+
+				"off the queue owes it an answer, because no other stream can now take it",
+				out.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nobody answered an interception that was taken off the queue and then lost; " +
+			"it is waiting out WaitTimeout, which is what recording it before the send " +
+			"is supposed to prevent")
+	}
+	cancel()
+}
+
+// An interception nothing ever takes ends when the node does, not ten seconds later.
+//
+// The stream sweep cannot reach this one: it is still queued on `intercepts`,
+// so no stream has forwarded it and none ever will. Before the node's stopped
+// channel it was the one route left by which a goroutine started by a test
+// could still be running ten seconds after that test returned.
+func TestAnUntakenInterceptionEndsWithTheNode(t *testing.T) {
+	// Read OUTSIDE the subtest. Reading it inside would block the subtest body,
+	// so the node's cleanup could not run until the read returned, and the test
+	// would measure WaitTimeout while appearing to prove the opposite.
+	var pending <-chan lndtest.InterceptOutcome
+	t.Run("the node's lifetime", func(t *testing.T) {
+		node := lndtest.Start(t) // no middleware ever registers against it
+		pending = node.InterceptAsync(&lnrpc.RPCMiddlewareRequest{RequestId: 1})
+	})
+	// The subtest has returned, so node's t.Cleanup has run. Had the wait been
+	// bounded only by WaitTimeout, the send above would still be blocked.
+	select {
+	case out := <-pending:
+		if !errors.Is(out.Err, lndtest.ErrNodeStopped) {
+			t.Errorf("an interception no stream ever took ended with %v; the node it was "+
+				"queued on had been stopped", out.Err)
+		}
+		if out.Feedback.GetError() == "" {
+			t.Errorf("the feedback was %v, which reads as an allow", out.Feedback)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the interception outlived the node that was stopped under it")
+	}
+}
+
 // parkedInterception is the state both tests above need before they can assert
 // anything: a middleware registered against `node`, its first decision blocked,
 // and an interception sitting in that decision.

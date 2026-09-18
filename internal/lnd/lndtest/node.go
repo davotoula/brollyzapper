@@ -43,6 +43,11 @@ type Node struct {
 	address string
 	certPEM []byte
 	server  *grpc.Server
+	// stopped is closed when the test that started this node ends. Anything
+	// inside the fake that waits on a deadline waits on this too, so that it
+	// cannot outlive the test by the length of that deadline — see
+	// InterceptAsync.
+	stopped chan struct{}
 
 	mu sync.Mutex
 	// macaroons seen, in order, so a test can assert what was sent and that a
@@ -142,6 +147,7 @@ func Start(t testing.TB) *Node {
 		baked: Macaroon(t),
 		// The node a test almost always means: started, wallet unlocked.
 		walletState: lnrpc.WalletState_SERVER_ACTIVE,
+		stopped:     make(chan struct{}),
 	}
 	n.payments = map[string]paymentScript{}
 	n.tracked = map[string]paymentScript{}
@@ -152,7 +158,10 @@ func Start(t testing.TB) *Node {
 	routerrpc.RegisterRouterServer(n.server, &router{node: n})
 	lnrpc.RegisterStateServer(n.server, &stateService{node: n})
 	go func() { _ = n.server.Serve(listener) }()
-	t.Cleanup(n.server.Stop)
+	t.Cleanup(func() {
+		close(n.stopped)
+		n.server.Stop()
+	})
 	return n
 }
 

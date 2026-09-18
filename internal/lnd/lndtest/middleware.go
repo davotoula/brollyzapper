@@ -33,6 +33,9 @@ type middleware struct {
 	// registerErr makes registration fail, which is the state §14 requires be
 	// surfaced: an install whose rpcmiddleware support is off.
 	registerErr error
+	// failNextSend fails one forwarded interception on its way to the
+	// middleware; see FailNextMiddlewareSend.
+	failNextSend bool
 	// attempts counts every registration that has SETTLED — accepted or refused.
 	// A test waiting for the middleware to settle needs both outcomes, and
 	// waiting only for success hangs on the refusal case.
@@ -131,8 +134,11 @@ func (n *Node) RegisterRPCMiddleware(stream lnrpc.Lightning_RegisterRPCMiddlewar
 
 	// The reader half. Feedback arrives asynchronously and is routed back to
 	// whichever Intercept call is waiting on that message id.
-	done := make(chan struct{})
-	defer close(done)
+	// No stop channel: gRPC cancels the stream context when this handler
+	// returns, so the blocked Recv fails and the goroutine leaves by its error
+	// path. A `done` channel used to be closed here and polled after the Recv,
+	// which could only ever have been reached by a message arriving after the
+	// handler had gone — it read as a lifetime guard and was not one.
 	go func() {
 		for {
 			msg, err := stream.Recv()
@@ -141,11 +147,6 @@ func (n *Node) RegisterRPCMiddleware(stream lnrpc.Lightning_RegisterRPCMiddlewar
 			}
 			if reply := n.claimWaiter(msg.GetRefMsgId()); reply != nil {
 				reply <- InterceptOutcome{Feedback: msg.GetFeedback()}
-			}
-			select {
-			case <-done:
-				return
-			default:
 			}
 		}
 	}()
@@ -158,13 +159,37 @@ func (n *Node) RegisterRPCMiddleware(stream lnrpc.Lightning_RegisterRPCMiddlewar
 			// Recorded BEFORE the send, not after: a send that fails has still
 			// consumed the message — `intercepts` is unbuffered, so no other
 			// stream will ever see it — and the caller waiting on it is exactly
-			// the one the sweep above exists for.
+			// the one the sweep above exists for. FailNextMiddlewareSend is how
+			// that ordering is tested rather than merely asserted here.
 			forwarded[msg.GetMsgId()] = struct{}{}
+			if n.takeMiddlewareSendFailure() {
+				return status.Error(codes.Unavailable,
+					"the middleware stream broke before the message went out")
+			}
 			if err := stream.Send(msg); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// FailNextMiddlewareSend makes the next interception die in the window between
+// a stream taking it off the queue and getting it onto the wire — which a
+// stream cancelled at the wrong moment really does. It exists so the ordering
+// rule in the send loop is exercised: with the two lines swapped, the message
+// is consumed and recorded nowhere, and its caller waits out WaitTimeout.
+func (n *Node) FailNextMiddlewareSend() {
+	n.middleware.mu.Lock()
+	defer n.middleware.mu.Unlock()
+	n.middleware.failNextSend = true
+}
+
+func (n *Node) takeMiddlewareSendFailure() bool {
+	n.middleware.mu.Lock()
+	defer n.middleware.mu.Unlock()
+	failing := n.middleware.failNextSend
+	n.middleware.failNextSend = false
+	return failing
 }
 
 // MiddlewareRegistrations is what has registered so far — the assertion that
@@ -211,13 +236,20 @@ func (n *Node) SetMiddlewareRegistrationError(err error) {
 // InterceptOutcome is how one interception ended: the feedback the middleware
 // gave, or the reason there will never be one.
 //
-// A failed outcome always carries a Feedback that REFUSES, never a nil one —
-// see failedIntercept. A caller that reads only the feedback must not read the
-// fake's own failure as "the middleware allowed it".
+// Read Err FIRST. A failed outcome always carries a Feedback that REFUSES,
+// never a nil one — see failedIntercept — so a caller that looks only at the
+// feedback cannot read the fake's own failure as "the middleware allowed it".
+// The price of that is that the fake's refusal and a real one from the guard
+// look alike in Feedback alone; Err is what tells them apart.
 type InterceptOutcome struct {
 	Feedback *lnrpc.InterceptFeedback
 	Err      error
 }
+
+// ErrNodeStopped is the outcome of an interception that was still queued, taken
+// by no stream, when the test that started the node ended.
+var ErrNodeStopped = errors.New(
+	"the node was stopped while the interception was waiting for a stream")
 
 // ErrMiddlewareStreamEnded is the outcome of an interception whose stream ended
 // before the middleware answered it. A real LND fails such an RPC rather than
@@ -285,6 +317,15 @@ func (n *Node) InterceptAsync(msg *lnrpc.RPCMiddlewareRequest) <-chan InterceptO
 	go func() {
 		select {
 		case n.middleware.intercepts <- msg:
+		case <-n.stopped:
+			// The node is going away, so no stream will ever take this. Without
+			// this case the goroutine would sit here for ten seconds, outliving
+			// the test that started it — the shape zu5.9 is about, reached by
+			// the one route the stream sweep cannot cover, because a message
+			// still queued here has not been forwarded to any stream.
+			n.claimWaiter(msg.GetMsgId())
+			out <- failedIntercept(ErrNodeStopped)
+			return
 		case <-time.After(WaitTimeout):
 			// Claimed so the waiting set does not keep a channel per
 			// interception nobody is listening to any more.
