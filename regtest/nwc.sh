@@ -942,6 +942,13 @@ ok "an invoice payable to this node itself (${NODE_PUBKEY:0:8}…)"
 
 BALANCE_BEFORE=$(sql "SELECT COALESCE(SUM(amount_msat),0) FROM balance_entries;")
 BUDGET_BEFORE=$(sql "SELECT budget_used_msat FROM nwc_connections WHERE name = '$NAME';")
+# The guard's sending_latched is the OPERATOR'S SWITCH for having sending on —
+# permit_sending sets it and a revoke drops it (`06v`) — and it is NOT the hold.
+# Sending must be on for this section to test anything at all, so it is asserted
+# here, and a self-zap must leave the operator's switch exactly where it was.
+LATCH_BEFORE=$(guardctl status | jq -r '.sending_latched // false')
+[ "$LATCH_BEFORE" = "true" ] \
+  || die "sending_latched is $LATCH_BEFORE before the self-payment; sending is switched off, so this section would prove nothing"
 
 OUT=$(nwc -service "$SERVICE_PK" -secret "$CLIENT_SK" -method pay_invoice \
         -params "{\"invoice\":\"$SELF_INVOICE\"}" -timeout 60s) \
@@ -966,12 +973,18 @@ BUDGET_AFTER=$(sql "SELECT budget_used_msat FROM nwc_connections WHERE name = '$
   || die "the connection budget moved $BUDGET_BEFORE -> $BUDGET_AFTER for a payment nothing attempted"
 ok "no reservation, no budget, no payment row"
 
-[ "$(guardctl status | jq -r '.sending_latched // false')" = "false" ] \
-  || die "the guard has latched sending off after a self-payment — this is the 22-hour outage"
-ok "sending is not latched"
+# CORRECTED 18 Sep 2026: this asserted sending_latched stayed FALSE, from a brief
+# criterion that read the latch as the hold. It is the operator's switch, true
+# because sending is on — the check was backwards and failed on the first run.
+LATCH_AFTER=$(guardctl status | jq -r '.sending_latched // false')
+[ "$LATCH_AFTER" = "$LATCH_BEFORE" ] \
+  || die "a self-payment moved the operator's sending switch $LATCH_BEFORE -> $LATCH_AFTER; nothing on the payment path may touch it"
+ok "the operator's sending switch is still on"
 
-# AND THE NEXT PAYMENT WORKS. This is the assertion that would have failed on
-# main: on the box every pay_invoice after the self-zap answered RESTRICTED.
+# AND THE NEXT PAYMENT WORKS — which is what "sending is not held" means, and
+# the assertion that would have failed on main: on the box every pay_invoice
+# after the self-zap answered RESTRICTED, because the server's unresolved-payment
+# freeze held it. The hold is not a field to read; it is this payment refused.
 ensure_ledger
 AFTER_INVOICE=$(lncli_payer addinvoice --amt_msat 21000 --memo "v7u after self-payment" \
   | jq -r .payment_request) || die "the payer node would not mint an invoice"
