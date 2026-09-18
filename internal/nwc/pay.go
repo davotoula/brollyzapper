@@ -146,17 +146,38 @@ func notDispatched(err error) (string, string) {
 			"the wallet does not hold enough to cover this payment and its fee reserve"
 	case errors.Is(err, ErrAlreadyPaying):
 		return CodeOther, "a payment for this invoice is already in flight"
+	case errors.Is(err, ErrNothingSent):
+		// PAYMENT_FAILED, and NOT the RESTRICTED default below — "spending is
+		// held" would be a second false sentence in the place `v7u` fix C
+		// removed the first one. Nothing is held here; the node simply did not
+		// take the payment on, and the honest thing to tell a payer is that it
+		// did not happen.
+		return CodePaymentFailed, "nothing was sent to the node, so this payment did not happen"
 	default:
 		return CodeRestricted, "spending is held; the payment was not dispatched"
 	}
 }
 
-// The two refusals a client can act on, distinguished from the general one.
+// The refusals a client can act on, distinguished from the general one.
 // Declared here, matched by the adapter (§3): internal/nwc must not import the
-// wallet or the store to recognise them.
+// wallet or the store — or internal/lnd — to recognise them.
 var (
 	ErrInsufficientBalance = errors.New("nwc: the wallet ceiling does not cover this payment")
 	ErrAlreadyPaying       = errors.New("nwc: a payment for this invoice is already in flight")
+	// ErrNothingSent means the NODE has nothing to act on: either the request
+	// never reached it, or it refused the request without initiating anything
+	// (`v7u`).
+	//
+	// It is a member of the ErrNotDispatched family rather than a fourth kind of
+	// unknown, and that is the whole point: `v7u` fix A established that this
+	// fate is KNOWN, and until this existed nothing in §8 could act on the fact.
+	// The budget comes back and the client is told the truth.
+	//
+	// The RESERVATION is a different matter and is NOT reversed here — it is
+	// pending and unmarked, and the resolver closes it (§6). Only the connection
+	// budget moves, because only the connection budget was taken by a request
+	// that did not happen.
+	ErrNothingSent = errors.New("nwc: the node has nothing to act on; no payment was made")
 )
 
 // PayRequest is one outbound payment, already decoded and already authorised.

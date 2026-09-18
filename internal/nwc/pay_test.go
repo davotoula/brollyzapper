@@ -1286,3 +1286,58 @@ func TestASelfPaymentDoesNotStopTheNextPayment(t *testing.T) {
 		t.Errorf("%d payments reached the node, want the one that was payable", h.spend.paid)
 	}
 }
+
+// `v7u`: a payment the node never took on gives the connection's budget back and
+// tells the client it did not happen.
+//
+// The gap the go-review found, and it is the one fix A created out here while
+// closing the one it was filed for. Fix A proves the fate is KNOWN — it asks the
+// node for a record and clears the dispatch marker on a provable absence — and
+// until ErrNothingSent existed nothing in §8 could act on that. The refusal fell
+// through to the unknown-fate arm, which answers "the payment was dispatched and
+// its outcome is not yet known" and keeps the budget.
+//
+// §8 says a payment that did not happen consumes no budget. This is the same
+// shape the d24.4 review called a real bug for the frozen-node case: a retrying
+// wallet app burns its whole window in a handful of attempts, each one a payment
+// that never happened.
+//
+// THE RESERVATION IS NOT REVERSED by this, and that is not an oversight — it is
+// pending and unmarked and the resolver closes it (§6). Only the connection
+// budget moves, because only the connection budget was taken by a request that
+// did not happen.
+func TestAPaymentTheNodeNeverTookOnReturnsTheBudgetAndSaysSo(t *testing.T) {
+	h := newHarness(t)
+	h.grantPay()
+	h.sendEnabled(true)
+	h.setBudget(1_000_000)
+	h.decodesTo("lnbcrt1notsent", 21_000, "a payment the node will not take")
+	// What the adapter hands the ladder once payInvoice has established that the
+	// node has no record of the hash.
+	h.spend.payErr = fmt.Errorf("%w: %w: self-payments not allowed",
+		ErrNotDispatched, ErrNothingSent)
+
+	resp := h.handle(t, MethodPayInvoice, payParams("lnbcrt1notsent", 0))
+
+	if resp.Error == nil {
+		t.Fatal("a payment the node never took on was reported as a success")
+	}
+	if resp.Error.Code != CodePaymentFailed {
+		t.Errorf("code = %s, want %s — RESTRICTED would say \"spending is held\", which is a "+
+			"second false sentence in the place `v7u` fix C removed the first",
+			resp.Error.Code, CodePaymentFailed)
+	}
+	if strings.Contains(resp.Error.Message, "not yet known") {
+		t.Errorf("the client is told its payment may be in flight: %q — the node has no "+
+			"record of it, which is the whole of what fix A established",
+			resp.Error.Message)
+	}
+	if strings.Contains(resp.Error.Message, "held") {
+		t.Errorf("the refusal says spending is held, and it is not: %q", resp.Error.Message)
+	}
+	// THE MONEY. Nothing happened, so the window is whole.
+	if used := h.budgetUsed(); used != 0 {
+		t.Errorf("budget_used_msat = %d for a payment the node never took on; a retrying "+
+			"wallet app burns its window in a handful of attempts (§8)", used)
+	}
+}

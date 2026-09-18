@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lnrpc"
 	"github.com/davotoula/brollyzapper/internal/logging"
@@ -348,6 +351,9 @@ type fakeSpender struct {
 	// settledPreimage is the proof handed to the settle, which must be the
 	// node's and must never have been logged on the way (d24.16).
 	settledPreimage secret.String
+	// clearCtxErr is ctx.Err() as ClearDispatched saw it — nil means the marker
+	// was taken off on a context that could still do work (`v7u` go-review).
+	clearCtxErr error
 	// named is every row this resolver gave up on, and attempts is the
 	// persistent-failure counter (`669`).
 	named    []namedRow
@@ -386,8 +392,13 @@ func (f *fakeSpender) MarkDispatched(_ context.Context, _ wallet.ReservationID) 
 // ClearDispatched is the counterpart, and it is recorded in the SEQUENCE because
 // that is the property: a send that never reached the node must take the marker
 // back off, or the resolver refuses to touch the row for ever (t4t).
-func (f *fakeSpender) ClearDispatched(_ context.Context, _ wallet.ReservationID) error {
+func (f *fakeSpender) ClearDispatched(ctx context.Context, _ wallet.ReservationID) error {
 	f.record("undispatch")
+	// The CONTEXT'S STATE AT THE CALL, captured because `v7u`'s go-review found
+	// the marker being taken off with a ctx that may already be done — the exact
+	// row the question above it was asked to prevent. A fake that ignored ctx
+	// could not tell that apart from a correct call.
+	f.clearCtxErr = ctx.Err()
 	return nil
 }
 
@@ -766,5 +777,93 @@ func TestTheResolverOffersBothCausesForARecordThatIsNotThere(t *testing.T) {
 			t.Errorf("%s still asserts a cause it cannot have established: %q",
 				where.what, where.text)
 		}
+	}
+}
+
+// `v7u` go-review: the marker comes off on a context that CANNOT be cancelled.
+//
+// neverInitiated deliberately asks its question on a context.WithoutCancel,
+// because a marker left behind by a shutdown is the permanent state this bead is
+// about — and the very next thing done with the answer was taking the marker off
+// with the ORIGINAL ctx, which by then may be done. A shutdown during a payment
+// would get the right answer, fail to act on it, log an ERROR, and leave exactly
+// the dispatched-and-pending row the question was asked to prevent.
+func TestTheMarkerComesOffEvenWhenTheRequestIsAlreadyOver(t *testing.T) {
+	seq := &recorder{}
+	purse := &fakeSpender{recorder: seq}
+	node := &fakePayer{
+		recorder:      seq,
+		err:           errors.New("rpc error: code = Unknown desc = self-payments not allowed"),
+		trackScripted: true,
+		trackErr:      fmt.Errorf("%w: payment isn't initiated", lnd.ErrPaymentNotFound),
+	}
+
+	// The request is over before the wallet is asked to correct itself — a
+	// shutdown, or a client that went away.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if _, err := payInvoice(ctx, payment{bolt11: "lnbcrt1", amountMsat: 1_000,
+		maxFeeMsat: 100, paymentHash: "abcd"}, purse, node, quietLog()); err == nil {
+		t.Fatal("a refused payment was reported as success")
+	}
+
+	if !slices.Contains(seq.seen(), "undispatch") {
+		t.Fatal("the marker was never cleared at all")
+	}
+	if purse.clearCtxErr != nil {
+		t.Errorf("ClearDispatched was called with a context already done (%v); against a real "+
+			"store that write fails and the row stays dispatched+pending — named unresolvable, "+
+			"freezing sending until an operator presses a button (`v7u`)", purse.clearCtxErr)
+	}
+}
+
+// And the promotion does NOT fire when the error is OUR side giving up.
+//
+// The narrow race the go-review found, and it is the one shape that would break
+// the proof. LND validates a SendPaymentV2 request and then PERSISTS the payment
+// before the attempt runs. A cancelled or timed-out send says nothing about how
+// far that got — so a record check that wins the race against LND's own write
+// gets NotFound for a payment the node goes on to make, clears the marker, and
+// the resolver reverses a reservation that settles.
+//
+// The node is not asked AT ALL here, which is the stronger assertion: the answer
+// could not be trusted, so the question is not put.
+func TestOurOwnDeadlineIsNotTreatedAsTheNodeHavingNoRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the caller's context was cancelled", context.Canceled},
+		{"the caller's deadline expired", context.DeadlineExceeded},
+		{"grpc reported the call cancelled", status.Error(codes.Canceled, "context canceled")},
+		{"grpc reported the deadline exceeded", status.Error(codes.DeadlineExceeded, "too slow")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seq := &recorder{}
+			purse := &fakeSpender{recorder: seq}
+			node := &fakePayer{
+				recorder: seq,
+				err:      fmt.Errorf("sending the payment: %w", tc.err),
+				// The node would answer NotFound — because it has not written the
+				// record YET, not because it never will.
+				trackScripted: true,
+				trackErr:      fmt.Errorf("%w: payment isn't initiated", lnd.ErrPaymentNotFound),
+			}
+
+			if _, err := payInvoice(t.Context(), payment{bolt11: "lnbcrt1", amountMsat: 1_000,
+				maxFeeMsat: 100, paymentHash: "abcd"}, purse, node, quietLog()); err == nil {
+				t.Fatal("a send that gave up was reported as success")
+			}
+
+			if slices.Contains(seq.seen(), "track") {
+				t.Error("the node was asked for a record after WE gave up; its answer cannot " +
+					"tell 'never initiated' from 'not persisted yet' (`v7u` go-review)")
+			}
+			if slices.Contains(seq.seen(), "undispatch") {
+				t.Error("the marker was cleared for a payment that may be in flight; the " +
+					"resolver then reverses a reservation that can still settle (§6)")
+			}
+		})
 	}
 }

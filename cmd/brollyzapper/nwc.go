@@ -426,6 +426,29 @@ func (n nwcSpend) Pay(ctx context.Context, req nwc.PayRequest) (nwc.PayResult, e
 		// §8's codes without importing the wallet or the store to recognise
 		// their errors (§3).
 		return nwc.PayResult{}, notDispatched(err)
+	case errors.Is(err, lnd.ErrNotSent):
+		// THE NODE HAS NOTHING TO ACT ON, and until `v7u` nothing said so out
+		// here: this fell through to the arm below, which answers "the payment
+		// was dispatched and its outcome is not yet known" and keeps the
+		// connection's budget for a payment that never happened.
+		//
+		// Fix A is what made the fate knowable — it asks the node for a record
+		// and clears the dispatch marker on a provable absence — and this is the
+		// line that lets §8 act on the answer. Without it the fix establishes a
+		// fact three layers of consumers cannot see.
+		//
+		// The same family as a refused reservation, because the consequence is
+		// the same: the budget comes back and the client is told the truth. The
+		// RESERVATION is not reversed by either — it is pending and unmarked, and
+		// the resolver closes it (§6). The resolver's not-found-and-unmarked arm
+		// returns before correctConnectionBudget, so this release is the only one
+		// that ever happens for this row and cannot double up.
+		//
+		// Translated rather than matched in internal/nwc, because §3 forbids that
+		// package importing internal/lnd — this file is where both vocabularies
+		// are in scope.
+		return nwc.PayResult{}, fmt.Errorf("%w: %w: %w",
+			nwc.ErrNotDispatched, nwc.ErrNothingSent, err)
 	case errors.Is(err, ErrBooking) && result.Succeeded():
 		// Logged HERE and not by the ladder, because this is where the booking
 		// error itself is in scope — the ladder only learns that it happened.

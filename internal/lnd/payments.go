@@ -190,6 +190,36 @@ func (c *Client) TrackPayment(ctx context.Context, paymentHash []byte) (PaymentR
 	return c.consume(stream)
 }
 
+// IsCallerGaveUp reports whether an error is THIS side giving up rather than the
+// node answering.
+//
+// It exists for one caller and one decision (`v7u`): the dispatch-time check
+// that promotes a send failure to ErrNotSent, which is licensed to clear a
+// dispatch marker. A cancelled or timed-out send tells us nothing about what LND
+// did with the request — it may have validated it and persisted the payment
+// while we were walking away — so the node having no record a moment later is a
+// RACE with its own write, not a proof. Every other send failure carries the
+// server's own status and is safe to ask about.
+//
+// Both spellings, because both arrive: grpc-go turns a cancelled call into a
+// status with codes.Canceled, and a context deadline can surface as either the
+// bare context error or codes.DeadlineExceeded. A server that genuinely answers
+// DeadlineExceeded is caught here too, which costs only the conservative arm.
+func IsCallerGaveUp(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Canceled, codes.DeadlineExceeded:
+		return true
+	default:
+		return false
+	}
+}
+
 // HasPayment reports whether the node has ANY record of a payment, without
 // waiting to find out how it went.
 //

@@ -225,8 +225,16 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 	// leaves a record, gets anything-but-NotFound, and stays in the unknown arm
 	// below for the resolver. Bounded to this one moment on purpose: the
 	// resolver's arms are unchanged.
+	//
+	// NOT ON OUR OWN GIVING UP, which is the one shape that would break the
+	// proof. A cancelled or timed-out send says nothing about what LND did with
+	// the request: it validates, then PERSISTS the payment before the attempt
+	// runs, so a check that wins the race against that write gets NotFound for a
+	// payment the node goes on to make — and the marker would be cleared for a
+	// payment that settles. lnd.IsCallerGaveUp is that exclusion, named where the
+	// gRPC codes are already in scope.
 	notInitiated := err != nil && !errors.Is(err, lnd.ErrNotSent) &&
-		neverInitiated(ctx, p.paymentHash, node)
+		!lnd.IsCallerGaveUp(err) && neverInitiated(ctx, p.paymentHash, node)
 	if notInitiated {
 		err = fmt.Errorf("%w: %w", lnd.ErrNotSent, err)
 	}
@@ -242,7 +250,14 @@ func payInvoice(ctx context.Context, p payment, purse spender, node payer,
 		// The reservation still stays pending and is still not reversed here —
 		// §6's rule is unchanged. What changes is that the next resolver pass
 		// meets an UNMARKED row, asks the node, and takes the provably-safe arm.
-		if clearErr := purse.ClearDispatched(ctx, id); clearErr != nil {
+		// ON A CONTEXT THAT CANNOT BE CANCELLED, for the reason neverInitiated
+		// gives above and which this line is the whole point of: the answer was
+		// asked for so that a marker we wrote would not outlive the payment it
+		// describes, and taking the marker off with a ctx that may already be done
+		// would leave exactly the row the question was asked to prevent. Same
+		// shape as the ladder's budget release — a correction to durable state
+		// outlives the request that provoked it.
+		if clearErr := purse.ClearDispatched(context.WithoutCancel(ctx), id); clearErr != nil {
 			log.Error("a payment the node did not take on left a dispatch marker that could "+
 				"not be cleared; the reservation will need an operator",
 				"reservation", int64(id), "error", clearErr.Error())
