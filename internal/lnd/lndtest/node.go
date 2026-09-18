@@ -146,7 +146,7 @@ func Start(t testing.TB) *Node {
 	n.payments = map[string]paymentScript{}
 	n.tracked = map[string]paymentScript{}
 	n.middleware.intercepts = make(chan *lnrpc.RPCMiddlewareRequest)
-	n.middleware.waiting = map[uint64]chan *lnrpc.InterceptFeedback{}
+	n.middleware.waiting = map[uint64]chan InterceptOutcome{}
 	n.server = grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&cert)))
 	lnrpc.RegisterLightningServer(n.server, n)
 	routerrpc.RegisterRouterServer(n.server, &router{node: n})

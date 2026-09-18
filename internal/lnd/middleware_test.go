@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
@@ -28,7 +29,12 @@ func TestRunMiddlewareWaitsForDecisionsInFlight(t *testing.T) {
 	go func() { done <- client.RunMiddleware(ctx, in) }()
 
 	lndtest.WaitFor(t, "the registration", func() bool { return in.registered.Load() })
-	go node.Intercept(t, &lnrpc.RPCMiddlewareRequest{
+	// InterceptAsync, not `go node.Intercept(t, …)`: the interception outlives
+	// the moment the test cares about, and Intercept reports failure with
+	// t.Fatal, which from a goroutine the test does not own panics the whole
+	// package run once the test has returned (zu5.9). The channel is joined
+	// below.
+	parked := node.InterceptAsync(&lnrpc.RPCMiddlewareRequest{
 		RequestId: 1,
 		InterceptType: &lnrpc.RPCMiddlewareRequest_Request{Request: &lnrpc.RPCMessage{
 			MethodFullUri: lndtest.SendPaymentMethod,
@@ -57,6 +63,61 @@ func TestRunMiddlewareWaitsForDecisionsInFlight(t *testing.T) {
 	}
 	if n := in.inFlight.Load(); n != 0 {
 		t.Errorf("%d decisions were still running when RunMiddleware returned", n)
+	}
+	// Join the interception before returning. Nothing this test started may
+	// still be running when it does — that is the whole of zu5.9 — and reading
+	// the channel is what proves it rather than assuming it.
+	if out := <-parked; !errors.Is(out.Err, lndtest.ErrMiddlewareStreamEnded) {
+		t.Errorf("the parked interception ended with %v; its stream was cancelled, so it must "+
+			"end with the stream-ended error", out.Err)
+	}
+}
+
+// An interception ends when its stream does, and does not wait out WaitTimeout.
+//
+// The fake used to leave the entry in `waiting` when the stream's handler
+// returned, so the caller sat there for the full ten seconds before failing —
+// on a test that had finished long before. A real LND fails the RPC when its
+// middleware disconnects; it does not hold it. The one-second bound is the
+// assertion: ten seconds would pass just as well if nothing had been fixed.
+func TestAnInterceptionEndsWithItsStream(t *testing.T) {
+	node := lndtest.Start(t)
+	client := middlewareClient(t, node.Address(), node)
+
+	in := &blockingInterceptor{parked: make(chan struct{}), finish: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- client.RunMiddleware(ctx, in) }()
+	t.Cleanup(func() { <-done })
+
+	lndtest.WaitFor(t, "the registration", func() bool { return in.registered.Load() })
+	parked := node.InterceptAsync(&lnrpc.RPCMiddlewareRequest{
+		RequestId: 1,
+		InterceptType: &lnrpc.RPCMiddlewareRequest_Request{Request: &lnrpc.RPCMessage{
+			MethodFullUri: lndtest.SendPaymentMethod,
+		}},
+	})
+	<-in.parked // the interception has reached the guard and will never be answered
+	defer close(in.finish)
+
+	cancel()
+	select {
+	case out := <-parked:
+		if !errors.Is(out.Err, lndtest.ErrMiddlewareStreamEnded) {
+			t.Errorf("the interception ended with %v; the stream it was sent on had been "+
+				"cancelled, so the caller must be told that and not left waiting", out.Err)
+		}
+		// Read on its own: a caller that only looks at the feedback must see a
+		// refusal. A zero feedback reads as "allowed", which is the one answer
+		// a dead stream must never give.
+		if out.Feedback.GetError() == "" {
+			t.Errorf("the feedback for a dead stream was %v, which reads as an allow",
+				out.Feedback)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the interception was still waiting a second after its stream was cancelled; " +
+			"it is sitting out WaitTimeout, and its caller may be a goroutine whose test has " +
+			"already returned")
 	}
 }
 
