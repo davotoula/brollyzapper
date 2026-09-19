@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/config"
@@ -1270,7 +1271,8 @@ func unresolvedPaymentsCheck(ctx context.Context, in Inputs) Check {
 	}
 	switch {
 	case why != "":
-		c.Detail = held + " Could not tell whether any of them needs you (" + why + "). " +
+		c.Detail = held + " Could not tell whether any of them needs you (" +
+			strings.TrimSuffix(why, ".") + "). " +
 			"Any listed on the Wallet page under \"Payments only you can settle\" wait for " +
 			"you there; the rest are cleared when the node answers."
 	case named > 0:

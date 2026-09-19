@@ -198,7 +198,9 @@ func (w *localSpender) UnresolvedPayments(ctx context.Context) (int, error) {
 // than being read from the store: the freeze is a wallet state. The ladder asks
 // it to tell a paired client the truth about WHY sending is held — a hold that
 // clears itself when the resolver next runs, or one that is waiting for a human
-// on the Wallet page, which is a different sentence and a different action.
+// on the Wallet page, which is a different sentence and a different action. The
+// Security page's row asks it too (`j9d`), so the two cannot classify one hold
+// differently; a seam test in cmd/brollyzapper holds them to that.
 func (w *localSpender) NamedUnresolvedPayments(ctx context.Context) (int, error) {
 	return w.store.CountNamedUnresolvedPaymentsBefore(ctx, w.UnresolvedCutoff())
 }

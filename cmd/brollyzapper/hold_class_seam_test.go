@@ -28,6 +28,11 @@ const (
 // sentence that claims both or neither: an ambiguous one is not a class.
 func classOf(t *testing.T, surface, text string) holdClass {
 	t.Helper()
+	// The Security row's fallback, for a named count it could not read, is true
+	// of both holds and so is neither: here it means the wiring failed.
+	if strings.Contains(text, "Could not tell") {
+		t.Fatalf("the %s could not read which hold it is: %q", surface, text)
+	}
 	walletPage, clears := strings.Contains(text, "Wallet page"), strings.Contains(text, "clears itself")
 	switch {
 	case walletPage && !clears:
