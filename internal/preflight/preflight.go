@@ -1255,39 +1255,43 @@ func unresolvedPaymentsCheck(ctx context.Context, in Inputs) Check {
 		return c
 	}
 	c.State = Fail
-	held := fmt.Sprintf("%d payment(s) from a previous run have not been resolved against the "+
-		"node yet, so spending is held.", count)
-	// UNKNOWN IS NOT NONE, in either of its forms. The total is known, so the row
-	// stays red; which hold it is is not, and reading a failed or unwired named
-	// count as zero would say "clears itself" about a row that never will. The
-	// fallback is the sentence true in both cases: the Wallet page's table is
-	// what settles it.
-	var why string
-	named := 0
-	if in.NamedUnresolvedPayments == nil {
-		why = unwired
-	} else if named, err = in.NamedUnresolvedPayments(ctx); err != nil {
-		why = err.Error()
+	c.Detail = fmt.Sprintf("%d payment(s) from a previous run have not been resolved against the "+
+		"node yet, so spending is held. ", count) + whichHold(ctx, in)
+	return c
+}
+
+// walletTable is where a named row is settled: the Wallet page's heading, as
+// internal/web/templates/wallet.html spells it. Change both together.
+const walletTable = `the Wallet page, under "Payments only you can settle"`
+
+// whichHold is the unresolved row's second sentence: which of the two holds this
+// is (`j9d`), from the named count, when the total is already known to be held.
+func whichHold(ctx context.Context, in Inputs) string {
+	// UNKNOWN IS NOT NONE, in either of its forms. Reading a failed or unwired
+	// named count as zero would say "clears itself" about a row that never will,
+	// so the fallback is the sentence true in both cases: the Wallet page's table
+	// is what settles it.
+	unknown := func(why string) string {
+		return "Could not tell whether any of them needs you (" + strings.TrimSuffix(why, ".") +
+			"). Any listed on " + walletTable + " wait for you there; the rest are cleared " +
+			"when the node answers."
 	}
-	switch {
-	case why != "":
-		c.Detail = held + " Could not tell whether any of them needs you (" +
-			strings.TrimSuffix(why, ".") + "). " +
-			"Any listed on the Wallet page under \"Payments only you can settle\" wait for " +
-			"you there; the rest are cleared when the node answers."
-	case named > 0:
+	if in.NamedUnresolvedPayments == nil {
+		return unknown(unwired)
+	}
+	named, err := in.NamedUnresolvedPayments(ctx)
+	if err != nil {
+		return unknown(err.Error())
+	}
+	if named > 0 {
 		// Named wins, however many unnamed rows sit beside it: it is the only one
 		// with an action behind it (`v7u`). The WALLET page, because that is where
 		// the button is; this page is where the operator reads about it.
-		c.Detail = held + fmt.Sprintf(" The resolver has given up on %d of them, and those "+
-			"will not clear by themselves: settle them on the Wallet page, under \"Payments "+
-			"only you can settle\", where each says why (§6).", named)
-	default:
-		c.Detail = held + " Nothing to do: this clears itself as soon as the node answers, " +
-			"and reconciliation keeps asking. If the resolver gives up on one, this row " +
-			"will say so."
+		return fmt.Sprintf("The resolver has given up on %d of them, and those will not clear "+
+			"by themselves: settle them on %s, where each says why (§6).", named, walletTable)
 	}
-	return c
+	return "Nothing to do: this clears itself as soon as the node answers, and reconciliation " +
+		"keeps asking. If the resolver gives up on one, this row will say so."
 }
 
 // dataDirCheck closes the hole rather than only reporting it. §11: chmod it,
