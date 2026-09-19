@@ -134,11 +134,12 @@ func inputs(t *testing.T) preflight.Inputs {
 		Shortfall: func(context.Context) (int64, string, bool, error) {
 			return 0, "", false, nil
 		},
-		LastReconciliation: func() (time.Time, error) { return now, nil },
-		UnresolvedPayments: func(context.Context) (int, error) { return 0, nil },
-		CertificateName:    func() *lnd.CertificateNameError { return nil },
-		ServerCredential:   func() preflight.ProbeResult { return preflight.ProbeResult{At: now} },
-		Now:                func() time.Time { return now },
+		LastReconciliation:      func() (time.Time, error) { return now, nil },
+		UnresolvedPayments:      func(context.Context) (int, error) { return 0, nil },
+		NamedUnresolvedPayments: func(context.Context) (int, error) { return 0, nil },
+		CertificateName:         func() *lnd.CertificateNameError { return nil },
+		ServerCredential:        func() preflight.ProbeResult { return preflight.ProbeResult{At: now} },
+		Now:                     func() time.Time { return now },
 	}
 }
 
@@ -411,6 +412,10 @@ func TestEachUnwiredAccessorLeavesExactlyItsRowsNotChecked(t *testing.T) {
 			[]string{preflight.CheckReconciliation}},
 		{"UnresolvedPayments", false,
 			[]string{preflight.CheckUnresolvedSpend}},
+		// Read only when the total is not zero, and the fixture's is: a subset of
+		// nothing is nothing, so the row passes on the total alone. Its absence
+		// with payments held is TestAnUnknownNamedCountIsNotAGuess (`j9d`).
+		{"NamedUnresolvedPayments", false, nil},
 		// Not read while the node is Ready — gRPC has answered it — so on the
 		// healthy fixture its absence moves nothing. The node-not-Ready half is
 		// TestTheCertificateRowIsNotCheckedWithNoAccessor.
@@ -646,6 +651,10 @@ func TestLocalAddressFindsANonLoopbackAddress(t *testing.T) {
 func TestUnresolvedPaymentsGetTheirOwnDegradedRow(t *testing.T) {
 	in := inputs(t)
 	in.UnresolvedPayments = func(context.Context) (int, error) { return 2, nil }
+	// NONE NAMED: the case "clears itself" is true of (`j9d`). The row used to say
+	// it about any count, hedged, which left the operator to work out from the log
+	// which case they were in; the named case is the next test.
+	in.NamedUnresolvedPayments = func(context.Context) (int, error) { return 0, nil }
 
 	report := preflight.Run(t.Context(), in)
 	row := check(t, report, preflight.CheckUnresolvedSpend)
@@ -657,6 +666,10 @@ func TestUnresolvedPaymentsGetTheirOwnDegradedRow(t *testing.T) {
 		t.Errorf("detail = %q, want it to say nothing needs doing — a degraded row that "+
 			"implies action where none is possible sends the operator hunting for a setting "+
 			"that does not exist", row.Detail)
+	}
+	if strings.Contains(row.Detail, "Wallet page") {
+		t.Errorf("detail = %q sends the operator to the Wallet page for a hold with no named "+
+			"row; its table is empty and there is nothing there to do", row.Detail)
 	}
 	// And it is NOT the reconciliation row: no shortfall was reported, so that
 	// one must still be green.
@@ -670,6 +683,94 @@ func TestUnresolvedPaymentsGetTheirOwnDegradedRow(t *testing.T) {
 	in.UnresolvedPayments = func(context.Context) (int, error) { return 0, nil }
 	if row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend); row.State != preflight.Pass {
 		t.Errorf("the row stayed red after the payments resolved: %q", row.Detail)
+	}
+}
+
+// `j9d`: a hold on a row the resolver has NAMED (`669`) does not clear itself,
+// and the row says where the button is.
+//
+// The fourth reader of the fact `v7u` fix C taught three others: the NWC
+// refusal, the resolver's ERROR and the Wallet page already tell the two holds
+// apart, and this row hedged — "usually … clears itself … the exception is a
+// payment the log names as DISPATCHED" — on the page the incident write-up says
+// the operator was actually reading.
+//
+// A named row WINS over any number of unnamed ones: it is the only one with an
+// action behind it, and the others may close on the next pass without changing
+// what the operator has to do (`v7u` report, decision 4).
+func TestANamedUnresolvedPaymentSendsTheOperatorToTheWalletPage(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		total, named int
+	}{
+		{"every held row is named", 1, 1},
+		{"one named among several that are not", 9, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := inputs(t)
+			in.UnresolvedPayments = func(context.Context) (int, error) { return tc.total, nil }
+			in.NamedUnresolvedPayments = func(context.Context) (int, error) { return tc.named, nil }
+
+			row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend)
+			if row.State != preflight.Fail {
+				t.Fatalf("a named hold and the row is %v: %q", row.State, row.Detail)
+			}
+			if !strings.Contains(row.Detail, "Wallet page") ||
+				!strings.Contains(row.Detail, "Payments only you can settle") {
+				t.Errorf("detail = %q, want it to name the Wallet page and its table — that is "+
+					"where the button is, and nothing else will ever move this row", row.Detail)
+			}
+			if strings.Contains(row.Detail, "clears itself") {
+				t.Errorf("detail = %q tells the operator a named hold clears itself; it never "+
+					"does, and an operator told to wait, waits", row.Detail)
+			}
+		})
+	}
+}
+
+// `j9d` criteria 3 and 5: a named count that cannot be read — because the read
+// failed, or because nothing is wired to read it — is neither a green tick nor a
+// guess.
+//
+// The total says spending is held, so the row stays red. What it cannot say is
+// WHICH hold, and reading "unknown" as "none named" is exactly the sentence that
+// kept a payer waiting 22 hours (`v7u`): "this clears itself", about a row that
+// never would. So the fallback is a sentence true in both cases.
+func TestAnUnknownNamedCountIsNotAGuess(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		named func(context.Context) (int, error)
+		// why is what the detail must carry, so the operator can tell a locked
+		// database from a build that never asked.
+		why string
+	}{
+		{"the read failed", func(context.Context) (int, error) {
+			return 0, errors.New("the database is locked")
+		}, "the database is locked"},
+		{"nothing is wired to read it", nil, "Nothing in this build is wired"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := inputs(t)
+			in.UnresolvedPayments = func(context.Context) (int, error) { return 2, nil }
+			in.NamedUnresolvedPayments = tc.named
+
+			row := check(t, preflight.Run(t.Context(), in), preflight.CheckUnresolvedSpend)
+			if row.State != preflight.Fail {
+				t.Fatalf("two payments are holding sending and the row is %v: %q — the total "+
+					"was read, so the hold is known even if its kind is not", row.State, row.Detail)
+			}
+			if strings.Contains(row.Detail, "clears itself") {
+				t.Errorf("detail = %q claims the self-clearing case without knowing it; a "+
+					"named row would never clear, and the operator would wait for it", row.Detail)
+			}
+			if !strings.Contains(row.Detail, "Wallet page") {
+				t.Errorf("detail = %q does not say where to look; the Wallet page's table is "+
+					"what settles the question the row could not", row.Detail)
+			}
+			if !strings.Contains(row.Detail, tc.why) {
+				t.Errorf("detail = %q does not say why the kind is unknown (want %q)", row.Detail, tc.why)
+			}
+		})
 	}
 }
 
