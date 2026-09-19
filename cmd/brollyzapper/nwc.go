@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
@@ -136,6 +137,9 @@ type nwcPurse interface {
 	MaxFee(ctx context.Context, amountMsat int64) (int64, error)
 	Shortfall(ctx context.Context) (wallet.Deficit, bool, error)
 	UnresolvedPayments(ctx context.Context) (int, error)
+	// NamedUnresolvedPayments is the subset the resolver has given up on, which
+	// is what tells the two holds apart in the refusal a client reads (`v7u`).
+	NamedUnresolvedPayments(ctx context.Context) (int, error)
 }
 
 // nwcSpend is the outbound half of §8's ladder: the two facts it refuses on, the
@@ -164,7 +168,11 @@ type nwcSpend struct {
 	// shape. One statement of the policy; two freshness policies, each chosen by
 	// the caller that lives with it.
 	checks func(ctx context.Context) preflight.Report
-	log    *slog.Logger
+	// identity is the node's own pubkey, read once through the RECEIVE client
+	// (GetInfo is not in SpendPermissions). A pointer, so every copy of this
+	// value type shares the one memo. See NodeIdentity.
+	identity *nodeIdentity
+	log      *slog.Logger
 }
 
 // spendNode is what §8's ladder needs from the node it pays through: payInvoice's
@@ -242,15 +250,39 @@ func (n nwcSpend) Held(ctx context.Context) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if unresolved > 0 {
-		// The COUNT goes too. It is smaller than the shortfall but it is the
-		// same kind of fact — how many payments this node has in flight — and
-		// the client can do nothing with it either way.
-		return "sending is held while payments from a previous run are resolved against the " +
-				"node; this clears itself, and its owner can see the detail on the Security page",
-			true, nil
+	if unresolved == 0 {
+		return "", false, nil
 	}
-	return "", false, nil
+	// WHICH HOLD IT IS, because "this clears itself" was being said about one
+	// that does not (`v7u`). On the reference box Amethyst showed the payer that
+	// sentence for 22 hours about a row the resolver had already given up on,
+	// while the server's own log for the identical condition said the opposite.
+	// A payer told to wait, waits.
+	//
+	// A NAMED row (`669`: unresolvable_reason set) is waiting for a human and
+	// nothing else will ever move it, so it wins whenever both kinds are present
+	// — it is the one with an action behind it.
+	named, err := n.purse.NamedUnresolvedPayments(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if named > 0 {
+		// THE WALLET PAGE, not the Security page. The Security page is where the
+		// operator READS about this; the Wallet page's "Payments only you can
+		// settle" table is where they ACT on it, and naming the wrong one is how
+		// the box's operator came to need a written diagnosis to find the button.
+		//
+		// Still no count, for `0vk.14`'s reason: how many payments this node has
+		// unresolved is a fact about the operator's node, and the client can do
+		// nothing with it.
+		return "sending is held until this wallet's owner settles a payment the node could " +
+			"not resolve; they can do that on the Wallet page", true, nil
+	}
+	// The self-clearing one, unchanged: the resolver has not given up on these
+	// and the next pass may well close them.
+	return "sending is held while payments from a previous run are resolved against the " +
+			"node; this clears itself, and its owner can see the detail on the Security page",
+		true, nil
 }
 
 // Decode reads a bolt11 through the node that will pay it, in the shape §8's
@@ -276,7 +308,91 @@ func (n nwcSpend) Decode(ctx context.Context, bolt11 string) (nwc.Bolt11, error)
 		// regtest on its first run that could reach section 14.
 		DescriptionHash: decoded.DescriptionHash,
 		ExpiresAt:       decoded.ExpiresAt,
+		// Who gets paid, which the ladder needs in order to recognise the one
+		// invoice this node cannot pay — its own (`v7u`). Carried across the same
+		// seam and in the same breath as the line above it, whose absence (y09)
+		// is the reason this file's tests go through the real client.
+		Destination: decoded.Destination,
 	}, nil
+}
+
+// NodeIdentity is this node's own public key, read ONCE and remembered.
+//
+// Once, because a running node's identity cannot change under it — the key is
+// the node — and a GetInfo per payment would put a round trip on the path of
+// every pay_invoice to answer a question with a constant answer.
+//
+// THROUGH THE RECEIVE CLIENT, and that is a hard constraint rather than a
+// preference: GetInfo is in ReceivePermissions and NOT in SpendPermissions
+// (§6), so the spend client this adapter otherwise uses cannot ask. Widening the
+// spend macaroon to ask a question the receive one already answers would be the
+// wrong direction entirely.
+//
+// A FAILURE IS NOT CACHED. Empty means "could not tell", the ladder's rung
+// treats that as "do not refuse", and the next payment asks again — so a node
+// that was down at the first pay_invoice is not permanently unable to recognise
+// its own invoices.
+func (n nwcSpend) NodeIdentity(ctx context.Context) string {
+	if n.identity == nil {
+		return ""
+	}
+	return n.identity.get(ctx, n.log)
+}
+
+// nodeIdentity remembers the answer to NodeIdentity.
+//
+// A pointer on nwcSpend, which is otherwise a value: the memo has to be shared
+// by every copy of the adapter or it is not a memo at all.
+type nodeIdentity struct {
+	info func(ctx context.Context) (nwc.NodeInfo, error)
+	mu   sync.Mutex
+	// pubkey is empty until a GetInfo has succeeded. Empty is also the answer
+	// this hands back on failure, which is why there is no separate "asked" flag:
+	// nothing is remembered except a success.
+	pubkey string
+}
+
+func (n *nodeIdentity) get(ctx context.Context, log *slog.Logger) string {
+	if pubkey := n.cached(); pubkey != "" {
+		return pubkey
+	}
+
+	// THE RPC RUNS UNLOCKED, and that is the point of splitting this in three.
+	// Nothing is memoised on failure, so on a sick node EVERY pay_invoice comes
+	// back here — and holding the mutex across the call would make N concurrent
+	// payments into N sequential GetInfo calls, each waiting out the ones before
+	// it, at a rung that does not refuse anyway. Two callers racing to the same
+	// answer costs one duplicate RPC; serialising them costs the payment path.
+	//
+	// Bounded, for the same reason and with the same figure as
+	// trackAtDispatchTimeout: the ladder must not wait on a node that has stopped
+	// answering, and an unreachable one has already failed the Tier-2 gate above.
+	ctx, cancel := context.WithTimeout(ctx, trackAtDispatchTimeout)
+	defer cancel()
+	info, err := n.info(ctx)
+	if err != nil {
+		// DEBUG, and it does not refuse. The Tier-2 gate several rungs above has
+		// already turned "the node is unreachable" into a RESTRICTED the operator
+		// can read; a second sentence about it here would be one condition
+		// reported twice, which this package's Auditor doc forbids.
+		log.Debug("could not read the node's identity, so a self-payment cannot be recognised "+
+			"on this request", "error", err.Error())
+		return ""
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	// Last writer wins, and it cannot matter: every racing call asked the same
+	// node the same question, and a node's identity is the node.
+	n.pubkey = info.Pubkey
+	return n.pubkey
+}
+
+// cached is the memo read, on its own so the lock is never held across the RPC.
+func (n *nodeIdentity) cached() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.pubkey
 }
 
 // MaxFee is §5's single fee reserve, from the one place that computes it.
@@ -310,6 +426,29 @@ func (n nwcSpend) Pay(ctx context.Context, req nwc.PayRequest) (nwc.PayResult, e
 		// §8's codes without importing the wallet or the store to recognise
 		// their errors (§3).
 		return nwc.PayResult{}, notDispatched(err)
+	case errors.Is(err, lnd.ErrNotSent):
+		// THE NODE HAS NOTHING TO ACT ON, and until `v7u` nothing said so out
+		// here: this fell through to the arm below, which answers "the payment
+		// was dispatched and its outcome is not yet known" and keeps the
+		// connection's budget for a payment that never happened.
+		//
+		// Fix A is what made the fate knowable — it asks the node for a record
+		// and clears the dispatch marker on a provable absence — and this is the
+		// line that lets §8 act on the answer. Without it the fix establishes a
+		// fact three layers of consumers cannot see.
+		//
+		// The same family as a refused reservation, because the consequence is
+		// the same: the budget comes back and the client is told the truth. The
+		// RESERVATION is not reversed by either — it is pending and unmarked, and
+		// the resolver closes it (§6). The resolver's not-found-and-unmarked arm
+		// returns before correctConnectionBudget, so this release is the only one
+		// that ever happens for this row and cannot double up.
+		//
+		// Translated rather than matched in internal/nwc, because §3 forbids that
+		// package importing internal/lnd — this file is where both vocabularies
+		// are in scope.
+		return nwc.PayResult{}, fmt.Errorf("%w: %w: %w",
+			nwc.ErrNotDispatched, nwc.ErrNothingSent, err)
 	case errors.Is(err, ErrBooking) && result.Succeeded():
 		// Logged HERE and not by the ladder, because this is where the booking
 		// error itself is in scope — the ladder only learns that it happened.
@@ -381,11 +520,15 @@ func newNWCService(db *store.Store, relays nwc.Relays, purse nwcPurse,
 	node *lnd.Client, spendNode *lnd.Client, spendCredentials lnd.CredentialSource,
 	checks func(ctx context.Context) preflight.Report,
 	auditor *logging.Auditor, demand chan<- struct{}, log *slog.Logger) *nwc.Service {
+	// One adapter, used twice: get_info's answer and the identity the ladder
+	// compares an invoice's destination against are the same fact from the same
+	// read-only client.
+	readOnlyNode := nwcNode{node: node}
 	return nwc.New(db, relays, purse,
 		nwcInvoices{node: node, db: db, now: time.Now},
-		nwcNode{node: node},
+		readOnlyNode,
 		nwcSpend{purse: purse, node: spendNode, credentials: spendCredentials,
-			checks: checks, log: log},
+			checks: checks, identity: &nodeIdentity{info: readOnlyNode.Info}, log: log},
 		// The auditor, so a capability refusal reaches §12's trail rather than
 		// only the log (d24.14). Its contract is the line and the row together,
 		// which is why the service holds this and not an AuditSink.

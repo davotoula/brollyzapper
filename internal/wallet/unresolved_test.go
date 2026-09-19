@@ -194,3 +194,78 @@ func TestARowInheritedFromAPreviousRunFreezesImmediately(t *testing.T) {
 			"once, not %v later", err, UnresolvedAfter)
 	}
 }
+
+// `v7u`: the NAMED unresolved payments are a strict subset of the unresolved
+// ones, over the same cutoff.
+//
+// The ladder tells a paired client which hold it is in — one the resolver may
+// still clear, or one waiting for a human on the Wallet page — and it decides by
+// comparing these two counts. Two things can go wrong and both are invisible
+// from the message alone: a named count that ignored the cutoff would describe a
+// row the freeze is not held for, and one that ignored the marker would send
+// every operator to a page with an empty table.
+func TestTheNamedUnresolvedPaymentsAreTheSubsetTheResolverGaveUpOn(t *testing.T) {
+	db, _ := openStore(t)
+	started := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	w := walletAt(db, started)
+	allocate(t, w, 1_000_000)
+
+	// Three pending payments from a previous run, one of which the resolver has
+	// given up on.
+	var ids []ReservationID
+	for _, ref := range []string{"named", "still trying", "also still trying"} {
+		id, err := w.Reserve(t.Context(), Reservation{
+			AmountMsat: 10_000, MaxFeeMsat: 100, PaymentHash: aPaymentHash(), Ref: ref,
+		})
+		if err != nil {
+			t.Fatalf("reserving %q: %v", ref, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// A LATER wallet, so the three rows are older than its cutoff and all three
+	// are holding sending. Without this they are "this run's" and count for
+	// neither total.
+	later := walletAt(db, started.Add(time.Hour))
+
+	if got, err := later.UnresolvedPayments(t.Context()); err != nil {
+		t.Fatal(err)
+	} else if got != 3 {
+		t.Fatalf("UnresolvedPayments = %d, want 3; the fixture would prove nothing", got)
+	}
+	if got, err := later.NamedUnresolvedPayments(t.Context()); err != nil {
+		t.Fatal(err)
+	} else if got != 0 {
+		t.Errorf("NamedUnresolvedPayments = %d before the resolver named anything, want 0 — "+
+			"every operator would be sent to the Wallet page to look at an empty table", got)
+	}
+
+	if err := later.MarkUnresolvable(t.Context(), ids[0], "the node has no record of it"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := later.NamedUnresolvedPayments(t.Context()); err != nil {
+		t.Fatal(err)
+	} else if got != 1 {
+		t.Errorf("NamedUnresolvedPayments = %d after one row was named, want 1", got)
+	}
+	// The other two are untouched: naming is per row, and the hold they impose
+	// is still the kind that may clear itself.
+	if got, err := later.UnresolvedPayments(t.Context()); err != nil {
+		t.Fatal(err)
+	} else if got != 3 {
+		t.Errorf("UnresolvedPayments = %d after naming one, want 3 — naming a row does not "+
+			"resolve it", got)
+	}
+
+	// THE CUTOFF, which is the half a count written straight off
+	// UnresolvablePayments would lose: the operator's table has no cutoff, this
+	// count must have the freeze's. A wallet that has just started sees none of
+	// these rows as holding sending, so none of them are named-and-holding either.
+	if got, err := w.NamedUnresolvedPayments(t.Context()); err != nil {
+		t.Fatal(err)
+	} else if got != 0 {
+		t.Errorf("NamedUnresolvedPayments = %d for rows newer than this run's cutoff, want 0 — "+
+			"the refusal would describe a row that is not holding sending", got)
+	}
+}

@@ -903,4 +903,99 @@ WANT=$(( 21000 + RECOVER_FEE ))
   || die "budget_used is $BUDGET_USED msat, want $WANT (21000 + the route's actual $RECOVER_FEE). The reserve was never corrected — which is exactly the drift the field trip measured at 31000 where 23055 was right"
 ok "the recovered payment charged the ACTUAL $BUDGET_USED msat, not the 31000 reserve"
 
+# ---------------------------------------------------------------------------
+say "16. v7u: a self-payment is refused, and it does not take sending with it"
+# THE FIELD INCIDENT, on the stack. David zapped his own note from a client
+# paired to his own wallet, so the app minted the invoice AND was asked over NWC
+# to pay it. Every rung passed, 41,000 msat of a 1000-sat ceiling was reserved,
+# the dispatch marker was written, and LND answered "self-payments not allowed" —
+# a refusal it had already decided on before initiating anything. The app could
+# not classify that, left the row pending and marked, and sending was held for 22
+# hours.
+#
+# make_invoice rather than the LNURL callback, and it is the same fixture: what
+# the rung compares is the invoice's DESTINATION against the node's identity, and
+# an invoice this app minted is payable to this app's node whichever door it came
+# through. The LNURL leg is section 14's and e2e.sh's.
+#
+# The assertion that matters is the LAST one. A self-zap failing is not the
+# damage — it is a misclick and nobody minds — so a section that stopped at the
+# refusal would pass on a branch that still stranded the reservation. What broke
+# the box is the payment AFTER it.
+ensure_ledger
+SELF_OUT=$(nwc -service "$SERVICE_PK" -secret "$CLIENT_SK" -method make_invoice \
+        -params '{"amount":21000,"description":"v7u self-payment probe"}' -timeout 20s) \
+  || die "make_invoice got no answer: $(tail -3 "$WORK/client.err")"
+SELF_INVOICE=$(printf '%s' "$SELF_OUT" | jq -r .result.invoice)
+SELF_HASH=$(printf '%s' "$SELF_OUT" | jq -r .result.payment_hash)
+[ -n "$SELF_INVOICE" ] && [ "$SELF_INVOICE" != "null" ] \
+  || die "make_invoice returned no bolt11: $SELF_OUT"
+
+# ANTI-VACUITY: prove the fixture really is a self-payment before asserting that
+# one is refused. If this invoice were payable anywhere else, everything below
+# would pass while observing nothing at all.
+SELF_DEST=$(lncli_recv decodepayreq --pay_req "$SELF_INVOICE" | jq -r .destination)
+NODE_PUBKEY=$(lncli_recv getinfo | jq -r .identity_pubkey)
+[ -n "$NODE_PUBKEY" ] && [ "$SELF_DEST" = "$NODE_PUBKEY" ] \
+  || die "the probe invoice is payable to $SELF_DEST but this node is $NODE_PUBKEY; it is not a self-payment and this section would prove nothing"
+ok "an invoice payable to this node itself (${NODE_PUBKEY:0:8}…)"
+
+BALANCE_BEFORE=$(sql "SELECT COALESCE(SUM(amount_msat),0) FROM balance_entries;")
+BUDGET_BEFORE=$(sql "SELECT budget_used_msat FROM nwc_connections WHERE name = '$NAME';")
+# The guard's sending_latched is the OPERATOR'S SWITCH for having sending on —
+# permit_sending sets it and a revoke drops it (`06v`) — and it is NOT the hold.
+# Sending must be on for this section to test anything at all, so it is asserted
+# here, and a self-zap must leave the operator's switch exactly where it was.
+LATCH_BEFORE=$(guardctl status | jq -r '.sending_latched // false')
+[ "$LATCH_BEFORE" = "true" ] \
+  || die "sending_latched is $LATCH_BEFORE before the self-payment; sending is switched off, so this section would prove nothing"
+
+OUT=$(nwc -service "$SERVICE_PK" -secret "$CLIENT_SK" -method pay_invoice \
+        -params "{\"invoice\":\"$SELF_INVOICE\"}" -timeout 60s) \
+  || die "pay_invoice got no answer: $(tail -3 "$WORK/client.err")"
+printf '%s' "$OUT" | jq -e '.error.code == "PAYMENT_FAILED"' >/dev/null \
+  || die "the self-payment answered $OUT, want a PAYMENT_FAILED error — RESTRICTED would say \"this wallet may not\", and it may; the invoice is the problem"
+# The MESSAGE, because that is what the payer reads: Amethyst renders
+# errorMessage() and never the code on this path (d24.22).
+printf '%s' "$OUT" | jq -e '.error.message | test("own node")' >/dev/null \
+  || die "the refusal does not tell the payer the invoice is to their own node: $OUT"
+ok "refused: $(printf '%s' "$OUT" | jq -rc .error.message)"
+
+# NOTHING was spent on it — the rung sits above the reservation, the budget and
+# the dispatch marker, and each of these is one of the costs the incident paid.
+[ "$(sql "SELECT COUNT(*) FROM txns WHERE payment_hash = '$SELF_HASH' AND kind = 'payment_out';")" = "0" ] \
+  || die "a payment_out row was written for an invoice that cannot be paid; it holds the ceiling until an operator closes it"
+BALANCE_AFTER=$(sql "SELECT COALESCE(SUM(amount_msat),0) FROM balance_entries;")
+[ "$BALANCE_AFTER" = "$BALANCE_BEFORE" ] \
+  || die "the ceiling moved $BALANCE_BEFORE -> $BALANCE_AFTER for a payment nothing attempted"
+BUDGET_AFTER=$(sql "SELECT budget_used_msat FROM nwc_connections WHERE name = '$NAME';")
+[ "$BUDGET_AFTER" = "$BUDGET_BEFORE" ] \
+  || die "the connection budget moved $BUDGET_BEFORE -> $BUDGET_AFTER for a payment nothing attempted"
+ok "no reservation, no budget, no payment row"
+
+# CORRECTED 18 Sep 2026: this asserted sending_latched stayed FALSE, from a brief
+# criterion that read the latch as the hold. It is the operator's switch, true
+# because sending is on — the check was backwards and failed on the first run.
+LATCH_AFTER=$(guardctl status | jq -r '.sending_latched // false')
+[ "$LATCH_AFTER" = "$LATCH_BEFORE" ] \
+  || die "a self-payment moved the operator's sending switch $LATCH_BEFORE -> $LATCH_AFTER; nothing on the payment path may touch it"
+ok "the operator's sending switch is still on"
+
+# AND THE NEXT PAYMENT WORKS — which is what "sending is not held" means, and
+# the assertion that would have failed on main: on the box every pay_invoice
+# after the self-zap answered RESTRICTED, because the server's unresolved-payment
+# freeze held it. The hold is not a field to read; it is this payment refused.
+ensure_ledger
+AFTER_INVOICE=$(lncli_payer addinvoice --amt_msat 21000 --memo "v7u after self-payment" \
+  | jq -r .payment_request) || die "the payer node would not mint an invoice"
+OUT=$(nwc -service "$SERVICE_PK" -secret "$CLIENT_SK" -method pay_invoice \
+        -params "{\"invoice\":\"$AFTER_INVOICE\"}" -timeout 60s) \
+  || die "pay_invoice got no answer: $(tail -3 "$WORK/client.err")"
+printf '%s' "$OUT" | jq -e '.result.preimage != null and .result.preimage != ""' >/dev/null \
+  || die "the payment AFTER a self-zap was refused $OUT — this is the 22-hour outage the bead was filed for"
+PAID=$(lncli_payer listinvoices | jq -r \
+  '.invoices[] | select(.memo == "v7u after self-payment") | .state' | tail -1)
+[ "$PAID" = "SETTLED" ] || die "the payee node reports the follow-up invoice as $PAID, not SETTLED"
+ok "an ordinary payment after the self-zap settled"
+
 printf '\n\033[32mNWC CHECK PASSED\033[0m — §8'"'"'s service answers over a real relay, idempotently.\n\n'

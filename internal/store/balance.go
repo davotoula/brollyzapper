@@ -652,6 +652,29 @@ func (s *Store) CountUnresolvedPaymentsBefore(ctx context.Context, before time.T
 	return n, nil
 }
 
+// CountNamedUnresolvedPaymentsBefore is how many of those rows the resolver has
+// NAMED — the ones that will never clear themselves (`v7u`).
+//
+// The fourth reader of unresolvedPaymentsWhere, and it shares the predicate for
+// the reason stated above: these rows are a SUBSET of the ones holding the
+// freeze, and a copy that drifted would have the refusal message describing a
+// row the freeze was not held for. That is why the cutoff is here at all even
+// though UnresolvablePayments — the operator's table — has none: the table shows
+// every named row, this counts the named rows that are holding sending.
+//
+// It exists because "this clears itself" was being told to a paired client about
+// a hold that does not. A named row is waiting for its owner on the Wallet page
+// and nothing else will ever move it.
+func (s *Store) CountNamedUnresolvedPaymentsBefore(ctx context.Context, before time.Time) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM txns `+unresolvedPaymentsWhere+` AND unresolvable_reason IS NOT NULL`,
+		KindPaymentOut, TxnPending, before.Unix()).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting named unresolved payments: %w", err)
+	}
+	return n, nil
+}
+
 // SettleSpend closes a reservation that paid, refunding the part of the fee
 // reserve the route did not use and recording the PREIMAGE.
 //

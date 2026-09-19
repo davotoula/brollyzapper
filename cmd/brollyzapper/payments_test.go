@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lnrpc"
 	"github.com/davotoula/brollyzapper/internal/logging"
@@ -136,9 +139,15 @@ func TestASendThatErrorsLeavesTheReservationPending(t *testing.T) {
 	if err == nil {
 		t.Fatal("a send that errored was reported as success")
 	}
-	if want := []string{"reserve", "dispatch", "send"}; !slices.Equal(seq.seen(), want) {
+	// The track is `v7u`'s one question — does the node have a record? — and
+	// here it answers with the same transport failure, which is NOT a provable
+	// absence, so the row stays exactly where §6 puts it.
+	if want := []string{"reserve", "dispatch", "send", "track"}; !slices.Equal(seq.seen(), want) {
 		t.Errorf("order = %v, want %v — the payment may be in flight, and §6 forbids reversing "+
 			"a reservation whose fate is unknown", seq.seen(), want)
+	}
+	if slices.Contains(seq.seen(), "undispatch") {
+		t.Error("a payment whose fate the node could not confirm had its marker cleared")
 	}
 }
 
@@ -342,6 +351,9 @@ type fakeSpender struct {
 	// settledPreimage is the proof handed to the settle, which must be the
 	// node's and must never have been logged on the way (d24.16).
 	settledPreimage secret.String
+	// clearCtxErr is ctx.Err() as ClearDispatched saw it — nil means the marker
+	// was taken off on a context that could still do work (`v7u` go-review).
+	clearCtxErr error
 	// named is every row this resolver gave up on, and attempts is the
 	// persistent-failure counter (`669`).
 	named    []namedRow
@@ -380,8 +392,13 @@ func (f *fakeSpender) MarkDispatched(_ context.Context, _ wallet.ReservationID) 
 // ClearDispatched is the counterpart, and it is recorded in the SEQUENCE because
 // that is the property: a send that never reached the node must take the marker
 // back off, or the resolver refuses to touch the row for ever (t4t).
-func (f *fakeSpender) ClearDispatched(_ context.Context, _ wallet.ReservationID) error {
+func (f *fakeSpender) ClearDispatched(ctx context.Context, _ wallet.ReservationID) error {
 	f.record("undispatch")
+	// The CONTEXT'S STATE AT THE CALL, captured because `v7u`'s go-review found
+	// the marker being taken off with a ctx that may already be done — the exact
+	// row the question above it was asked to prevent. A fake that ignored ctx
+	// could not tell that apart from a correct call.
+	f.clearCtxErr = ctx.Err()
 	return nil
 }
 
@@ -416,6 +433,14 @@ type fakePayer struct {
 	err           error
 	feeLimit      int64
 	trackedHashes []string
+	// trackScripted splits TrackPayment's answer from SendPayment's, which is
+	// the shape `v7u` turns on: a pre-flight refusal is a send ERROR and a track
+	// NOT-FOUND at the same moment, and a fake that could only say one thing
+	// could not express the case at all. Unset, the two stay welded as they were
+	// for every test written before.
+	trackScripted bool
+	trackResult   lnd.PaymentResult
+	trackErr      error
 }
 
 func (f *fakePayer) SendPayment(_ context.Context, _ string, feeLimitMsat int64) (lnd.PaymentResult, error) {
@@ -427,7 +452,31 @@ func (f *fakePayer) SendPayment(_ context.Context, _ string, feeLimitMsat int64)
 func (f *fakePayer) TrackPayment(_ context.Context, paymentHash []byte) (lnd.PaymentResult, error) {
 	f.record("track")
 	f.trackedHashes = append(f.trackedHashes, string(paymentHash))
+	if f.trackScripted {
+		return f.trackResult, f.trackErr
+	}
 	return f.result, f.err
+}
+
+// HasPayment is the EXISTENCE question (`v7u`), answered from the same script
+// TrackPayment reads — so a test that says "the node has no record" says it once
+// and both callers agree. Only the ErrPaymentNotFound case is a definite "no";
+// every other error is "could not tell", which is what the production contract
+// says and what the caller must treat conservatively.
+func (f *fakePayer) HasPayment(_ context.Context, paymentHash []byte) (bool, error) {
+	f.record("track")
+	f.trackedHashes = append(f.trackedHashes, string(paymentHash))
+	err := f.err
+	if f.trackScripted {
+		err = f.trackErr
+	}
+	if errors.Is(err, lnd.ErrPaymentNotFound) {
+		return false, err
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // fakePending records the cutoff it was asked for, because "older than this
@@ -498,6 +547,83 @@ func TestASendOfUnknownFateKeepsItsMarker(t *testing.T) {
 	if slices.Contains(seq.seen(), "undispatch") {
 		t.Error("a payment that may be in flight had its marker cleared; the resolver would " +
 			"then reverse a reservation whose payment might have settled")
+	}
+}
+
+// `v7u`: a refusal the node made WITHOUT INITIATING ANYTHING takes its marker
+// back off, exactly as a send that never left does.
+//
+// This is the field incident. LND answered SendPaymentV2 with "self-payments not
+// allowed" — through the stream, after the open, having created no payment — and
+// because internal/lnd can only wrap an error at the OPEN as ErrNotSent, the row
+// landed in the unknown arm: marked, pending, and in the resolver's
+// do-not-touch arm for ever. Sending was held for 22 hours and only an operator
+// assertion cleared it.
+//
+// The discriminator is the node's own record, not the sentence: "self-payments
+// not allowed" is one pre-flight refusal of several, and matching it would have
+// left the expired-invoice and below-minimum cases stranding exactly as before.
+func TestARefusalTheNodeNeverInitiatedClearsItsMarker(t *testing.T) {
+	seq := &recorder{}
+	purse := &fakeSpender{recorder: seq}
+	node := &fakePayer{
+		recorder: seq,
+		// Through the stream, so internal/lnd returns it bare — indistinguishable
+		// there from a payment in flight.
+		err: errors.New("rpc error: code = Unknown desc = self-payments not allowed"),
+		// And the node has no record of the hash, milliseconds later.
+		trackScripted: true,
+		trackErr:      fmt.Errorf("%w: payment isn't initiated", lnd.ErrPaymentNotFound),
+	}
+
+	_, err := payInvoice(t.Context(), payment{bolt11: "lnbcrt1", amountMsat: 31_000,
+		maxFeeMsat: 10_000, paymentHash: "abcd"}, purse, node, quietLog())
+
+	if err == nil {
+		t.Fatal("a payment the node refused was reported as success")
+	}
+	if !errors.Is(err, lnd.ErrNotSent) {
+		t.Errorf("err = %v, want it to carry lnd.ErrNotSent — the node has no record of this "+
+			"payment, so its fate is KNOWN and the caller is entitled to know that", err)
+	}
+	want := []string{"reserve", "dispatch", "send", "track", "undispatch"}
+	if !slices.Equal(seq.seen(), want) {
+		t.Errorf("calls = %v, want %v — without the track and the undispatch this reservation "+
+			"holds the ceiling and the sending freeze for ever (`v7u`)", seq.seen(), want)
+	}
+	// The hash the row carries is the one the node is asked about. A track of
+	// the wrong hash would answer NotFound for every payment, which is the one
+	// way this fix could clear a marker it must not.
+	if want := []string{"\xab\xcd"}; !slices.Equal(node.trackedHashes, want) {
+		t.Errorf("tracked %q, want the reservation's own hash %q", node.trackedHashes, want)
+	}
+}
+
+// And a refusal whose hash the node DOES know about keeps its marker.
+//
+// The other half of `v7u`'s discriminator, and the half that keeps `t4t` intact.
+// ErrPaymentInFlight and ErrAlreadyPaid are refusals LND raises AFTER it has a
+// record — the payment may be settling right now — so §6's rule applies
+// unchanged and nothing may be concluded.
+func TestARefusalTheNodeHasARecordForKeepsItsMarker(t *testing.T) {
+	seq := &recorder{}
+	purse := &fakeSpender{recorder: seq}
+	node := &fakePayer{
+		recorder:      seq,
+		err:           errors.New("rpc error: code = Unknown desc = payment is in transition"),
+		trackScripted: true,
+		// A record, in a non-terminal state: the node knows this payment.
+		trackResult: lnd.PaymentResult{Status: lnrpc.Payment_IN_FLIGHT},
+	}
+
+	if _, err := payInvoice(t.Context(), payment{bolt11: "lnbcrt1", amountMsat: 31_000,
+		maxFeeMsat: 10_000, paymentHash: "abcd"}, purse, node, quietLog()); err == nil {
+		t.Fatal("a refused payment was reported as success")
+	}
+
+	if slices.Contains(seq.seen(), "undispatch") {
+		t.Error("a payment the node HAS a record of had its marker cleared; if it settles, " +
+			"the resolver reverses a reservation that was spent (§6)")
 	}
 }
 
@@ -598,6 +724,164 @@ func TestATerminallyUnresolvableRowIsNamedAtOnce(t *testing.T) {
 				t.Fatalf("%d rows named on the first pass, want 1 — this one can never be "+
 					"resolved automatically, and the ceiling is frozen until somebody closes it",
 					len(purse.named))
+			}
+		})
+	}
+}
+
+// `v7u`: the resolver states what it KNOWS about a dispatched row with no
+// record, and offers both causes rather than asserting one.
+//
+// It used to assert that the node's record "has been deleted or restored from an
+// older backup". On the reference box the record had never been created — LND
+// refused the request without initiating anything — and the operator was sent
+// hunting a pruning or backup fault that did not exist, on a node whose payment
+// history was intact back to 2024. A message that names a cause it cannot have
+// established is worse than one that names none: it is followed.
+//
+// BOTH the log line and the durable reason, because the operator reads them in
+// different places — the ERROR in the container's logs, the reason on the Wallet
+// page beside the button they have to press.
+func TestTheResolverOffersBothCausesForARecordThatIsNotThere(t *testing.T) {
+	seq := &recorder{}
+	purse := &fakeSpender{recorder: seq}
+	node := &fakePayer{recorder: seq, err: lnd.ErrPaymentNotFound}
+	pending := &fakePending{rows: []store.PendingPayment{
+		{ID: 7, PaymentHash: "abcd", Dispatched: true, DispatchedAt: aCutoff},
+	}}
+	log, buf := capturingLog()
+
+	_ = resolvePendingPayments(t.Context(), pending, purse, node, nil, aCutoff, log)
+
+	if len(purse.named) != 1 {
+		t.Fatalf("%d rows named, want 1", len(purse.named))
+	}
+	for _, where := range []struct{ what, text string }{
+		{"the log line", buf.String()},
+		{"the reason on the Wallet page", purse.named[0].reason},
+	} {
+		// The cause that was being asserted is still offered — it is a real
+		// cause, and on a shared node the likelier one.
+		if !strings.Contains(where.text, "lost") {
+			t.Errorf("%s does not offer a lost record as a cause: %q", where.what, where.text)
+		}
+		// And the one that actually happened.
+		if !strings.Contains(where.text, "refused") {
+			t.Errorf("%s does not offer that the node refused the request and never created a "+
+				"record: %q\n\nThat is what happened on the box, and asserting the other "+
+				"cause sent its operator after a fault that did not exist (`v7u`)",
+				where.what, where.text)
+		}
+		// Neither may assert one cause as settled fact.
+		if strings.Contains(where.text, "has been deleted or restored") {
+			t.Errorf("%s still asserts a cause it cannot have established: %q",
+				where.what, where.text)
+		}
+	}
+}
+
+// `v7u` go-review: the marker comes off on a context that CANNOT be cancelled.
+//
+// neverInitiated deliberately asks its question on a context.WithoutCancel,
+// because a marker left behind by a shutdown is the permanent state this bead is
+// about — and the very next thing done with the answer was taking the marker off
+// with the ORIGINAL ctx, which by then may be done. A shutdown during a payment
+// would get the right answer, fail to act on it, log an ERROR, and leave exactly
+// the dispatched-and-pending row the question was asked to prevent.
+func TestTheMarkerComesOffEvenWhenTheRequestIsAlreadyOver(t *testing.T) {
+	seq := &recorder{}
+	purse := &fakeSpender{recorder: seq}
+	node := &fakePayer{
+		recorder:      seq,
+		err:           errors.New("rpc error: code = Unknown desc = self-payments not allowed"),
+		trackScripted: true,
+		trackErr:      fmt.Errorf("%w: payment isn't initiated", lnd.ErrPaymentNotFound),
+	}
+
+	// The request is over before the wallet is asked to correct itself — a
+	// shutdown, or a client that went away.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if _, err := payInvoice(ctx, payment{bolt11: "lnbcrt1", amountMsat: 1_000,
+		maxFeeMsat: 100, paymentHash: "abcd"}, purse, node, quietLog()); err == nil {
+		t.Fatal("a refused payment was reported as success")
+	}
+
+	if !slices.Contains(seq.seen(), "undispatch") {
+		t.Fatal("the marker was never cleared at all")
+	}
+	if purse.clearCtxErr != nil {
+		t.Errorf("ClearDispatched was called with a context already done (%v); against a real "+
+			"store that write fails and the row stays dispatched+pending — named unresolvable, "+
+			"freezing sending until an operator presses a button (`v7u`)", purse.clearCtxErr)
+	}
+}
+
+// And the promotion does NOT fire when the stream ended from underneath —
+// our side giving up, or the connection dropping.
+//
+// LND validates a SendPaymentV2 request and then PERSISTS the payment before the
+// attempt runs; it does not check that the client is still there, and without
+// Cancelable it keeps paying after the client leaves. So a failure that breaks
+// the stream says nothing about how far LND got, and a record check that wins
+// the race against LND's own write gets NotFound for a payment the node goes on
+// to make.
+//
+// THE CONSEQUENCE IS THE ASSERTION. A promoted error carries lnd.ErrNotSent, and
+// the adapter turns that into the connection's budget returned and the payer
+// told "this payment did not happen" — for a payment that settles. So the error
+// must NOT carry ErrNotSent, the marker must stay, and the node is not asked at
+// all: the answer could not be trusted, so the question is not put.
+//
+// The connection-drop rows are the PM's review finding (18 Sep 2026). The first
+// cut of this test covered only the caller's own cancel and deadline, and so did
+// the code — both written from the belief that every other failure "carries the
+// server's own status". A dropped connection does not.
+func TestAStreamThatEndedFromUnderneathIsNotTreatedAsTheNodeHavingNoRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the caller's context was cancelled", context.Canceled},
+		{"the caller's deadline expired", context.DeadlineExceeded},
+		{"grpc reported the call cancelled", status.Error(codes.Canceled, "context canceled")},
+		{"grpc reported the deadline exceeded", status.Error(codes.DeadlineExceeded, "too slow")},
+		{"the connection dropped mid-request",
+			status.Error(codes.Unavailable, "error reading from server: EOF")},
+		{"the stream was reset mid-request",
+			status.Error(codes.Internal, "stream terminated by RST_STREAM with error code: INTERNAL_ERROR")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seq := &recorder{}
+			purse := &fakeSpender{recorder: seq}
+			node := &fakePayer{
+				recorder: seq,
+				err:      fmt.Errorf("sending the payment: %w", tc.err),
+				// The node would answer NotFound — because it has not written the
+				// record YET, not because it never will.
+				trackScripted: true,
+				trackErr:      fmt.Errorf("%w: payment isn't initiated", lnd.ErrPaymentNotFound),
+			}
+
+			_, err := payInvoice(t.Context(), payment{bolt11: "lnbcrt1", amountMsat: 1_000,
+				maxFeeMsat: 100, paymentHash: "abcd"}, purse, node, quietLog())
+			if err == nil {
+				t.Fatal("a send whose stream broke was reported as success")
+			}
+
+			if errors.Is(err, lnd.ErrNotSent) {
+				t.Errorf("err carries lnd.ErrNotSent: %v — the adapter returns the connection's "+
+					"budget and tells the payer the payment did not happen, for one LND may be "+
+					"paying right now", err)
+			}
+			if slices.Contains(seq.seen(), "track") {
+				t.Error("the node was asked for a record after the stream broke; its answer " +
+					"cannot tell 'never initiated' from 'not persisted yet'")
+			}
+			if slices.Contains(seq.seen(), "undispatch") {
+				t.Error("the marker was cleared for a payment that may be in flight; the " +
+					"resolver then reverses a reservation that can still settle (§6)")
 			}
 		})
 	}

@@ -3,8 +3,6 @@ package api
 import (
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -37,20 +35,13 @@ func TestEveryFlashMarkerHasAMessageAndEveryMessageAMarker(t *testing.T) {
 	marker := regexp.MustCompile(`\?flash=([a-z_-]+)`)
 	found := map[string][]string{}
 
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Clean(entry.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, match := range marker.FindAllStringSubmatch(string(src), -1) {
-			found[match[1]] = append(found[match[1]], entry.Name())
+	// The SAME file set redirect_test.go's rule reads, through the same helpers
+	// (`v7u`). The two rules check the two halves of one string — this one the
+	// marker after the `?`, that one the path before it — and a file set they
+	// disagreed about would be a marker checked by neither.
+	for _, name := range sourceFiles(t) {
+		for _, match := range marker.FindAllStringSubmatch(readSource(t, name), -1) {
+			found[match[1]] = append(found[match[1]], name)
 		}
 	}
 

@@ -45,6 +45,12 @@
   records — <code>lncli listpayments</code>, or your node's interface — and see whether it
   settled. This app is asking you to state a fact it could not establish, and what you say
   here becomes the ledger.</p>
+  <p><strong>No record at all does not settle it by itself.</strong> A hash your node has
+  never heard of means one of two things, and they need opposite answers: your node refused
+  the request without ever starting the payment — nothing left your wallet — or it made the
+  payment and its record has since been lost, to a pruning tool or a restore from an older
+  backup. Look for the payment reaching its destination rather than for the record: ask the
+  payee, or check whether what you were buying arrived.</p>
 </div>
 <table>
   <thead><tr><th>When</th><th>Amount</th><th>Payment hash</th><th>Why</th><th></th></tr></thead>

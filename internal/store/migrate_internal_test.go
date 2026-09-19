@@ -237,6 +237,20 @@ func TestTheUnresolvedPaymentFreezeUsesThePartialIndex(t *testing.T) {
 		t.Errorf("the freeze walks the table instead of the index, on every Reserve. Plan:\n%s",
 			plan)
 	}
+
+	// `v7u`'s count rides the same index, and it is the one in the family where
+	// that is least obvious: `unresolvable_reason` is not IN the index, so this
+	// plan is a SEARCH rather than the COVERING SEARCH the query above gets, and
+	// each candidate row costs a table fetch. That is the right trade — the
+	// candidate set is the pending outbound rows holding the freeze, which is a
+	// handful — but "it still uses the index" is the part worth pinning, because
+	// the alternative is walking all of history to answer a refusal message.
+	named := queryPlan(t, s,
+		`SELECT COUNT(*) FROM txns `+unresolvedPaymentsWhere+` AND unresolvable_reason IS NOT NULL`,
+		KindPaymentOut, TxnPending, 0)
+	if !strings.Contains(named, "idx_txns_pending_out") {
+		t.Errorf("the named-payment count walks the table instead of the index. Plan:\n%s", named)
+	}
 }
 
 // The constraint is SCOPED: two outbound rows may share a hash, and two inbound

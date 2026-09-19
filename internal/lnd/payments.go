@@ -34,12 +34,25 @@ const PaymentTimeout = 60 * time.Second
 // would double-spend the ceiling if the payment later settled.
 var ErrPaymentNotFound = errors.New("lnd: the node has no record of this payment")
 
-// ErrNotSent means the payment request never reached the node.
+// ErrNotSent means the node has nothing to act on: no payment was initiated.
 //
-// The two ways that happens are both BEFORE the stream carries anything: the
-// client cannot get a connection at all, or the stream cannot be established.
-// Neither leaves LND with a payment request to act on, so — unlike every other
-// send failure — the fate is KNOWN.
+// Two of the three ways that happens are visible HERE, and both are BEFORE the
+// stream carries anything: the client cannot get a connection at all, or the
+// stream cannot be established.
+//
+// THE THIRD IS NOT VISIBLE HERE AND IS RAISED BY THE CALLER (`v7u`). LND
+// validates a SendPaymentV2 request inside the handler, after grpc-go has
+// already opened the stream, so a self-payment or any other pre-flight refusal
+// comes back from consume() below looking exactly like a payment in flight. Only
+// something holding the payment hash can tell the two apart, by asking the node
+// whether it has a record — which is cmd/brollyzapper's neverInitiated, at
+// dispatch time only, and ONLY when the error is the handler's own answer rather
+// than a stream that broke from underneath (IsTransportOrCallerFailure says
+// why). This package deliberately does not do it: SendPayment is given a bolt11
+// and would have to decode it for a hash it does not have.
+//
+// Whichever way it arises, the invariant is the one below: unlike every other
+// send failure, the fate is KNOWN.
 //
 // Typed because t4t's dispatch marker turns on exactly this distinction. The
 // marker is written before the send so that its absence is safe; a send that
@@ -135,8 +148,18 @@ func (c *Client) SendPayment(ctx context.Context, bolt11 string, feeLimitMsat in
 	})
 	if err != nil {
 		// The stream could not be established, so the request message was never
-		// sent and LND has nothing to act on. Errors from consume() below are a
-		// different animal entirely: by then the payment is in flight.
+		// sent and LND has nothing to act on.
+		//
+		// WHAT THIS CANNOT SEE, stated where the old comment claimed the
+		// opposite (`v7u`): an error from consume() below is NOT necessarily a
+		// payment in flight. grpc-go opens a server stream without waiting for
+		// the handler, and LND validates the request inside it
+		// (routerrpc/router_server.go:357), so every pre-flight refusal — a
+		// self-payment, an unparseable or expired invoice, an amount below the
+		// minimum — opens the stream fine and then fails on the first Recv with
+		// nothing initiated. Believing otherwise held sending off on the
+		// reference box for 22 hours. The caller settles it by asking the node
+		// for a record of the hash; see ErrNotSent.
 		return PaymentResult{}, fmt.Errorf("%w: %w", ErrNotSent, c.observe(err))
 	}
 	return c.consume(stream)
@@ -167,6 +190,117 @@ func (c *Client) TrackPayment(ctx context.Context, paymentHash []byte) (PaymentR
 		return PaymentResult{}, c.observe(err)
 	}
 	return c.consume(stream)
+}
+
+// IsTransportOrCallerFailure reports whether a send failure came from the
+// CONNECTION or from THIS side, rather than from LND's handler answering.
+//
+// It exists for one caller and one decision (`v7u`): the dispatch-time check
+// that promotes a send failure to ErrNotSent, which is licensed to clear a
+// dispatch marker, return the connection's budget, and tell the payer the
+// payment did not happen. That licence rests on one fact — LND's handler has
+// answered THIS request with a refusal — and the error has to be evidence of it.
+//
+// A FAILURE THAT ENDS THE STREAM FROM UNDERNEATH IS NOT. LND persists a payment
+// before it attempts it, it does not check whether the client is still there
+// while it does, and without Cancelable it goes on paying after the client
+// leaves (the PM's reading of LND v0.21.2's source, 18 Sep 2026 — read, not
+// run; LND is not in this module's graph, ADR 0001). So when the connection drops
+// mid-request, a record check made a moment later can win the race against
+// LND's own write, get NotFound, and license all three of the above for a
+// payment that goes on to settle. The wallet ceiling survives it — the resolver
+// later finds the record — but the budget and the payer's answer do not.
+//
+// THE CODES are what grpc-go v1.83.2 itself produces when the stream breaks
+// rather than when the handler answers (read, not run):
+//
+//   - Canceled and DeadlineExceeded, and the bare context errors: our side
+//     giving up. Also what an RST_STREAM with CANCEL maps to.
+//   - Unavailable: a closing transport (internal/transport/http2_client.go
+//     :1061-1064) and a ConnectionError (rpc_util.go toRPCErr :1146-1147).
+//   - Internal: an RST_STREAM with PROTOCOL_ERROR, INTERNAL_ERROR,
+//     STREAM_CLOSED and most others (internal/transport/http_util.go :54-68),
+//     and an unexpected EOF (toRPCErr :1141-1142).
+//   - ResourceExhausted: an RST_STREAM with FLOW_CONTROL or ENHANCE_YOUR_CALM.
+//   - PermissionDenied: an RST_STREAM with INADEQUATE_SECURITY.
+//
+// A handler that genuinely answers with one of these is caught too, which costs
+// only the conservative arm — the pre-`v7u` behaviour for that one refusal. The
+// other direction is the one that costs money, which is why the list errs wide.
+//
+// WHAT THIS CANNOT CLOSE, stated so nobody believes it does: toRPCErr maps any
+// client-side error it does not recognise to Unknown (rpc_util.go :1156), and
+// Unknown is also what LND's handler uses for its pre-flight refusals — the
+// self-payment this bead was filed for among them. No rule over codes can tell
+// those two apart, so a transport fault that reaches that fallback is still
+// promoted. Every transport path in the table above is classified before it
+// gets there; the residual is an error grpc-go itself does not recognise.
+//
+// WHAT WOULD CHANGE IT: a grpc-go upgrade. The list is read off that version's
+// transport tables, and a new code synthesised for a broken stream would be
+// missed here silently. Re-read http_util.go's http2ErrConvTab and toRPCErr when
+// go.mod moves grpc.
+func IsTransportOrCallerFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	switch status.Code(err) {
+	case codes.Canceled, codes.DeadlineExceeded, codes.Unavailable, codes.Internal,
+		codes.ResourceExhausted, codes.PermissionDenied:
+		return true
+	default:
+		return false
+	}
+}
+
+// HasPayment reports whether the node has ANY record of a payment, without
+// waiting to find out how it went.
+//
+// THE FIRST MESSAGE ONLY, and that is the whole difference from TrackPayment
+// above (`v7u`). consume reads to a TERMINAL update, which is right when the
+// question is "what happened" and wrong when it is "does this exist": for a
+// payment genuinely in flight, consume blocks — streaming IN_FLIGHT updates —
+// until it settles or the caller's deadline expires. The dispatch-time check
+// asks the existence question on the failure path of every payment, and paying
+// a multi-second wait for the answer "yes, still going" would delay every
+// ambiguous failure's report to its client by that much.
+//
+// Existence is decided on the first Recv and cannot need more: LND answers
+// NotFound there for a hash it never initiated, and anything else it can send —
+// an IN_FLIGHT update, a terminal one — is already the node saying it has a
+// record.
+//
+// THE CONTRACT: (true, nil) means the node has a record. ErrPaymentNotFound
+// means it provably does not. Any other error means the question could not be
+// answered, which is NOT the same as "no" and must never be read as one — the
+// action that follows a "no" is clearing a dispatch marker, and clearing it for
+// a payment that is in flight is the double-spend §6 exists to prevent.
+func (c *Client) HasPayment(ctx context.Context, paymentHash []byte) (bool, error) {
+	client, err := c.router()
+	if err != nil {
+		return false, c.observe(err)
+	}
+	// Cancelled on the way out, for the reason SendPayment gives above — and
+	// here it is load-bearing rather than hygienic: this function deliberately
+	// leaves the stream unfinished on its FIRST message, so without the cancel
+	// every existence check would leak a stream for the life of the process.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := client.TrackPaymentV2(ctx, &routerrpc.TrackPaymentRequest{
+		PaymentHash: paymentHash,
+	})
+	if err != nil {
+		return false, c.observe(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		// notFound() here for the reason TrackPayment's comment gives: the
+		// server's status arrives on the Recv, never on the stub call.
+		return false, c.observe(notFound(err))
+	}
+	return true, nil
 }
 
 // consume reads a payment stream to its TERMINAL update.

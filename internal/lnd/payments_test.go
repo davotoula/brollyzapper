@@ -1,10 +1,15 @@
 package lnd_test
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
 	"github.com/davotoula/brollyzapper/internal/lnd/lndtest"
@@ -258,4 +263,159 @@ func spendClient(t *testing.T, node *lndtest.Node) *lnd.Client {
 		lnd.Options{MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+// `v7u`: HasPayment answers from the node's FIRST word and does not wait for a
+// terminal state.
+//
+// The discriminating fixture is one script read by both methods. A payment the
+// node reports as IN_FLIGHT and never resolves is:
+//
+//   - an ERROR to TrackPayment, which reads to a terminal update and reaches the
+//     end of the stream without one — correct, because its caller asked what
+//     happened.
+//   - (true, nil) to HasPayment, whose caller asked only whether a record
+//     exists, and the first update already answers that.
+//
+// Asserting the pair rather than HasPayment alone is what makes this a test of
+// the DIFFERENCE. HasPayment returning true here is uninteresting on its own;
+// that TrackPayment cannot answer the same script is what shows the new method
+// is not just the old one renamed — and on a real node that difference is the
+// caller waiting out a payment in flight on the failure path of every payment.
+func TestHasPaymentAnswersWithoutWaitingForATerminalState(t *testing.T) {
+	node := lndtest.Start(t)
+	client := spendClient(t, node)
+
+	hash := []byte{0x0f, 0xf1}
+	node.SetTrackedPayment(hash, lndtest.InFlight())
+
+	has, err := client.HasPayment(t.Context(), hash)
+	if err != nil {
+		t.Fatalf("HasPayment: %v — the node reported a record, in flight", err)
+	}
+	if !has {
+		t.Error("HasPayment says the node has no record of a payment it just reported as " +
+			"IN_FLIGHT; clearing a dispatch marker on that answer reverses a reservation " +
+			"whose payment may settle (§6)")
+	}
+
+	if _, err := client.TrackPayment(t.Context(), hash); err == nil {
+		t.Error("TrackPayment answered a stream with no terminal update; the fixture no " +
+			"longer distinguishes the two methods and this test proves nothing")
+	}
+}
+
+// And the answer the whole mechanism turns on: a hash the node never initiated.
+//
+// ErrPaymentNotFound specifically, not merely an error — the caller clears a
+// dispatch marker on this and on nothing else, so a widened match here is a
+// reservation reversed for a payment that may be in flight.
+func TestHasPaymentReportsNotFoundForAHashTheNodeNeverInitiated(t *testing.T) {
+	node := lndtest.Start(t)
+	client := spendClient(t, node)
+
+	has, err := client.HasPayment(t.Context(), []byte{0xab, 0xcd})
+
+	if has {
+		t.Error("HasPayment claims a record for a hash the node has never heard of")
+	}
+	if !errors.Is(err, lnd.ErrPaymentNotFound) {
+		t.Errorf("err = %v, want ErrPaymentNotFound — it is the ONLY answer that licenses "+
+			"clearing a dispatch marker (`v7u`, `t4t`)", err)
+	}
+}
+
+// A node that cannot be reached is "could not tell", never "no record".
+//
+// The direction that matters: false with a non-NotFound error leaves the caller
+// in the conservative arm. If a transport failure came back as a provable
+// absence, every payment made while the node was unreachable would have its
+// marker cleared and be reversed — including the ones that settled.
+func TestHasPaymentDoesNotTurnAnUnreachableNodeIntoAnAbsentRecord(t *testing.T) {
+	// The node's real credentials, pointed at a port nothing listens on — the
+	// package's existing way of spelling "unreachable" (certname_test.go). The
+	// dial fails rather than the RPC, which is the honest shape: a node that is
+	// down is not a node answering "no such payment".
+	node := lndtest.Start(t)
+	client := lnd.New("127.0.0.1:1", spendCredentials(t, node),
+		lnd.Options{MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond})
+	t.Cleanup(func() { _ = client.Close() })
+
+	has, err := client.HasPayment(t.Context(), []byte{0xab, 0xcd})
+
+	if has {
+		t.Error("HasPayment claims a record from a node that is not answering")
+	}
+	if err == nil {
+		t.Fatal("HasPayment reported success against a stopped node")
+	}
+	if errors.Is(err, lnd.ErrPaymentNotFound) {
+		t.Errorf("an unreachable node was reported as a provable absence: %v\n\nThat answer "+
+			"clears the dispatch marker, and the resolver then reverses a reservation whose "+
+			"payment may have settled (§6)", err)
+	}
+}
+
+// IsTransportOrCallerFailure, in the package that owns it.
+//
+// First raised by the `ecc:go-reviewer` pass as informational — the function
+// was then exercised only sideways, from cmd/brollyzapper through payInvoice.
+// Then THIS TABLE WAS WRONG, and it is worth keeping the record of how: it
+// pinned codes.Unavailable to false under the label "the node is unavailable",
+// reading a dropped connection as the node answering. The PM found it on review
+// (18 Sep 2026): LND persists a payment before attempting it and keeps paying
+// after the client leaves, so a stream that breaks mid-request proves nothing
+// about what LND did. A test written from the same assumption as the code it
+// tests agrees with the code; it does not check it.
+//
+// BOTH DIRECTIONS, and they cost different things. TRUE suppresses the
+// dispatch-time record check, so a wrong true is the old behaviour for that one
+// refusal — the row waits for the resolver. A wrong FALSE is a record check that
+// can race LND's own write and hand the payer's budget back for a payment that
+// settles. The transport codes are read off grpc-go v1.83.2's own tables; see the
+// function's doc for where each comes from.
+func TestIsTransportOrCallerFailureSeparatesTheWireFromTheNode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nothing went wrong", nil, false},
+
+		// Our side giving up.
+		{"the caller's context was cancelled", context.Canceled, true},
+		{"the caller's deadline expired", context.DeadlineExceeded, true},
+		{"a cancel wrapped by the payment path", fmt.Errorf("sending: %w", context.Canceled), true},
+		{"grpc reported the call cancelled", status.Error(codes.Canceled, "context canceled"), true},
+		{"grpc reported the deadline exceeded", status.Error(codes.DeadlineExceeded, "too slow"), true},
+
+		// The connection dropping. Each spelled the way grpc-go spells it.
+		{"the transport closed mid-request",
+			status.Error(codes.Unavailable, "error reading from server: EOF"), true},
+		{"the transport is closing", status.Error(codes.Unavailable, "transport is closing"), true},
+		{"the stream was reset",
+			status.Error(codes.Internal, "stream terminated by RST_STREAM with error code: INTERNAL_ERROR"), true},
+		{"an unexpected EOF on the stream", status.Error(codes.Internal, "unexpected EOF"), true},
+		{"a flow-control reset",
+			status.Error(codes.ResourceExhausted, "stream terminated by RST_STREAM with error code: FLOW_CONTROL_ERROR"), true},
+		{"a security reset",
+			status.Error(codes.PermissionDenied, "stream terminated by RST_STREAM with error code: INADEQUATE_SECURITY"), true},
+
+		// The node ANSWERING. Each of these must stay false, or the dispatch-time
+		// check is skipped for exactly the refusals `v7u` exists to classify.
+		{"the node refused a self-payment", status.Error(codes.Unknown, "self-payments not allowed"), false},
+		{"the node refused an invalid request", status.Error(codes.InvalidArgument, "invalid payment request"), false},
+		{"the node has no record", status.Error(codes.NotFound, "payment isn't initiated"), false},
+		// THE RESIDUAL, pinned so it is a decision rather than an accident: an
+		// error with no gRPC status reads as Unknown, the same code LND's handler
+		// uses for its pre-flight refusals, so no rule over codes can exclude it
+		// without excluding the self-payment too. The doc says so.
+		{"an unclassified error", errors.New("the stream broke"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lnd.IsTransportOrCallerFailure(tc.err); got != tc.want {
+				t.Errorf("IsTransportOrCallerFailure(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }

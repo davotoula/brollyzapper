@@ -36,6 +36,16 @@ type Bolt11 struct {
 	// the signature it carries proves only that the app signed it (y09).
 	DescriptionHash string
 	ExpiresAt       time.Time
+	// Destination is the node the invoice is payable to, hex.
+	//
+	// The SIXTH, and the one the comment above says a routing hint would be: it
+	// is not one. A destination is not a route — it is WHO gets paid, which is
+	// the fact §8's ladder needs to recognise the one invoice this node cannot
+	// pay, its own (`v7u`). Zapping your own note is an ordinary thing to do
+	// from a client paired to your own wallet, and before this the request was
+	// built, reserved, marked and handed to LND, which refused it in a way the
+	// app could not classify and held sending off for 22 hours.
+	Destination string
 }
 
 // Decode reads a bolt11 through the node that will pay it.
@@ -70,6 +80,7 @@ func (c *Client) Decode(ctx context.Context, bolt11 string) (Bolt11, error) {
 		AmountMsat:      req.NumMsat,
 		Description:     req.Description,
 		DescriptionHash: req.DescriptionHash,
+		Destination:     req.Destination,
 	}
 	if req.Timestamp > 0 && req.Expiry > 0 {
 		decoded.ExpiresAt = time.Unix(req.Timestamp+req.Expiry, 0).UTC()

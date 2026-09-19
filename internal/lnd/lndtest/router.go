@@ -32,10 +32,14 @@ type router struct {
 // paymentScript is what a payment will report, in order.
 type paymentScript struct {
 	updates []*lnrpc.Payment
-	// dieAfterDispatch makes SendPaymentV2 break the stream instead of reporting
-	// the terminal update, while still recording the payment so TrackPaymentV2
-	// can answer for it later. See SetPaymentDispatchedThenLost.
-	dieAfterDispatch bool
+	// abort ends the stream with an error instead of reporting the updates.
+	//
+	// ONE FIELD for both shapes, because the handler does the same thing in
+	// both: what tells a refusal from a dispatch-then-lost is whether the setter
+	// wrote a `tracked` record, which is the only thing the node afterwards
+	// behaves differently about. See SetPaymentRefused and
+	// SetPaymentDispatchedThenLost.
+	abort error
 }
 
 // InFlight is an intermediate update: real, and not an answer.
@@ -102,8 +106,49 @@ func (n *Node) SetTrackedPayment(paymentHash []byte, updates ...*lnrpc.Payment) 
 func (n *Node) SetPaymentDispatchedThenLost(bolt11, paymentHash string, outcome *lnrpc.Payment) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.payments[bolt11] = paymentScript{dieAfterDispatch: true}
+	n.payments[bolt11] = paymentScript{abort: status.Error(codes.Unavailable, "transport is closing")}
 	n.tracked[paymentHash] = paymentScript{updates: []*lnrpc.Payment{outcome}}
+}
+
+// SetPaymentRefused scripts a payment LND refuses from INSIDE the handler,
+// having initiated nothing — the shape `v7u` was filed for.
+//
+// Not the same animal as a failed payment, and not the same as a broken stream.
+// SendPaymentV2 is server-streaming, so grpc-go opens the stream before the
+// handler runs and LND validates the request afterwards
+// (routerrpc/router_server.go:357, extractIntentFromSendRequest): a self-payment,
+// an unparseable or expired invoice, a zero or sub-minimum amount all surface on
+// the caller's first Recv with NOTHING in flight. codes.Unknown, because that is
+// what the reference box measured — "self-payments not allowed" is
+// router_backend.go:1303 and carries no better code.
+//
+// It deliberately records nothing in tracked, so TrackPaymentV2 answers NotFound
+// for the hash exactly as the real node did. That pairing is the whole test: the
+// refusal and the absence of a record arrive milliseconds apart, which is what
+// makes "nothing was initiated" provable at dispatch time rather than inferred
+// five minutes later (`t4t`).
+func (n *Node) SetPaymentRefused(bolt11, message string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.payments[bolt11] = paymentScript{abort: status.Error(codes.Unknown, message)}
+}
+
+// SetPaymentDroppedBeforeRecorded scripts the race `v7u`'s review found: the
+// stream breaks mid-request, and the node has NOT YET written its record.
+//
+// The other half of SetPaymentRefused, and the fixtures differ in exactly the
+// way the code must tell apart. Both end the stream with an error and both leave
+// TrackPaymentV2 answering NotFound — but a refusal is the node's handler
+// answering, and this is the connection dropping while LND, which persists
+// before it attempts and does not stop when the client leaves, may be about to
+// write the record and pay. A NotFound in this window is a race, not a proof.
+//
+// code is the gRPC code the broken stream surfaces as — Unavailable for a
+// closing transport, Internal for a reset stream — so a test can pin each.
+func (n *Node) SetPaymentDroppedBeforeRecorded(bolt11 string, code codes.Code, message string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.payments[bolt11] = paymentScript{abort: status.Error(code, message)}
 }
 
 // SendPaymentRequests is every SendPaymentV2 call the node received, so a test
@@ -137,9 +182,11 @@ func (r *router) SendPaymentV2(in *routerrpc.SendPaymentRequest,
 		// bare Unknown, which is the code the o34.10 story is about.
 		return status.Error(codes.Unknown, "invalid bolt11: checksum failed")
 	}
-	if script.dieAfterDispatch {
-		// The node has it; the caller will never hear how it went.
-		return status.Error(codes.Unavailable, "transport is closing")
+	if script.abort != nil {
+		// The stream is already open, so this reaches the caller on its first
+		// Recv. Whether the node kept a record is scripted separately, and it is
+		// what the caller can tell the two shapes apart by.
+		return script.abort
 	}
 	return script.send(stream)
 }

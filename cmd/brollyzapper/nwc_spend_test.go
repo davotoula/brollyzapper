@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/davotoula/brollyzapper/internal/lnd"
@@ -151,6 +152,8 @@ func (seamPurse) Shortfall(context.Context) (wallet.Deficit, bool, error) {
 
 func (seamPurse) UnresolvedPayments(context.Context) (int, error) { return 0, nil }
 
+func (seamPurse) NamedUnresolvedPayments(context.Context) (int, error) { return 0, nil }
+
 // The seam d24.6 is about: the ladder's step 2 and §11's Tier-2 report are the
 // SAME policy, and this is where the two meet.
 //
@@ -261,5 +264,62 @@ func TestTheLadderReadsTheGuardEveryTime(t *testing.T) {
 	if asked != 3 {
 		t.Errorf("the guard was asked %d times for 3 payments; a cached answer is a window in "+
 			"which a revoked credential still pays", asked)
+	}
+}
+
+// `v7u` go-review: the adapter translates a payment the node never took on into
+// §8's vocabulary, so the ladder can act on the fact fix A established.
+//
+// THE SEAM, and it is where the gap was. Fix A proves the fate is KNOWN inside
+// payInvoice — it asks the node for a record and clears the dispatch marker on a
+// provable absence — and this switch is the only thing that can carry that out
+// to §8. Without this arm the error fell through to "the payment was dispatched
+// and its outcome is not yet known", which keeps the connection's budget for a
+// payment that never happened and tells the payer the opposite of the truth.
+//
+// internal/nwc cannot match lnd.ErrNotSent itself: §3 forbids it importing
+// internal/lnd. This file is where both vocabularies are in scope, which is
+// exactly why the translation has to be asserted here rather than at either end.
+func TestTheAdapterTellsTheLadderTheNodeTookNothingOn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sendErr error
+	}{{
+		name: "the request never reached the node",
+		// internal/lnd's own two: no connection, or no stream.
+		sendErr: fmt.Errorf("%w: no connection", lnd.ErrNotSent),
+	}, {
+		name: "the node refused it without initiating anything",
+		// `v7u`'s third way in, promoted by payInvoice after the node said it
+		// has no record of the hash.
+		sendErr: fmt.Errorf("%w: rpc error: code = Unknown desc = self-payments not allowed",
+			lnd.ErrNotSent),
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			seq := &recorder{}
+			purse := &fakeSpender{recorder: seq}
+			node := &fakePayer{recorder: seq, err: tc.sendErr}
+			spend := nwcSpend{
+				purse: seamPurse{fakeSpender: purse},
+				node:  seamNode{fakePayer: node},
+				log:   quietLog(),
+			}
+
+			_, err := spend.Pay(t.Context(), nwc.PayRequest{
+				Bolt11: "lnbcrt1", AmountMsat: 1_000, MaxFeeMsat: 100, PaymentHash: "abcd",
+			})
+
+			if err == nil {
+				t.Fatal("a payment the node took nothing on was reported as a success")
+			}
+			if !errors.Is(err, nwc.ErrNotDispatched) {
+				t.Errorf("err does not carry ErrNotDispatched: %v — the ladder keeps the "+
+					"connection's budget for a payment that never happened (§8)", err)
+			}
+			if !errors.Is(err, nwc.ErrNothingSent) {
+				t.Errorf("err does not carry ErrNothingSent: %v — the ladder answers the "+
+					"generic \"spending is held\", which is false here", err)
+			}
+		})
 	}
 }
