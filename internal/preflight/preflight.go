@@ -1287,6 +1287,12 @@ func whichHold(ctx context.Context, in Inputs) string {
 		// Named wins, however many unnamed rows sit beside it: it is the only one
 		// with an action behind it (`v7u`). The WALLET page, because that is where
 		// the button is; this page is where the operator reads about it.
+		//
+		// "%d OF THEM" is true across two reads only because named ⊆ total holds
+		// between them: UnresolvedCutoff never moves backwards, and only the
+		// resolver names a row, always one PendingPaymentsBefore already selected
+		// at an earlier cutoff. A second writer of unresolvable_reason would break
+		// that, and this sentence with it (`j9d` review).
 		return fmt.Sprintf("The resolver has given up on %d of them, and those will not clear "+
 			"by themselves: settle them on %s, where each says why (§6).", named, walletTable)
 	}
