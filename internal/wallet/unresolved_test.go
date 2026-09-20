@@ -35,11 +35,19 @@ func TestReserveIsHeldWhileAPreviousRunsPaymentIsUnresolved(t *testing.T) {
 		t.Fatalf("Reserve = %v, want ErrPaymentsUnresolved — the ceiling is holding a "+
 			"reservation whose fate is unknown (§6)", err)
 	}
-	// The message has to say what clears it: a freeze an operator cannot act on
-	// and cannot wait out is an outage with no instructions.
-	if !strings.Contains(err.Error(), "clears itself") {
-		t.Errorf("error = %q, want it to say the hold lifts by itself once the node answers",
-			err.Error())
+	// The message has to route the operator somewhere: a freeze with no
+	// instructions is an outage. What it must NOT do is say WHICH hold this is
+	// (`j9d`). Reserve knows only that one exists — HasUnresolvedPaymentsBefore
+	// is one bit — and it used to guess for both: "this usually clears itself …
+	// a payment the log names as dispatched … is the exception". The Security
+	// row reads the named count and can say; this sends the reader there.
+	if !strings.Contains(err.Error(), "Security page") {
+		t.Errorf("error = %q, want it to send the operator to the row that knows which hold "+
+			"this is", err.Error())
+	}
+	if strings.Contains(err.Error(), "usually") {
+		t.Errorf("error = %q hedges about which hold it is, from a bit that cannot tell; the "+
+			"Security row is what settles it", err.Error())
 	}
 	// And it is NOT the reconciliation freeze. They are siblings, not one
 	// wrapping the other, because their remedies differ: a shortfall may need an
