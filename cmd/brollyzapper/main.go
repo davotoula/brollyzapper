@@ -343,7 +343,7 @@ func serve(ctx context.Context, cfg *config.Server, env config.Lookup, log *slog
 	// is joined before the client it calls through is closed.
 	defer serverCredential.Close()
 	sources := newPreflightSources(cfg, node, receiveCredentials, db, reconciler, purse.UnresolvedPayments,
-		serverIP, serverCredential,
+		purse.NamedUnresolvedPayments, serverIP, serverCredential,
 		func() bool { return handler != nil && handler.ProxiesDeclared() },
 		func(what string) {
 			if err := auditor.Record(ctx, slog.LevelWarn, "preflight repaired a permission",
@@ -525,10 +525,14 @@ type preflightSources struct {
 	db                 *store.Store
 	reconciler         *recon.Reconciler
 	unresolvedPayments func(context.Context) (int, error)
-	serverIP           netip.Addr
-	serverCredential   *preflight.CredentialProbe
-	proxiesDeclared    func() bool
-	repair             func(what string)
+	// namedUnresolved is the subset of unresolvedPayments the resolver has given
+	// up on (`j9d`): the wallet method §8's ladder reads, so the Security page
+	// and the NWC refusal classify one hold from one count.
+	namedUnresolved  func(context.Context) (int, error)
+	serverIP         netip.Addr
+	serverCredential *preflight.CredentialProbe
+	proxiesDeclared  func() bool
+	repair           func(what string)
 }
 
 // newPreflightSources takes every source POSITIONALLY, so a serve() that stops
@@ -536,10 +540,11 @@ type preflightSources struct {
 // on every install (as0.11) — a struct literal would take the omission silently.
 func newPreflightSources(cfg *config.Server, node *lnd.Client, receiveCredentials lnd.CredentialSource,
 	db *store.Store, reconciler *recon.Reconciler, unresolvedPayments func(context.Context) (int, error),
-	serverIP netip.Addr, serverCredential *preflight.CredentialProbe, proxiesDeclared func() bool,
+	namedUnresolved func(context.Context) (int, error), serverIP netip.Addr, serverCredential *preflight.CredentialProbe, proxiesDeclared func() bool,
 	repair func(what string)) preflightSources {
 	return preflightSources{cfg: cfg, node: node, receiveCredentials: receiveCredentials, db: db,
-		reconciler: reconciler, unresolvedPayments: unresolvedPayments, serverIP: serverIP,
+		reconciler: reconciler, unresolvedPayments: unresolvedPayments,
+		namedUnresolved: namedUnresolved, serverIP: serverIP,
 		serverCredential: serverCredential, proxiesDeclared: proxiesDeclared, repair: repair}
 }
 
@@ -577,6 +582,9 @@ func (p preflightSources) inputs(brokerStatus func(context.Context) (lnd.BrokerS
 		// owns the cutoff, so the dashboard and the freeze cannot disagree about
 		// which payments count.
 		UnresolvedPayments: p.unresolvedPayments,
+		// Which of them only the operator can settle (`j9d`): the same wallet
+		// method the NWC refusal decides on, so the two cannot disagree.
+		NamedUnresolvedPayments: p.namedUnresolved,
 		// §12's burst signal, counted in the trail the guard already relays into
 		// (tna.2). No second store: the guard.reject rows ARE the record, and a
 		// counter beside them would be two statements of one fact.

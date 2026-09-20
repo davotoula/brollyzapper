@@ -198,7 +198,9 @@ func (w *localSpender) UnresolvedPayments(ctx context.Context) (int, error) {
 // than being read from the store: the freeze is a wallet state. The ladder asks
 // it to tell a paired client the truth about WHY sending is held — a hold that
 // clears itself when the resolver next runs, or one that is waiting for a human
-// on the Wallet page, which is a different sentence and a different action.
+// on the Wallet page, which is a different sentence and a different action. The
+// Security page's row asks it too (`j9d`), so the two cannot classify one hold
+// differently; a seam test in cmd/brollyzapper holds them to that.
 func (w *localSpender) NamedUnresolvedPayments(ctx context.Context) (int, error) {
 	return w.store.CountNamedUnresolvedPaymentsBefore(ctx, w.UnresolvedCutoff())
 }
@@ -256,10 +258,19 @@ func (w *localSpender) Reserve(ctx context.Context, req Reservation) (Reservatio
 	// unresolved by definition, and counting it would make every payment freeze
 	// against itself. See store.PendingPaymentsBefore and UnresolvedCutoff.
 	//
-	// It clears itself. The recon loop re-runs resolution on every tick and on
-	// demand, so a node that was down at boot lifts this within one cycle of
-	// coming back — no operator action, no restart (§5's rule for the other
-	// freeze, and the same one here).
+	// It USUALLY clears itself. The recon loop re-runs resolution on every tick
+	// and on demand, so a node that was down at boot lifts this within one cycle
+	// of coming back — no operator action, no restart (§5's rule for the other
+	// freeze, and the same one here). A row the resolver has NAMED is the
+	// exception and waits for the operator on the Wallet page (`669`, `v7u`).
+	//
+	// WHICH ONE THIS IS, THIS ARM CANNOT SAY. HasUnresolvedPaymentsBefore is one
+	// bit, deliberately — it is asked on every Reserve, and EXISTS stops at the
+	// first row. So the message routes to the surface that reads the named count
+	// instead of guessing (`j9d`); it used to guess both ways in one sentence.
+	// Reserve reading the named count itself would put a second query on the
+	// hot path to improve a message nobody sees in the normal case: §8's ladder
+	// asks Held first, and this arm is reached only in the race behind it.
 	//
 	// BOTH CLASSES ARE COVERED SINCE `l3l`. A payment THIS process dispatched
 	// whose send errored used to be excluded by a start-based cutoff, so it
@@ -271,9 +282,9 @@ func (w *localSpender) Reserve(ctx context.Context, req Reservation) (Reservatio
 	if held, err := w.store.HasUnresolvedPaymentsBefore(ctx, w.UnresolvedCutoff()); err != nil {
 		return 0, err
 	} else if held {
-		return 0, fmt.Errorf("%w; they are being resolved against the node, and this usually "+
-			"clears itself once it answers — a payment the log names as dispatched with no "+
-			"record at the node is the exception, and does not", ErrPaymentsUnresolved)
+		return 0, fmt.Errorf("%w; they are being resolved against the node, and the Security "+
+			"page's unresolved-payments row says whether this one clears itself or is "+
+			"waiting for you on the Wallet page", ErrPaymentsUnresolved)
 	}
 	id, err := w.store.ReserveSpend(ctx, store.SpendReservation{
 		AmountMsat: amountMsat, MaxFeeMsat: maxFeeMsat, PaymentHash: paymentHash,

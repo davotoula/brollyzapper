@@ -24,7 +24,8 @@ import (
 // it runs.
 func TestProductionWiresEveryPreflightInput(t *testing.T) {
 	sources := newPreflightSources(&config.Server{DataDir: "/data"}, nil, nil, nil, nil,
-		func(context.Context) (int, error) { return 0, nil }, netip.MustParseAddr("10.21.0.17"), nil,
+		func(context.Context) (int, error) { return 0, nil }, func(context.Context) (int, error) { return 0, nil },
+		netip.MustParseAddr("10.21.0.17"), nil,
 		func() bool { return false }, func(string) {})
 	brokerStatus := func(context.Context) (lnd.BrokerStatus, error) { return lnd.BrokerStatus{}, nil }
 

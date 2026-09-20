@@ -18,8 +18,10 @@ const SettingDeficitState = "deficit_state"
 // A SIBLING of ErrSpendingFrozen, not a wrap of it, and the reason is what an
 // operator does about it. A reconciliation shortfall says the wallet authorises
 // more than the node can send and may need an adjustment; this says only that
-// we have not finished asking, and it clears itself the moment the node answers
-// — no operator action at all. Wrapping would make errors.Is(err,
+// we have not finished asking, and it usually clears itself the moment the node
+// answers — unless the resolver has NAMED the row, which waits for its operator
+// on the Wallet page (`669`, `v7u`). Neither needs a reconciliation adjustment,
+// which is what this sibling is about. Wrapping would make errors.Is(err,
 // ErrSpendingFrozen) true for a state that has nothing to do with
 // reconciliation, and §11's Tier-2 row and the Node page would report a
 // shortfall where there is none.

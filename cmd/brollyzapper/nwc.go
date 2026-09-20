@@ -219,7 +219,8 @@ func (n nwcSpend) SendingBlocked(ctx context.Context) []string {
 // BOTH freezes, because both mean the same thing to a client: spending is held
 // for reasons that are not about its quota. The message is what distinguishes
 // them, since they need different things from the operator — a reconciliation
-// shortfall wants looking at, an unresolved payment clears itself.
+// shortfall wants looking at, an unresolved payment clears itself unless the
+// resolver has named it, and then it waits for them on the Wallet page (`v7u`).
 //
 // NO QUANTITIES, and that is `0vk.14` (§8 ruling 3: no internals). The shortfall
 // arm used to format `deficit.ShortfallMsat` verbatim, so a paired client that

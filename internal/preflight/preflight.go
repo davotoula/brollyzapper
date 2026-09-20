@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/davotoula/brollyzapper/internal/config"
@@ -407,10 +408,18 @@ type Inputs struct {
 	//
 	// A SEPARATE input from Shortfall, and its own row below, for the reason
 	// the two errors are siblings: the remedies differ. A shortfall may need an
-	// operator's adjustment; this one needs nobody and clears itself when the
-	// node answers. Folding it into the shortfall row would tell the operator
-	// to go and correct a deficit that does not exist.
+	// operator's adjustment; this one usually needs nobody and clears itself
+	// when the node answers. Folding it into the shortfall row would tell the
+	// operator to go and correct a deficit that does not exist.
 	UnresolvedPayments func(ctx context.Context) (int, error)
+	// NamedUnresolvedPayments is the subset of those the resolver has NAMED
+	// (`669`) — the rows that will never clear themselves and wait for the
+	// operator on the Wallet page (`j9d`).
+	//
+	// The same count the NWC refusal decides on (`v7u`), read through the same
+	// wallet method, so the Security page and the paired client cannot put one
+	// hold in different classes. Read only when UnresolvedPayments is not zero.
+	NamedUnresolvedPayments func(ctx context.Context) (int, error)
 	// Repair is told what was silently fixed, so the caller can log it at WARN
 	// with an audit attribute (§11, §12).
 	Repair func(what string)
@@ -1214,14 +1223,18 @@ func clock(at time.Time) string { return at.UTC().Format("15:04:05 UTC") }
 // an operator whose payments are being turned down with no indication anywhere
 // is exactly that.
 //
-// The detail says what clears it, because nothing here is for the operator to
-// do — a degraded row that implies action where none is possible sends them
-// looking for a setting that does not exist.
+// The detail says WHICH hold it is, because the two need opposite things from
+// the operator (`j9d`). A row the resolver has not named clears itself, and a
+// degraded row that implies action where none is possible sends them looking
+// for a setting that does not exist. A NAMED row never clears itself, and a row
+// that tells them to wait is how a payer waited 22 hours (`v7u`). It used to
+// hedge between the two and leave the operator to work out from the log which
+// case they were in.
 func unresolvedPaymentsCheck(ctx context.Context, in Inputs) Check {
 	c := Check{
 		ID:     CheckUnresolvedSpend,
 		Title:  "No payments are waiting to be resolved",
-		Threat: "A crash mid-payment — §6 forbids reversing a reservation whose fate is unknown, so the ceiling holds it until the node says what happened.",
+		Threat: "A crash mid-payment — §6 forbids reversing a reservation whose fate is unknown, so the ceiling holds it until the node says what happened, or you do.",
 		Blocks: BlocksSending,
 	}
 	if in.UnresolvedPayments == nil {
@@ -1237,17 +1250,54 @@ func unresolvedPaymentsCheck(ctx context.Context, in Inputs) Check {
 			"confirmed: " + err.Error()
 		return c
 	}
-	if count > 0 {
-		c.State = Fail
-		c.Detail = fmt.Sprintf("%d payment(s) from a previous run have not been resolved against "+
-			"the node yet, so spending is held. Usually nothing to do: this clears itself as "+
-			"soon as the node answers, and reconciliation keeps asking. The exception is a "+
-			"payment the log names as DISPATCHED with no record at the node — that one does "+
-			"not clear itself and needs you (§6)", count)
+	if count == 0 {
+		c.State = Pass
 		return c
 	}
-	c.State = Pass
+	c.State = Fail
+	c.Detail = fmt.Sprintf("%d payment(s) from a previous run have not been resolved against the "+
+		"node yet, so spending is held. ", count) + whichHold(ctx, in)
 	return c
+}
+
+// walletTable is where a named row is settled: the Wallet page's heading, as
+// internal/web/templates/wallet.html spells it. Change both together.
+const walletTable = `the Wallet page, under "Payments only you can settle"`
+
+// whichHold is the unresolved row's second sentence: which of the two holds this
+// is (`j9d`), from the named count, when the total is already known to be held.
+func whichHold(ctx context.Context, in Inputs) string {
+	// UNKNOWN IS NOT NONE, in either of its forms. Reading a failed or unwired
+	// named count as zero would say "clears itself" about a row that never will,
+	// so the fallback is the sentence true in both cases: the Wallet page's table
+	// is what settles it.
+	unknown := func(why string) string {
+		return "Could not tell whether any of them needs you (" + strings.TrimSuffix(why, ".") +
+			"). Any listed on " + walletTable + " wait for you there; the rest are cleared " +
+			"when the node answers."
+	}
+	if in.NamedUnresolvedPayments == nil {
+		return unknown(unwired)
+	}
+	named, err := in.NamedUnresolvedPayments(ctx)
+	if err != nil {
+		return unknown(err.Error())
+	}
+	if named > 0 {
+		// Named wins, however many unnamed rows sit beside it: it is the only one
+		// with an action behind it (`v7u`). The WALLET page, because that is where
+		// the button is; this page is where the operator reads about it.
+		//
+		// "%d OF THEM" is true across two reads only because named ⊆ total holds
+		// between them: UnresolvedCutoff never moves backwards, and only the
+		// resolver names a row, always one PendingPaymentsBefore already selected
+		// at an earlier cutoff. A second writer of unresolvable_reason would break
+		// that, and this sentence with it (`j9d` review).
+		return fmt.Sprintf("The resolver has given up on %d of them, and those will not clear "+
+			"by themselves: settle them on %s, where each says why (§6).", named, walletTable)
+	}
+	return "Nothing to do: this clears itself as soon as the node answers, and reconciliation " +
+		"keeps asking. If the resolver gives up on one, this row will say so."
 }
 
 // dataDirCheck closes the hole rather than only reporting it. §11: chmod it,
