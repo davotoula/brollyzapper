@@ -32,8 +32,14 @@ go 1.27.0
 // Read that way for 1.27 (0vk.35): golang:1.27-alpine@sha256:26402d86… ships
 // go1.27.1 on both linux/amd64 and linux/arm64, so this line and the two FROM
 // digests moved in one change. BrollyZap-0vk.39 is the bead to make it
-// mechanical.
-toolchain go1.27.1
+// mechanical — `make toolchain-floor` now asserts the pairing from the registry.
+//
+// Moved again 14 Oct 2026 (BrollyZap-yxc): golang:1.27-alpine@sha256:f92b6ef8…
+// ships go1.27.2 on both platforms (read with the command above), and 1.27.2
+// carries the fixes for twelve standard-library advisories govulncheck reported
+// reachable at 1.27.1 — html/template, the HTTP/1 and HTTP/2 server, MIME
+// header parsing, crypto/tls. The floor and the two digests moved together.
+toolchain go1.27.2
 
 require (
 	github.com/coder/websocket v1.8.15
@@ -76,7 +82,7 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.15.0 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
