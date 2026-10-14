@@ -7,10 +7,13 @@ BUF_VERSION               ?= v1.72.0
 PROTOC_GEN_GO_VERSION     ?= v1.36.12
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
 GOVULNCHECK_VERSION       ?= v1.7.0
-# honnef.co/go/tools v0.8.1 is staticcheck release 2026.2.1. Bump it when a Go
+# honnef.co/go/tools v0.8.2 is staticcheck release 2026.2.2. Bump it when a Go
 # release lands that this version does not understand, or by hand to pick up
-# new checks — and fix what the new checks find in the same branch.
-STATICCHECK_VERSION       ?= v0.8.1
+# new checks — and fix what the new checks find in the same branch. The first
+# case has happened once: v0.8.1 could not read go1.27.2's export data
+# ("version 5 is greater than maximum supported version 4"), so the pin
+# moved with the toolchain floor (BrollyZap-yxc, 14 Oct 2026).
+STATICCHECK_VERSION       ?= v0.8.2
 # How long the gate fuzzes. Short on purpose: this runs on every push, and the
 # job of a gate-length fuzz run is to re-exercise the corpus and catch a crasher
 # that a change just made reachable — not to search. Raise it by hand
