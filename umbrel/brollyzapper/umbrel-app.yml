@@ -2,7 +2,7 @@ manifestVersion: 1
 id: brollyzapper
 category: bitcoin
 name: BrollyZapper
-version: "0.1.22"
+version: "0.1.23"
 tagline: Receive Nostr zaps and connect wallets to your own Lightning node
 description: >-
   BrollyZapper adds Nostr zap receiving (NIP-57) and Nostr Wallet Connect
@@ -40,11 +40,16 @@ description: >-
 # this stays empty — a lint that has to be deleted the week after it lands is
 # worse than the comment you are reading.
 releaseNotes: >-
-  A paired wallet can no longer flood your node: each connection is rate-limited, and a burst is
-  refused with the error the protocol defines. The Security page now says as of when each verdict
-  was true, and a check that could not run reads "not checked" instead of FAIL — it never blocks
-  sending and never reaches the banner. The receive credential gets the same four checks the
-  spend one had. There is a Sign out button. Nothing to do on upgrade.
+  Zapping your own note no longer switches sending off: the app refuses an invoice addressed to
+  its own node and tells the wallet why, and a payment the node rejected without starting is
+  recognised as never sent, so it no longer holds part of the spending ceiling until you act. The
+  Security page now says which kind of payment hold is stopping sending — one that clears itself,
+  or one only you can settle on the Wallet page — and the Wallet page's "It failed" button no
+  longer lands on "page not found". A wrong admin macaroon mounted into the guard is a diagnosis
+  on the Security page rather than a crash loop, and the guard and the server ask your node which
+  stage it is in before treating a refusal as a macaroon rotation. Built with Go 1.27.2, which
+  carries the fixes for twelve standard-library security advisories reachable from this app.
+  Nothing to do on upgrade.
 
 developer: davotoula
 website: https://github.com/davotoula/brollyzapper

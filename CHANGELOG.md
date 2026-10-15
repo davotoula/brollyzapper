@@ -2,6 +2,103 @@
 
 This file starts at 0.1.13; this repository's history begins at 0.1.16.
 
+## 0.1.23 — 2026-10-15
+
+The rotation-and-refusal release. Twelve pull requests since 0.1.22, six of them user-visible, in
+three threads. The first is what the app does when the node stops accepting a credential: the
+regtest proof written for the first of them showed that the guard's rotation recovery — §6's
+unattended repair, in the design since August — had never been reachable on a real box, because
+LND answers a rejected macaroon with a gRPC code the guard was not listening for. The second is
+what the app does when the node refuses a payment without starting it: on 17 Sep a zap to the
+operator's own note, from a wallet paired to his own node, held sending off for 22 hours on the
+reference box, and the messages that should have led him to the remedy said the opposite. The
+third is the toolchain: Go 1.27.2 shipped between the second release candidate and its trip, and
+that candidate's images carried twelve reachable advisories, so a third one is what went to the
+box. Tripped
+on the reference box as `0.1.23-rc3` on 14 Oct: an in-place update served from the box's own
+store, down for **18 s**; both deployed binaries read `go1.27.2`; a Lightning app restart during
+which the server observed four refusals and never called them a rotation; the self-zap repeated on
+the fixed build and refused in one sentence, with the next payment settling; every operator remedy
+clicked once; ten idle minutes with nothing above INFO.
+
+### Changed
+
+- **A wrong `admin.macaroon` mounted into the guard is a diagnosis, not a crash loop.** The guard
+  records its rotation exit — when, and a hash of the file it exited over — and does not exit a
+  second time over the same bytes. It stays up, the Security page gains the row *Your node
+  accepts the admin macaroon mounted into the guard*, and the Node page says why the guard cannot
+  reach the node: mount the node's current admin macaroon, then restart the guard. Different
+  bytes, or any call the node accepts, clear the memory. Re-link is not blocked by the row; a
+  click costs a refused call and creates no key.
+- **The guard's rotation detection now matches what LND actually answers.** LND refuses a
+  macaroon it will not accept with gRPC code `Unknown` — the same code it gives a node that is
+  still starting or whose wallet is locked. So the guard first asks the node's macaroon-free
+  State service which stage it is in, counts nothing unless the node reports itself active, and
+  only then probes with a call whose handler cannot fail. A locked wallet, a starting node or a
+  chain backend that is down are never read as a rotation. Before this, the exit that repairs a
+  rotation could not fire on a real node at all.
+- **The Node page names the node's stage.** *LND reachable from the guard — no — the node's
+  wallet is locked* (or *is still starting*, or *has no wallet yet*), from the node's own answer.
+  While the guard is holding its exit over a wrong file and the node is not accepting calls, the
+  Security row reads *not checked* and says which, rather than claiming a rejection it cannot
+  currently observe.
+- **"Re-link needed" now fires on a real rotation.** The server's operator-facing state keyed on
+  the same narrow code and never fired either; it recovered — the re-bake was already broad — but
+  the page said *connecting* and the log said *re-bake in case the credential is stale* for as
+  long as the repair took. It now asks the node's stage the same way, and records re-link only on
+  the **second** refusal in a row from a node that reports itself active: LND has no stopping
+  stage and closes its macaroon store before its gRPC server, so a single refusal is also what a
+  Lightning app restart looks like. The confirming attempt waits one second, not the grown
+  backoff, so a rotation is announced about a second later than it is observed.
+- **The Security page says which kind of payment hold is stopping sending**: one that clears
+  itself when the node answers, or one only you can settle on the Wallet page, instead of leaving
+  you to work that out from the log.
+- **Built with Go 1.27.2**, which carries the fixes for twelve standard-library advisories
+  govulncheck reported reachable from the server and the guard at 1.27.1 — `html/template`, the
+  HTTP/1 and HTTP/2 server and client, MIME header parsing, TLS. `golang.org/x/net` moves to
+  0.60.0 for the five that live in its HTTP/2 copy too. The toolchain floor and the base-image
+  digests moved together, as the gate requires, and staticcheck to 2026.2.2, the first release
+  that reads the new Go's export data.
+- Dependency bumps proposed by Dependabot and gated before merge: `google.golang.org/grpc`
+  1.84.0 (its transport error tables re-read against the payment path's list — unchanged),
+  `modernc.org/sqlite` 1.60.1, `golang.org/x/crypto` 0.58.0, `golang.org/x/mod` 0.42.0; the
+  golang and alpine base images refreshed by digest; the CI actions to their current patch
+  releases.
+
+### Fixed
+
+- **Zapping your own note no longer disables sending.** The app now refuses to pay an invoice
+  addressed to its own node, and tells the client why. A payment the node rejects without ever
+  starting it is recognised as never sent, so it no longer holds the spending ceiling
+  indefinitely — the reservation is cleared by the next reconciliation pass instead of waiting for
+  the operator, and the paying app gets its budget back and an honest answer rather than "this may
+  still be in flight". The Wallet page's *It failed* button no longer lands on a "page not found",
+  and the messages about a held payment now say whether it clears itself and where to act on it if
+  it does not.
+- `rotation.sh` had passed since August for the wrong reason: on macOS the deleted host file
+  reads as absent inside the container, so the guard was rejecting its own credential read and
+  LND was never asked. The script says so now, and a new `wrongmount.sh` proves the readable-
+  stale-bytes case, which is what a real box has.
+
+### Accepted, written into the design
+
+- Two refusals LND makes after its macaroon check read as a credential rejection and are
+  indistinguishable from one on the wire: a stalled or missing read-only middleware, and an
+  invoice the node cannot convert before it sends any. Each can cost the guard one exit and a
+  hold, and the server a "re-link" it does not need; both are bounded, both clear on the first
+  accepted call, and telling them apart would need matching LND's error messages, which the
+  design refuses.
+- A two-step rotation — the node replacing `admin.macaroon` with a new file after the guard's
+  restart has re-resolved the old one — leaves the guard held until an operator restarts it.
+- A payment whose stream ended from underneath — the caller's cancel or deadline, or the
+  connection dropping — is not asked about at the node, because LND persists a payment before
+  attempting it and does not stop when the client leaves; those keep the conservative "outcome
+  unknown" path. An error the transport does not recognise surfaces with the same code LND uses
+  for its refusals, and no rule over codes can tell those apart; the tables this rests on are
+  re-read whenever `go.mod` moves grpc.
+
+Nothing to do on upgrade. No migration; schema stays 15. No new environment line.
+
 ## 0.1.22 — 2026-09-16
 
 The safety-and-observability release. A paired wallet can no longer flood the node with NWC
