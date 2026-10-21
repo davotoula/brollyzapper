@@ -41,11 +41,11 @@ go 1.27.0
 // header parsing, crypto/tls. The floor and the two digests moved together.
 //
 // Moved again 21 Oct 2026 (BrollyZap-bg0): golang:1.27-alpine@sha256:f2c872bc…
-// ships go1.27.3 on both platforms (GOLANG_VERSION read from the image config,
-// the way `make toolchain-floor` reads it), and 1.27.3 carries the fix for
+// ships go1.27.3 on both platforms (GOLANG_VERSION in the image config, as
+// `make toolchain-floor` reads it), and 1.27.3 carries the fix for
 // GO-2026-6809 — a crypto/x509 denylist of compromised intermediate
 // certificates, reachable from every outbound TLS the server makes under
-// system roots. Floor and digests moved together; nothing else moved.
+// system roots. The floor and the two digests moved together.
 toolchain go1.27.3
 
 require (
