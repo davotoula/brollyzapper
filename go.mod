@@ -39,7 +39,15 @@ go 1.27.0
 // carries the fixes for twelve standard-library advisories govulncheck reported
 // reachable at 1.27.1 — html/template, the HTTP/1 and HTTP/2 server, MIME
 // header parsing, crypto/tls. The floor and the two digests moved together.
-toolchain go1.27.2
+//
+// Moved again 21 Oct 2026 (BrollyZap-bg0): golang:1.27-alpine@sha256:f2c872bc…
+// ships go1.27.3 on both platforms (GOLANG_VERSION in the image config, read
+// for linux/amd64 and linux/arm64; `make toolchain-floor` asserts the amd64
+// half alone, by design), and 1.27.3 carries the fix for
+// GO-2026-6809 — a crypto/x509 denylist of compromised intermediate
+// certificates, reachable from every outbound TLS the server makes under
+// system roots. The floor and the two digests moved together.
+toolchain go1.27.3
 
 require (
 	github.com/coder/websocket v1.8.15
