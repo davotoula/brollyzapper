@@ -8,7 +8,7 @@
 # these two are the compiler and the runtime rootfs. Refresh deliberately with
 #   docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'
 # and say in the commit message what moved (review L12).
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS build
 # The pinned digest above is the compiler, and this is what makes that true.
 # With GOTOOLCHAIN unset (default "auto") a go.mod toolchain line NEWER than the
 # image would be silently downloaded mid-build: the build would succeed, the
@@ -39,7 +39,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/brollyguard ./cmd/brollyguard
 
-FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
+FROM gcr.io/distroless/static:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 COPY --from=build /out/brollyguard /brollyguard
 USER nonroot:nonroot
 ENTRYPOINT ["/brollyguard"]
