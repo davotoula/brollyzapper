@@ -131,13 +131,14 @@ th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid var(-
    selector on .degraded, which is the system's state rather than a step the
    operator is in the middle of — the two share a look, not a meaning. */
 .notice { background: var(--raised); border-left: 4px solid var(--caution); padding: var(--gap); }
-/* display: block, because overflow does not apply to a table box and the rule
-   without it computes to `visible` and does nothing. Measured on a 390px
-   viewport with a 120-character unbreakable comment: without this the PAGE
-   scrolls sideways to 1266px, which is Wave 26's finding again; with it the
-   table scrolls and the page does not. Phone LAYOUT is 0vk.17's other thread —
-   this is the rule the plan already asked for, in the form that applies. */
-.txns, .security-table { display: block; overflow-x: auto; }
+/* A wrapper div around each scrolling table rather than `display: block` on the
+   table itself (0vk.17.5). `overflow` does not apply to a table box, and making
+   the table a block wraps it around an anonymous table box sized to its content,
+   so `table { width: 100% }` stops reaching the rows on desktop. Wrapping the
+   table in a block container with `overflow-x: auto` lets the table stay
+   `display: table` at 100% of the column width on desktop while still scrolling
+   inside the wrapper on a 390px phone viewport. */
+.table-scroll { overflow-x: auto; }
 .amount { color: var(--amount); font-variant-numeric: tabular-nums; font-weight: 600; }
 /* A qualifier on the amount, not its peer. */
 .fee { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }

@@ -16,7 +16,8 @@
 </p>
 {{end}}
 <h2>Checks</h2>
-<table class="security-table">
+<div class="table-scroll">
+<table>
   <thead><tr><th></th><th>Check</th><th>Blocks</th><th>What it is for</th></tr></thead>
   <tbody>
   {{range .Security.Checks}}
@@ -31,6 +32,7 @@
   {{end}}
   </tbody>
 </table>
+</div>
 
 <h2>What this page cannot tell you</h2>
 <p>
@@ -42,7 +44,8 @@
 </ul>
 
 <h2>Security events</h2>
-<table class="security-table">
+<div class="table-scroll">
+<table>
   <thead><tr><th>When</th><th>Event</th><th>Severity</th><th>Remote</th><th>Detail</th></tr></thead>
   <tbody>
   {{range .Security.Events}}
@@ -52,3 +55,4 @@
   {{end}}
   </tbody>
 </table>
+</div>

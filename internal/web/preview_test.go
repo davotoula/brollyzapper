@@ -49,14 +49,30 @@ func TestEveryPageRendersWithAFullFixture(t *testing.T) {
 const notCheckedTitle = "The node still honours the spend root key"
 
 func TestSecurityTablesUseHorizontalScrolling(t *testing.T) {
-	var b strings.Builder
-	if err := newRenderer(t).Render(&b, "security", fullFixture(time.Now().UTC())); err != nil {
-		t.Fatal(err)
-	}
-	for _, heading := range []string{"Checks", "Security events"} {
-		_, table, found := strings.Cut(b.String(), "<h2>"+heading+"</h2>")
-		if !found || !strings.HasPrefix(strings.TrimSpace(table), `<table class="security-table">`) {
-			t.Errorf("%s: expected the table to opt into horizontal scrolling", heading)
+	now := time.Now().UTC()
+	r := newRenderer(t)
+	for _, tc := range []struct {
+		page     string
+		headings []string
+	}{
+		{page: "security", headings: []string{"Checks", "Security events"}},
+		{page: "wallet", headings: []string{"Transactions"}},
+	} {
+		var b strings.Builder
+		if err := r.Render(&b, tc.page, fullFixture(now)); err != nil {
+			t.Fatalf("%s: %v", tc.page, err)
+		}
+		for _, heading := range tc.headings {
+			_, after, found := strings.Cut(b.String(), "<h2>"+heading+"</h2>")
+			trimmed := strings.TrimSpace(after)
+			if !found || !strings.HasPrefix(trimmed, `<div class="table-scroll">`) {
+				t.Errorf("%s (%s): expected the table after <h2>%s</h2> to be wrapped in <div class=\"table-scroll\">", tc.page, heading, heading)
+				continue
+			}
+			inner := strings.TrimSpace(strings.TrimPrefix(trimmed, `<div class="table-scroll">`))
+			if !strings.HasPrefix(inner, "<table>") {
+				t.Errorf("%s (%s): expected <table> immediately inside <div class=\"table-scroll\">", tc.page, heading)
+			}
 		}
 	}
 }

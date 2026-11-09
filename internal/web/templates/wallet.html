@@ -80,7 +80,8 @@
 {{if .Wallet.HistoryError}}
 <p class="error">{{.Wallet.HistoryError}}</p>
 {{else if .Wallet.Txns}}
-<table class="txns">
+<div class="table-scroll">
+<table>
   <thead>
     <tr><th>When</th><th>What</th><th>Sats</th><th>Details</th></tr>
   </thead>
@@ -102,6 +103,7 @@
     {{end}}
   </tbody>
 </table>
+</div>
 {{if gt .Wallet.Total (len .Wallet.Txns)}}
 <p class="more">Showing {{len .Wallet.Txns}} of {{.Wallet.Total}}.</p>
 {{end}}
