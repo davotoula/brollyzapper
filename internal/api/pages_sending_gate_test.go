@@ -249,7 +249,7 @@ func TestTheSendingPageStatesTheHardCapAndWhatIsSpokenFor(t *testing.T) {
 
 	body := h.body(t, "/sending", cookie)
 
-	for _, want := range []string{"100000.000 sats", "25000.000 sats", "any 24"} {
+	for _, want := range []string{"100000 sats", "25000 sats", "any 24"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the page does not state %q; an operator cannot see the one limit a "+
 				"compromised server cannot raise:\n%s", want, body)

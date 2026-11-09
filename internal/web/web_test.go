@@ -448,3 +448,30 @@ func TestTheSendingPageNamesWhichLimitToMoveFirst(t *testing.T) {
 		t.Error("the Sending page no longer explains WHY the two limits are ordered")
 	}
 }
+
+func TestSatsRendersWholeSatsAndNonZeroMsatRemainders(t *testing.T) {
+	renderer := newRenderer(t)
+	cases := []struct {
+		msat int64
+		want string
+	}{
+		{0, "0"},
+		{1000, "1"},
+		{1500, "1.5"},
+		{1001, "1.001"},
+		{21000000000, "21000000"},
+		{-1500, "-1.5"},
+		{-500, "-0.5"},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		data := web.PageData{Title: "Wallet", Wallet: web.WalletView{BalanceMsat: tc.msat}}
+		if err := renderer.Render(&buf, "wallet", data); err != nil {
+			t.Fatalf("Render(%d): %v", tc.msat, err)
+		}
+		want := "Balance: <strong>" + tc.want + "</strong> sats"
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("sats(%d) did not render %q in wallet balance", tc.msat, want)
+		}
+	}
+}

@@ -57,7 +57,7 @@ func TestTheSecurityPageStatesTheSpendWindowAsAMeasurement(t *testing.T) {
 
 	body := h.body(t, "/security", cookie)
 
-	for _, want := range []string{"100000.000 sats", "12000.000 sats", "24 hours", "not a check"} {
+	for _, want := range []string{"100000 sats", "12000 sats", "24 hours", "not a check"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the security page does not state %q:\n%s", want, body)
 		}

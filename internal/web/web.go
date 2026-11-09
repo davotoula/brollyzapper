@@ -754,7 +754,15 @@ func funcs() template.FuncMap {
 		// sats renders msat as sats for display. Money is msat everywhere else
 		// (§4); this is the only place it is divided, and only for humans.
 		"sats": func(msat int64) string {
-			return fmt.Sprintf("%d.%03d", msat/1000, abs(msat%1000))
+			sign := ""
+			if msat < 0 {
+				sign = "-"
+			}
+			rem := abs(msat % 1000)
+			if rem == 0 {
+				return fmt.Sprintf("%s%d", sign, abs(msat/1000))
+			}
+			return strings.TrimRight(fmt.Sprintf("%s%d.%03d", sign, abs(msat/1000), rem), "0")
 		},
 		// One timestamp format in the product. node.html already renders
 		// "2006-01-02 15:04 UTC"; the history had its own pre-rendered string

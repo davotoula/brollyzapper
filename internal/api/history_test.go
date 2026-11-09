@@ -54,10 +54,9 @@ func TestTheWalletPageShowsTheTransactionHistory(t *testing.T) {
 	if !strings.Contains(page, "Transactions") {
 		t.Fatal("the Wallet page has no transaction history")
 	}
-	// The amount, with msat precision preserved — §4: never floats for money,
-	// and never a display that quietly drops the last three digits either.
-	if !strings.Contains(page, "21.000") {
-		t.Errorf("the history does not show the amount in sats with msat precision")
+	// The amount, rendered as whole sats when the msat remainder is zero (§4).
+	if !strings.Contains(page, `<td class="amount">21</td>`) {
+		t.Errorf("the history does not show the amount in sats")
 	}
 	// The sender's own words, which o34.12 stored and nothing could reach.
 	if !strings.Contains(page, "thanks for the write-up") {
