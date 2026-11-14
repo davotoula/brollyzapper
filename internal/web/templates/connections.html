@@ -138,8 +138,9 @@ its own keys, so apps cannot be linked to each other by anyone watching the rela
             <label class="permission">
               <input type="checkbox" name="unlimited" {{if .Unlimited}}checked{{end}}>
               <strong>No limits</strong>
-              <span class="consequence">Ticking this ignores both boxes above: the app may
-              spend up to your whole allocated balance, in one payment if it chooses.</span>
+              <span class="consequence">The app may spend up to your whole allocated
+              balance, in one payment if it chooses. Clear both boxes above when you tick
+              this: a typed limit beside it is refused, and nothing is changed.</span>
             </label>
             <p class="hint">What this app has already spent this period stays spent — a
             lower budget changes what happens next, not what happened.</p>
@@ -194,9 +195,10 @@ its own keys, so apps cannot be linked to each other by anyone watching the rela
     <label class="permission">
       <input type="checkbox" name="unlimited">
       <strong>No limits</strong>
-      <span class="consequence">Ticking this ignores both boxes above: the app may spend up
-      to your whole allocated balance, in one payment if it chooses. Only tick it if you
-      would trust it with all of that.</span>
+      <span class="consequence">The app may spend up to your whole allocated balance, in
+      one payment if it chooses. Only tick it if you would trust it with all of that.
+      Clear both boxes above when you tick this: a typed limit beside it is refused, and
+      nothing is created.</span>
     </label>
   </fieldset>
 

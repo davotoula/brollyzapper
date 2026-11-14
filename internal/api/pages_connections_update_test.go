@@ -276,6 +276,32 @@ func TestTickingNoLimitsWhileTypingALimitIsRefused(t *testing.T) {
 	}
 }
 
+// The page says what ticking "No limits" beside a typed limit DOES, on both forms.
+//
+// It used to say the box "ignores both boxes above", and the handler does the
+// opposite: the test above is the refusal. The create form is where the two met
+// hardest, because it prefills both boxes with plk's defaults — an operator who
+// believed the page ticked the box, left the numbers, and was refused by a form
+// that had just told them the numbers would not matter.
+func TestTheNoLimitsBoxDoesNotClaimToIgnoreTypedLimits(t *testing.T) {
+	h := newHarness(t, func(opts *api.ServerOptions, db *store.Store) {
+		opts.Connections = db
+	})
+	cookie := h.login(t)
+	h.postForm(t, "/connections/create", cookie, url.Values{
+		"name": {"Amethyst"}, "relays": {"wss://relay.example"}, "group_balance": {"on"},
+	})
+
+	page := h.get(t, "/connections", cookie).Body.String()
+	if strings.Contains(page, "ignores both boxes") {
+		t.Error("the page says No limits ignores the typed limits; the handler refuses that form")
+	}
+	// Once per form: the edit form on the one connection, and the create form.
+	if got := strings.Count(page, "Clear both boxes above"); got != 2 {
+		t.Errorf("%d of the 2 No-limits boxes say to clear the typed limits first", got)
+	}
+}
+
 // A connection that CANNOT pay does not open its edit form asking for unbounded
 // spend.
 //

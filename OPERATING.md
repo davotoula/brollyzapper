@@ -11,6 +11,7 @@ Read the README first. This assumes the app is installed and answering.
 ## Contents
 
 - [Settings you can reach in the app](#settings-you-can-reach-in-the-app)
+- [Connections, and each app's own budget](#connections-and-each-apps-own-budget)
 - [Sending, and the two caps](#sending-and-the-two-caps)
 - [Deployment settings, which no page shows](#deployment-settings-which-no-page-shows)
 - [When a change takes effect](#when-a-change-takes-effect)
@@ -163,6 +164,72 @@ variable again does nothing, because the stored hash wins once it exists.
 Changing it bumps a session counter that is part of every cookie's signature, so **every
 existing session is invalidated** — including a copy taken from a browser no longer under your
 control. That is the point: restarting the app alone would not do it.
+
+---
+
+## Connections, and each app's own budget
+
+A connection is one wallet app paired to this node over Nostr Wallet Connect, made on the
+**Connections** page. **Spending limits are per connection**: every app you pair has its own
+budget and its own per-payment cap, with its own count of what it has spent, and nothing one
+app spends is taken from another's budget.
+
+| Limit | Default | What it bounds |
+|---|---|---|
+| Budget, sats per day | 100,000 sats | Everything this one app pays in a day |
+| Most this app may pay at once | 25,000 sats | One payment from this one app |
+
+Both apply only to a connection granted **Pay invoices**, which is unticked by default; a
+connection without it cannot spend at all, whatever the two boxes hold. Leave the boxes blank
+on one that can pay and the defaults above apply, so a paying connection is always bounded
+unless you say otherwise.
+
+**The day starts when the connection is made, not at midnight.** A connection created at 15:00
+has until 15:00 tomorrow to spend its budget. Once that has passed, the next payment starts a
+new 24 hours and counts from zero. The period is a day and nothing else; weekly and monthly
+budgets are not offered.
+
+**The budget counts fees.** A payment takes its amount plus the fee reserve from the budget
+when it is sent, is corrected to the amount and fee actually paid when it settles, and is
+given back in full if it fails. A failed payment costs the app none of its budget.
+
+**No limits** is a tick box beside the two fields. It removes both from that connection, which
+may then spend up to your whole allocated balance, in one payment if it chooses (still inside
+the guard's caps below). Only tick it for an app you would trust with all of that. Clear the
+two boxes when you tick it: the box and a typed number are opposite instructions, and the app
+refuses the form and changes nothing instead of guessing which you meant.
+
+**Changing a connection** is under *Change what this app may do* on its entry. The app stays
+paired, and a tighter limit applies to the very next payment. Editing a budget does not start
+a new day and does not forgive what was already spent, so lowering a limit can never briefly
+give an app more to spend. Unticking **Pay invoices** stops an app spending while it keeps
+working for everything else. The relays and the keys cannot be edited; changing those is a new
+pairing.
+
+**Revoking** ends one connection and leaves every other one alone. It is the answer to a lost
+phone or a leaked pairing code: the code is the key, and anyone holding it can do whatever
+that connection is allowed to do, up to its budget and no further.
+
+**When an app hits a limit** it is refused, and the connection's entry shows *Last refused*
+with the time and the reason in words. Look there first when a wallet says a payment failed
+and does not say why; some wallet apps do not show a budget refusal to the person using them.
+
+### How the limits stack
+
+A payment has to fit inside every one of these, and the smallest wins:
+
+| Limit | Scope | Where you set it |
+|---|---|---|
+| Budget, sats per day | One connection | **Connections** |
+| Most this app may pay at once | One connection | **Connections** |
+| Allocated balance (the spending ceiling) | Every connection together | **Wallet** |
+| 24-hour limit | Every connection together | **Sending** |
+| Per-payment limit | Every connection together | **Sending** |
+
+So three apps with a 100,000 sat budget each cannot spend 300,000 sats between them in a day
+on a stock install: the guard's 24-hour limit stops all of them together at 100,000, and the
+allocated balance stops them sooner if it is smaller. The per-connection budget is how you
+divide what the node may spend between your apps. It does not add to it.
 
 ---
 

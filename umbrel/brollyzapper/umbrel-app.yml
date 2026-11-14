@@ -16,6 +16,10 @@ description: >-
   your node stops honouring it immediately.
 
 
+  Each wallet app you connect gets its own daily budget and its own per-payment
+  cap, which you can change or revoke without touching your other apps.
+
+
   Sending, when you enable it, is bounded by a spending ceiling you set. That
   ceiling is bookkeeping this app applies to itself: it is not enforced by your
   node, so an attacker who compromised this app while sending was enabled could
