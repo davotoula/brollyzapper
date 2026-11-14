@@ -21,6 +21,12 @@ hands the server only the narrower ones it needs. A fresh install is **receive-o
 stays off until you complete an authorisation step the app walks you through, which bakes a
 second, separately revocable credential with a spending ceiling you choose.
 
+**Spending budgets are per app.** Every wallet app you pair is its own connection with its own
+daily budget and its own per-payment cap, so the client on your phone and a bot you are trying out
+do not share a limit. You can tighten, loosen or revoke one without touching the others, and
+without pairing anything again. Two limits for the whole app sit on top;
+[`OPERATING.md`](OPERATING.md#connections-and-each-apps-own-budget) has the full picture.
+
 ## Install on umbrelOS
 
 You need the **Lightning Node** app installed and synced — BrollyZapper reads that node's
@@ -86,6 +92,22 @@ curl -s https://zap.example.com/.well-known/lnurlp/test | jq -r '.callback, .met
 Expect a callback on your own domain, an identifier of `test@zap.example.com`, and a
 64-character hex pubkey.
 
+## Connecting a wallet app
+
+Nostr Wallet Connect needs no public domain. On **Connections**, under **Add a connection**:
+
+1. Name it after the app and the device, `Amethyst on my phone`.
+2. Tick what the app may do. **Pay invoices** is unticked by default, and ticking it is what
+   lets this connection spend.
+3. Set its **spending limits**: a budget in sats per day (100,000 unless you change it) and the
+   most it may pay at once (25,000). These belong to this connection alone.
+4. Create it, then scan the QR code with the wallet app or paste the text.
+
+Pair each app separately rather than reusing one code, so that each has its own budget and its
+own revoke button. Payments are refused until sending is turned on and the wallet has an
+allocated balance, which are the next two things to read about in
+[`OPERATING.md`](OPERATING.md#connections-and-each-apps-own-budget).
+
 ## Putting your address on the internet
 
 A lightning address needs a hostname that reaches your box over HTTPS; Nostr Wallet Connect
@@ -106,7 +128,7 @@ are in [`DEPLOYING.md`](DEPLOYING.md).
 | | |
 |---|---|
 | [`DEPLOYING.md`](DEPLOYING.md) | Exposing the address (Cloudflare Tunnel, step by step), what is public, and the plain-Docker install procedure |
-| [`OPERATING.md`](OPERATING.md) | Every setting and its default, sending and the two caps, backups, macaroon rotation, storage |
+| [`OPERATING.md`](OPERATING.md) | Every setting and its default, connections and each app's own budget, sending and the two caps, backups, macaroon rotation, storage |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Layout, the build and test gate, the architecture rules, how a change lands |
 | [`umbrel/`](umbrel/) | The App Store package and its submission notes |
