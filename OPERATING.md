@@ -4,7 +4,10 @@ The reference. [`README.md`](README.md) gets a lightning address working and
 [`DEPLOYING.md`](DEPLOYING.md) publishes it; this covers everything you touch afterwards — every
 setting, what happens when you get one wrong, backups and credential rotation.
 
-Read the README first. This assumes the app is installed and answering.
+Read the README first. This assumes the app is installed and answering. To keep
+checking that it is, point an uptime monitor at `/health`, not at the admin UI:
+it is public, cheap, and answers `200 ok` or `503`, whereas `/login` is a
+sign-in page rather than a health check.
 
 ---
 
