@@ -11,9 +11,15 @@ import (
 	"github.com/davotoula/brollyzapper/internal/web"
 )
 
+// login answers HEAD as GET, and net/http drops the body for it.
+//
+// Every page behind a `GET /...` pattern gets that from ServeMux; this handler
+// switches on the method itself, so HEAD has to be named alongside GET. A
+// signed-out uptime monitor pointed at the login page sends HEAD, and the 405
+// it used to receive reported an app that was up as down (BrollyZap-as0.4).
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		s.renderLogin(w, r, "")
 	case http.MethodPost:
 		s.attemptLogin(w, r)
