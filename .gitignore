@@ -4,6 +4,8 @@
 .beads/**/*.db
 .beads-credential-key
 .beads/proxieddb/
+# Empty lock file bd drops in the repo root while it holds the gate.
+/.beads.gate.lock
 
 # JetBrains IDEs (Android Studio, GoLand) — per-developer workspace state.
 # Ignored rather than shared: .idea carries local paths, device caches and
