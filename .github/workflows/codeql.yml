@@ -107,7 +107,7 @@ jobs:
       # the same, for the same reason: the toolchain floor in go.mod exists
       # because a stale local Go once made the gate test binaries that carried
       # 32 vulnerabilities the shipped ones did not.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           # `cache: true` caches GOCACHE as well as the module cache, and the
